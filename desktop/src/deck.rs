@@ -138,6 +138,7 @@ pub struct Deck {
     /// open on a line.
     pending: HashMap<String, Vec<DraftThread>>,
     line_editor: Option<LineEditor>,
+    drag: Option<LineDrag>,
     /// Reply boxes, by PR key, and the code thread being replied to.
     drafts: HashMap<String, Draft>,
     thread_reply: Option<ThreadReply>,
@@ -186,6 +187,7 @@ impl Deck {
             file_open: HashMap::new(),
             pending: HashMap::new(),
             line_editor: None,
+            drag: None,
             drafts: HashMap::new(),
             thread_reply: None,
             notice: None,
@@ -2560,6 +2562,7 @@ impl Render for Deck {
             .key_context("Deck")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| this.line_release(window, cx)))
             .on_action(cx.listener(Self::on_go_to_pr))
             .on_action(cx.listener(Self::on_filters))
             .on_action(cx.listener(Self::on_close_tab))
@@ -2651,6 +2654,26 @@ impl Deck {
                     }
                 }
             }
+            s if s.starts_with("select:") || s.starts_with("shift:") => {
+                // select:<file>:<from>:<to> drags over lines; shift:<file>:<ix> extends
+                let parts: Vec<usize> = s.split(':').skip(1).filter_map(|n| n.parse().ok()).collect();
+                let path = self.selected_pr().and_then(|pr| match self.diffs.get(&format!("pr:{}", pr.key())) {
+                    Some(DiffState::Files(files)) => parts.first().and_then(|&i| files.get(i)).map(|f| (pr.key(), f.file.path.clone())),
+                    _ => None,
+                });
+                if let Some((pr, path)) = path {
+                    match (s.starts_with("shift:"), parts.as_slice()) {
+                        (true, [_, ix]) => self.line_press(pr, path, *ix, true, window, cx),
+                        (false, [_, from, to]) => {
+                            self.line_press(pr.clone(), path.clone(), *from, false, window, cx);
+                            self.line_drag(pr, path, *to, cx);
+                            self.line_release(window, cx);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "suggest" => self.suggest_change_for_test(window, cx),
             s if s.starts_with("linedraft:") => {
                 if let Some(ed) = self.line_editor.as_ref() {
                     let text = s[10..].to_string();

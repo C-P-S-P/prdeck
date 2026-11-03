@@ -178,7 +178,7 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
       latestReviews(first: 20) { nodes { author { login } state } }
       reviews(last: 50) { nodes { author { login } state body submittedAt } }
       reviewThreads(last: 50) { nodes {
-        id isResolved isOutdated path line diffSide
+        id isResolved isOutdated path line diffSide startLine startDiffSide
         comments(first: 30) { nodes { author { login } body createdAt diffHunk } }
       } }
     }
@@ -278,6 +278,8 @@ type detailNode struct {
 		Nodes []struct {
 			ID         string `json:"id"`
 			DiffSide   string `json:"diffSide"`
+			StartLine  int    `json:"startLine"`
+			StartSide  string `json:"startDiffSide"`
 			IsResolved bool   `json:"isResolved"`
 			IsOutdated bool   `json:"isOutdated"`
 			Path       string `json:"path"`
@@ -396,7 +398,7 @@ func (n *detailNode) toDetail() *Detail {
 		first := t.Comments.Nodes[0]
 		ev := Event{
 			Kind: "thread", Author: loginOf(first.Author), Body: first.Body, At: first.CreatedAt,
-			Path: t.Path, Line: t.Line, DiffHunk: first.DiffHunk, Resolved: t.IsResolved, Outdated: t.IsOutdated, ThreadID: t.ID, Side: t.DiffSide,
+			Path: t.Path, Line: t.Line, DiffHunk: first.DiffHunk, Resolved: t.IsResolved, Outdated: t.IsOutdated, ThreadID: t.ID, Side: t.DiffSide, StartLine: t.StartLine, StartSide: t.StartSide,
 		}
 		for _, c := range t.Comments.Nodes[1:] {
 			ev.Replies = append(ev.Replies, Reply{Author: loginOf(c.Author), Body: c.Body, At: c.CreatedAt})

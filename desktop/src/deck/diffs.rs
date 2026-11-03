@@ -10,7 +10,7 @@ use crate::diff::{self, Kind, Line};
 /// A file's change, parsed.
 pub(super) struct ParsedFile {
     pub(super) file: FileDiff,
-    lines: Vec<Line>,
+    pub(super) lines: Vec<Line>,
 }
 
 pub(super) enum DiffState {
@@ -472,7 +472,8 @@ impl Deck {
             let shown = f.lines.len().min(FILE_LIMIT);
             let mut cards = review.map(|d| self.inline_cards(d, &f.file.path, &f.lines[..shown], cx)).unwrap_or_default();
             let click = review.map(|d| Click { deck: cx.entity().downgrade(), pr: d.pr.key(), path: f.file.path.clone(), file: i });
-            let mut rows: Vec<AnyElement> = diff_blocks(&f.lines[..shown], &mut cards, click.as_ref());
+            let sel = review.and_then(|d| self.selection(&d.pr.key(), &f.file.path));
+            let mut rows: Vec<AnyElement> = diff_blocks(&f.lines[..shown], &mut cards, click.as_ref(), sel);
             if f.lines.len() > shown {
                 rows.push(
                     div()
@@ -497,7 +498,7 @@ impl Deck {
     }
 }
 
-/// Clicking a line number opens a comment box on that line.
+/// Pressing a line number starts a comment there; dragging selects more lines.
 #[derive(Clone)]
 struct Click {
     deck: WeakEntity<Deck>,
@@ -506,19 +507,29 @@ struct Click {
     file: usize,
 }
 
+/// Height of one diff line, and width of the line-number gutter that takes clicks.
+const ROW: f32 = 19.;
+const GUTTER: f32 = 96.;
+
 /// Lines in blocks: each run of lines of one kind is a single text element with its
 /// line numbers inside it, so a long diff costs a few dozen elements, not thousands.
-/// A run ends at a line with comments under it, and the comment cards follow it.
-fn diff_blocks(lines: &[Line], cards: &mut std::collections::HashMap<usize, Vec<AnyElement>>, click: Option<&Click>) -> Vec<AnyElement> {
+/// A run ends where comments sit under a line, and where a selection starts or ends.
+fn diff_blocks(
+    lines: &[Line],
+    cards: &mut std::collections::HashMap<usize, Vec<AnyElement>>,
+    click: Option<&Click>,
+    sel: Option<(usize, usize)>,
+) -> Vec<AnyElement> {
+    let picked = |i: usize| sel.is_some_and(|(a, b)| i >= a && i <= b);
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let kind = lines[i].kind;
         let mut j = i + 1;
-        while j < lines.len() && lines[j].kind == kind && kind != Kind::Hunk && !cards.contains_key(&(j - 1)) {
+        while j < lines.len() && lines[j].kind == kind && kind != Kind::Hunk && !cards.contains_key(&(j - 1)) && picked(j) == picked(i) {
             j += 1;
         }
-        out.push(diff_block(kind, i, &lines[i..j], click));
+        out.push(diff_block(kind, i, &lines[i..j], click, picked(i)));
         if let Some(c) = cards.remove(&(j - 1)) {
             out.extend(c);
         }
@@ -527,20 +538,26 @@ fn diff_blocks(lines: &[Line], cards: &mut std::collections::HashMap<usize, Vec<
     out
 }
 
-fn diff_block(kind: Kind, start: usize, lines: &[Line], click: Option<&Click>) -> AnyElement {
+fn row_at(y: Pixels, b: Bounds<Pixels>, n: usize) -> usize {
+    let r = ((y - b.origin.y) / px(ROW)).max(0.) as usize;
+    r.min(n.saturating_sub(1))
+}
+
+fn diff_block(kind: Kind, start: usize, lines: &[Line], click: Option<&Click>, selected: bool) -> AnyElement {
     let (bg, fg, mark) = match kind {
         Kind::Hunk => (0x1f2633, BLUE, ""),
-        Kind::Add => (0x1d2f22, 0xb5dca8, "+"),
-        Kind::Del => (0x36202a, 0xf2b0b0, "−"),
+        Kind::Add => (if selected { 0x3b4a2a } else { 0x1d2f22 }, 0xb5dca8, "+"),
+        Kind::Del => (if selected { 0x4d3428 } else { 0x36202a }, 0xf2b0b0, "−"),
         Kind::Note => (BG_SIDE, DIM, ""),
-        Kind::Context => (BG_SIDE, TEXT_SOFT, " "),
+        Kind::Context => (if selected { 0x37331f } else { BG_SIDE }, TEXT_SOFT, " "),
     };
     let num = |n: Option<u32>| n.map(|n| format!("{n:>5}")).unwrap_or_else(|| "     ".to_string());
     let mut text = String::new();
     let mut dim: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
-    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut targets: Vec<(u32, &'static str)> = Vec::new();
-    let number_style = HighlightStyle { color: Some(rgb(0x5d636e).into()), ..Default::default() };
+    let number_style = HighlightStyle {
+        color: Some(rgb(if selected { YELLOW } else { 0x5d636e }).into()),
+        ..Default::default()
+    };
     for (k, l) in lines.iter().enumerate() {
         if k > 0 {
             text.push('\n');
@@ -552,37 +569,49 @@ fn diff_block(kind: Kind, start: usize, lines: &[Line], click: Option<&Click>) -
         }
         if !matches!(kind, Kind::Hunk | Kind::Note) {
             dim.push((begin..text.len(), number_style));
-            if let Some((side, n)) = inline::anchor(l) {
-                ranges.push(begin..text.len());
-                targets.push((n, side));
-            }
             text.push_str(&format!(" {mark} {}", l.text));
         }
     }
-    let styled = StyledText::new(text).with_highlights(dim);
-    let content = match click {
-        Some(c) if !ranges.is_empty() => {
-            let c = c.clone();
-            InteractiveText::new(ElementId::Name(format!("dl-{}-{start}", c.file).into()), styled)
-                .on_click(ranges, move |ix, window, cx| {
-                    let (line, side) = targets[ix];
-                    let (pr, path) = (c.pr.clone(), c.path.clone());
-                    let _ = c.deck.update(cx, |this, cx| this.open_line_editor(pr, path, line, side, window, cx));
-                })
-                .into_any_element()
-        }
-        _ => styled.into_any_element(),
-    };
+    let gutter = click.filter(|_| matches!(kind, Kind::Add | Kind::Del | Kind::Context)).map(|c| {
+        let bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
+        let (b1, b2, b3) = (bounds.clone(), bounds.clone(), bounds);
+        let (c1, c2) = (c.clone(), c.clone());
+        let n = lines.len();
+        div()
+            .id(ElementId::Name(format!("gutter-{}-{start}", c.file).into()))
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(px(GUTTER))
+            .cursor_pointer()
+            .child(canvas(move |b, _, _| b1.set(b), |_, _, _, _| {}).size_full())
+            .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, cx| {
+                let ix = start + row_at(ev.position.y, b2.get(), n);
+                let (pr, path, shift) = (c1.pr.clone(), c1.path.clone(), ev.modifiers.shift);
+                let _ = c1.deck.update(cx, |this, cx| this.line_press(pr, path, ix, shift, window, cx));
+                cx.stop_propagation();
+            })
+            .on_mouse_move(move |ev: &MouseMoveEvent, _, cx| {
+                if ev.pressed_button == Some(MouseButton::Left) {
+                    let ix = start + row_at(ev.position.y, b3.get(), n);
+                    let (pr, path) = (c2.pr.clone(), c2.path.clone());
+                    let _ = c2.deck.update(cx, |this, cx| this.line_drag(pr, path, ix, cx));
+                }
+            })
+    });
     div()
+        .relative()
         .w_full()
         .bg(rgb(bg))
         .text_color(rgb(fg))
         .font_family(MONO)
         .text_size(px(12.))
-        .line_height(px(19.))
+        .line_height(px(ROW))
         .whitespace_nowrap()
         .when(kind == Kind::Hunk, |d| d.py(px(2.)))
-        .child(content)
+        .child(StyledText::new(text).with_highlights(dim))
+        .children(gutter)
         .into_any_element()
 }
 

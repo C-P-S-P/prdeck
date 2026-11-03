@@ -300,3 +300,32 @@ func TestReviewWithLineComments(t *testing.T) {
 		t.Errorf("thread should carry its diff context: %q", got[0].DiffHunk)
 	}
 }
+
+func TestReviewOnSeveralLines(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	var pr github.PR
+	for _, p := range res.PRs {
+		if p.Number == 4807 {
+			pr = p
+		}
+	}
+	var d github.Detail
+	_ = json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d)
+	var files []github.FileDiff
+	_ = json.Unmarshal(c.call("prDiff", map[string]any{"pr": pr}).Result, &files)
+	backwards := []map[string]any{{"path": files[0].Path, "line": 13, "side": "RIGHT", "startLine": 15, "startSide": "RIGHT", "body": "x"}}
+	if r := c.call("review", map[string]any{"prId": d.NodeID, "event": "COMMENT", "threads": backwards}); r.Error == nil {
+		t.Error("a range that ends before it starts should be refused")
+	}
+	ranged := []map[string]any{{"path": files[0].Path, "line": 15, "side": "RIGHT", "startLine": 13, "startSide": "LEFT", "body": "These go together"}}
+	if r := c.call("review", map[string]any{"prId": d.NodeID, "event": "COMMENT", "threads": ranged}); r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	_ = json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d)
+	last := d.Timeline[len(d.Timeline)-1]
+	if last.Kind != "thread" || last.StartLine != 13 || last.StartSide != "LEFT" || last.Line != 15 {
+		t.Errorf("ranged thread: %+v", last)
+	}
+}

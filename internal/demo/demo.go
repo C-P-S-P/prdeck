@@ -161,6 +161,7 @@ func (b *Backend) Review(_ context.Context, prID, event, body string, threads []
 		}
 		d.Timeline = append(d.Timeline, github.Event{
 			Kind: "thread", Author: "you", Body: t.Body, At: time.Now(), Path: t.Path, Line: t.Line, Side: t.Side,
+			StartLine: t.StartLine, StartSide: t.StartSide,
 			DiffHunk: hunk, ThreadID: fmt.Sprintf("demo-thread-%d-new-%d-%d", d.Number, len(d.Timeline), i),
 		})
 	}
