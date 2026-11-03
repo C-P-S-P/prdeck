@@ -224,6 +224,8 @@ func TestMergeWhenReady(t *testing.T) {
 		{"ready: merges the checked commit now", with(func(d *github.Detail) { d.MergeStatus = "CLEAN" }), nil, "merge SQUASH head", "Merged acme/tool#7 (squash and merge): it was ready", ""},
 		{"ready with hooks", with(func(d *github.Detail) { d.MergeStatus, d.MergeMethods = "HAS_HOOKS", []string{"REBASE"} }), nil, "merge REBASE head", "(rebase and merge)", ""},
 		{"checks not passing, none required", with(func(d *github.Detail) { d.MergeStatus = "UNSTABLE" }), nil, "", "", "none of them is required"},
+		{"conflicts", with(func(d *github.Detail) { d.MergeStatus, d.BaseRefName = "DIRTY", "main" }), nil, "", "", "acme/tool#7 has conflicts with main: rebase it first"},
+		{"made a draft since the list loaded", with(func(d *github.Detail) { d.MergeStatus = "DRAFT" }), nil, "", "", "is a draft"},
 		{"repo without auto-merge", with(func(d *github.Detail) { d.AutoMergeAllowed = false }), nil, "", "", `does not allow auto-merge (an admin can turn on "Allow auto-merge"`},
 		{"ready in a repo without auto-merge still merges", with(func(d *github.Detail) { d.AutoMergeAllowed, d.MergeStatus = false, "CLEAN" }), nil, "merge SQUASH head", "Merged", ""},
 		{"already on", with(func(d *github.Detail) { d.AutoMerge = &github.AutoMerge{Method: "MERGE", By: "mlin"} }), nil, "", "already on for acme/tool#7 (merge, turned on by mlin)", ""},

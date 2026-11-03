@@ -332,7 +332,12 @@ func MergeWhenReady(p Plan, d *github.Detail, enable func(method string) error, 
 		return Result{Plan: p, Output: fmt.Sprintf("Merged %s (%s): it was ready, so there was nothing to wait for", ref, MergeWord(method))}
 	case d.MergeStatus == "UNSTABLE":
 		// GitHub would merge now, and refuses auto-merge, though checks are not green.
-		return refuse("checks on " + ref + " are failing or still running, but none of them is required, so GitHub has nothing to wait for. Try again once they pass, or merge it on GitHub")
+		return refuse("checks on " + ref + " are failing or still running, and none of them is required, so GitHub cannot wait for them. Try again once they pass")
+	case d.MergeStatus == "DIRTY":
+		// Auto-merge could never finish; say what to do in plain words.
+		return refuse(ref + " has conflicts with " + d.BaseRefName + ": rebase it first")
+	case d.MergeStatus == "DRAFT":
+		return refuse(ref + " is a draft: mark it ready for review first")
 	case !d.AutoMergeAllowed:
 		return refuse(d.Repo + " does not allow auto-merge (an admin can turn on \"Allow auto-merge\" in its settings). Merge it on GitHub once it is ready")
 	}
