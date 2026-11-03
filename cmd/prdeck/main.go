@@ -13,12 +13,14 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 
 	"github.com/patelchaitany/prdeck/internal/cache"
 	"github.com/patelchaitany/prdeck/internal/config"
 	"github.com/patelchaitany/prdeck/internal/core"
 	"github.com/patelchaitany/prdeck/internal/demo"
 	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/patelchaitany/prdeck/internal/termout"
 	"github.com/patelchaitany/prdeck/internal/tui"
 )
 
@@ -83,8 +85,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		_, err = tea.NewProgram(tui.New(demo.New(cfg)), programOptions(cfg)...).Run()
-		return err
+		return runUI(tui.New(demo.New(cfg)), cfg)
 	}
 
 	cfg, err := config.Load(config.DefaultPath())
@@ -99,8 +100,7 @@ func run(args []string) error {
 
 	switch cmd {
 	case "":
-		_, err := tea.NewProgram(tui.New(svc), programOptions(cfg)...).Run()
-		return err
+		return runUI(tui.New(svc), cfg)
 	case "list":
 		return list(svc, cfg, strings.Join(args[1:], " "))
 	default:
@@ -108,12 +108,24 @@ func run(args []string) error {
 	}
 }
 
-func programOptions(cfg *config.Config) []tea.ProgramOption {
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
+// runUI runs the dashboard. Frames go through termout, so a terminal that stops
+// reading for a while (or a recorder sitting in between) cannot also stop prdeck from
+// reading keys; redraws are capped at 30 a second.
+func runUI(model tea.Model, cfg *config.Config) error {
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithFPS(30)}
 	if cfg.UI.MouseOn() {
 		opts = append(opts, tea.WithMouseCellMotion())
 	}
-	return opts
+	var out *termout.Writer
+	if term.IsTerminal(os.Stdout.Fd()) {
+		out = termout.New(os.Stdout)
+		opts = append(opts, tea.WithOutput(out))
+	}
+	_, err := tea.NewProgram(model, opts...).Run()
+	if out != nil {
+		out.Close()
+	}
+	return err
 }
 
 func list(svc *core.Service, cfg *config.Config, query string) error {

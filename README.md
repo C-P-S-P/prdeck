@@ -62,6 +62,8 @@ PR descriptions and comments render like on GitHub, inside the pane:
 
 With mouse support on, hold Option (or Shift, depending on your terminal) to select text. Set `ui.mouse: false` to turn it off.
 
+prdeck stays responsive when the terminal falls behind: screen updates are buffered and written separately from input, at most 30 a second, and padding is sent as compact erase codes. If a terminal tab still freezes (seen with Ghostty 1.4.0 and Cursor's terminal recorder together during fast scrolling), close the tab, and set `ui.mouse: false` until Ghostty 1.4.1.
+
 Commands that rewrite history (rebase, abort, push) show the exact command first and run on `enter`; `y` copies it, `esc` cancels.
 
 ### Where commands run
