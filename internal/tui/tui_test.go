@@ -29,6 +29,7 @@ type fakeBackend struct {
 	noClone  map[string]bool
 	found    []string
 	saved    map[string]string
+	loaded   int // Detail calls
 }
 
 func (f *fakeBackend) Config() *config.Config { return f.cfg }
@@ -42,6 +43,7 @@ func (f *fakeBackend) Search(_ context.Context, q string) ([]github.PR, error) {
 }
 func (f *fakeBackend) CachedDetail(github.PR) (*github.Detail, bool) { return nil, false }
 func (f *fakeBackend) Detail(_ context.Context, pr github.PR) (*github.Detail, error) {
+	f.loaded++
 	return &github.Detail{
 		PR: pr, Body: "## Summary\nAdds a `StreamPushSource`.", Commits: 6, ChangedFiles: 14,
 		Checks:    []github.Check{{Name: "lint", State: "SUCCESS"}, {Name: "integration", State: "FAILURE", URL: "https://github.com/northwind/registry/actions/runs/5/job/9", RunID: 5}},
@@ -74,6 +76,12 @@ func (f *fakeBackend) Prepare(c config.Command, pr github.PR, input string) (cor
 			return core.Plan{}, errors.New(why)
 		}
 		return core.RerunPlan(c, pr, nil), nil
+	}
+	if core.Writes(c.Action) {
+		if ok, why := core.Allowed(c, pr, "you"); !ok {
+			return core.Plan{}, errors.New(why)
+		}
+		return core.WritePlan(c, pr, nil, input), nil
 	}
 	folder, err := f.ResolveFolder(pr, c.Worktree)
 	if err != nil {
@@ -226,6 +234,83 @@ func TestFailingChecksLinkAndRerun(t *testing.T) {
 	m = send(t, m, key("F"))
 	if len(be.ran) != 1 || !strings.Contains(m.flash, "only runs on PRs that are ci failed") {
 		t.Errorf("re-run on a green PR: ran %d, flash %q", len(be.ran), m.flash)
+	}
+}
+
+func TestApproveAsksFirstThenReloads(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("a")) // #4821 is yours
+	if m.plan != nil || !strings.Contains(m.flash, "Approve only runs on other people's PRs") {
+		t.Fatalf("approving your own PR: plan %+v, flash %q", m.plan, m.flash)
+	}
+	m = send(t, m, key("j"))
+	m = send(t, m, key("j")) // #77, mlin's
+	m = send(t, m, key("a"))
+	if m.plan == nil || m.plan.Script != "gh pr review 77 --approve -R northwind/sdk" || len(be.ran) != 0 {
+		t.Fatalf("approve should show what it does first: %+v", m.plan)
+	}
+	before := be.loaded
+	m = send(t, m, key("enter"))
+	if len(be.ran) != 1 || be.ran[0].Action != "approve" || m.out == nil || !m.out.ok {
+		t.Fatalf("ran = %+v, out = %+v", be.ran, m.out)
+	}
+	if be.loaded == before || m.fetching[be.ran[0].PR.Key()] {
+		t.Error("the PR was not loaded again after approving")
+	}
+}
+
+func TestReviewTextAsked(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("x")) // your own PR: refused before any typing
+	if m.prompt != nil || !strings.Contains(m.flash, "other people's PRs") {
+		t.Fatalf("prompt %v, flash %q", m.prompt, m.flash)
+	}
+	m = send(t, m, key("L")) // the path prompt has its own hint
+	m = send(t, m, key("esc"))
+	m = send(t, m, key("i"))
+	if m.prompt == nil || !strings.Contains(ansi.Strip(m.View()), "Comment:") {
+		t.Fatal("comment should ask for its text")
+	}
+	if strings.Contains(ansi.Strip(m.View()), "folder name") {
+		t.Error("the comment prompt kept the path prompt's hint")
+	}
+	for _, r := range "rebased, ptal" {
+		m = send(t, m, key(string(r)))
+	}
+	m = send(t, m, key("enter"))
+	if len(be.ran) != 1 || be.ran[0].Action != "comment" || be.ran[0].Input != "rebased, ptal" {
+		t.Errorf("ran = %+v", be.ran)
+	}
+}
+
+func TestMergeWhenReadyAndAutoMergeShown(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("M"))
+	if m.plan == nil || m.plan.Action != "automerge" || !strings.Contains(m.plan.Script, "gh pr merge 4821 --auto") || len(be.ran) != 0 {
+		t.Fatalf("merge when ready should ask first: %+v", m.plan)
+	}
+	m = send(t, m, key("esc"))
+	m = send(t, m, key("j"))
+	m = send(t, m, key("j")) // #77 is a draft
+	m = send(t, m, key("M"))
+	if m.plan != nil || !strings.Contains(m.flash, "ready for review") {
+		t.Errorf("draft: plan %+v, flash %q", m.plan, m.flash)
+	}
+
+	pr, _ := m.selected()
+	d, _ := m.be.Detail(context.Background(), pr)
+	d.AutoMerge = &github.AutoMerge{Method: "SQUASH", By: "mlin"}
+	nm, _ := m.Update(detailMsg{key: pr.Key(), d: d})
+	m = nm.(Model)
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "merge    auto-merge on · squash and merge · by mlin") {
+		t.Errorf("auto-merge not shown:\n%s", v)
+	}
+	m = send(t, m, key("?"))
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "Merge when ready") || !strings.Contains(v, "approves the PR on GitHub") {
+		t.Errorf("help should list the review commands:\n%s", v)
 	}
 }
 

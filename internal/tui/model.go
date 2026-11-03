@@ -445,6 +445,11 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if r.Err == nil && r.Plan.Action != "open" && r.Plan.Action != "browse" {
 			cmds = append(cmds, m.searchCmd())
 		}
+		if r.Err == nil && core.Writes(r.Plan.Action) {
+			// Load the PR again, so the new review, comment or auto-merge shows.
+			m.fetching[r.Plan.PR.Key()] = true
+			cmds = append(cmds, m.detailCmd(r.Plan.PR))
+		}
 		return m, tea.Batch(cmds...)
 
 	case clonesMsg:
@@ -690,9 +695,15 @@ func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd
 	if c.Action == "setpath" {
 		return m.askPath(pr.Repo)
 	}
+	if ok, why := core.Allowed(*c, pr, m.be.Viewer()); !ok {
+		// Say so before asking for text that could not be used.
+		cmd := m.setFlash("! " + why)
+		return m, cmd
+	}
 	if c.Prompt != "" && input == "" {
 		m.prompt = c
 		m.promptIn.Prompt = c.Prompt + ": "
+		m.promptIn.Placeholder = "" // the path prompt's hint would stay otherwise
 		m.promptIn.SetValue("")
 		return m, m.promptIn.Focus()
 	}

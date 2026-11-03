@@ -312,6 +312,9 @@ func (m Model) detailContent(w int) string {
 			}
 			line(wrap.Render(sSoft.Render("reviews  ") + strings.Join(rs, sDim.Render(" · "))))
 		}
+		if a := d.AutoMerge; a != nil {
+			line(wrap.Render(sSoft.Render("merge    ") + sGreen.Render("auto-merge on") + sSoft.Render(" · "+core.MergeWord(a.Method)+" · by "+a.By)))
+		}
 		if len(d.Labels) > 0 {
 			line(wrap.Render(sSoft.Render("labels   ") + sPurple.Render(strings.Join(d.Labels, ", "))))
 		}
@@ -453,7 +456,7 @@ func (m Model) helpContent(w int) string {
 		line(sSoft.Render("the wheel scrolls the pane under it. Hold Option (or Shift) to select text."))
 	}
 	line("")
-	line(sBold.Render("Commands") + sDim.Render("  (run in the PR's folder)"))
+	line(sBold.Render("Commands") + sDim.Render("  (run in the PR's folder, or on GitHub)"))
 	for _, c := range m.cfg.Commands {
 		k := c.Key
 		if k == "" {
@@ -467,6 +470,14 @@ func (m Model) helpContent(w int) string {
 			what = "opens your clone in " + m.cfg.Editor.Default
 		case c.Action == "browse":
 			what = "opens the PR in your browser"
+		case c.Action == "approve":
+			what = "approves the PR on GitHub"
+		case c.Action == "request_changes":
+			what = "asks what should change, then requests changes"
+		case c.Action == "comment":
+			what = "asks for a comment, then posts it on the PR"
+		case c.Action == "automerge":
+			what = "turns on auto-merge (merges now if it is ready)"
 		case c.Action == "rerun":
 			what = "re-runs failed GitHub Actions jobs"
 		case c.Action == "setpath":
