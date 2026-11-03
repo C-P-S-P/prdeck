@@ -2,8 +2,12 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -298,5 +302,75 @@ func TestReviewWithLineComments(t *testing.T) {
 	}
 	if !strings.HasPrefix(got[0].DiffHunk, "@@") {
 		t.Errorf("thread should carry its diff context: %q", got[0].DiffHunk)
+	}
+}
+
+// panicky is the demo backend with a search that panics.
+type panicky struct{ *demo.Backend }
+
+func (panicky) Search(context.Context, string) ([]github.PR, error) { panic("boom") }
+
+func TestAPanicFailsOnlyItsRequest(t *testing.T) {
+	cfg, err := config.Load(t.TempDir() + "/none.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	go func() { _ = Serve(panicky{demo.New(cfg)}, Info{Version: "test", Demo: true}, inR, outW); outW.Close() }()
+	t.Cleanup(func() { inW.Close() })
+	c := &client{t: t, in: inW, out: bufio.NewScanner(outR)}
+	if r := c.call("search", map[string]any{"query": "involves:@me"}); r.Error == nil || !strings.Contains(r.Error.Message, "boom") {
+		t.Fatalf("search: %+v", r.Error)
+	}
+	if r := c.call("hello", nil); r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+
+	// The demo's stash used to read a clone that a repo without one lacks.
+	c = start(t)
+	plan := map[string]any{"title": "Check out", "pr": map[string]any{"repo": "upstream/datakit", "number": 1}}
+	if r := c.call("execute", map[string]any{"plan": plan, "changes": "stash"}); r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+}
+
+func TestInputClosingStopsAWaitingSignIn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in gh is a shell script")
+	}
+	// A gh that shows a code, then waits for an approval that never comes.
+	bin := t.TempDir()
+	gh := "#!/bin/sh\necho 'First copy your one-time code: ABCD-1234'\necho 'Open https://github.com/login/device'\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(gh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cfg, err := config.Load(t.TempDir() + "/none.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	served := make(chan struct{})
+	go func() { _ = Serve(demo.New(cfg), Info{Version: "test"}, inR, outW); close(served) }()
+	sc := bufio.NewScanner(outR)
+	c := &client{t: t, in: inW, out: sc}
+	if r := c.call("loginStart", nil); r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	if _, err := io.WriteString(inW, `{"id": 9, "method": "loginWait"}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // let loginWait start waiting
+	inW.Close()
+	go func() {
+		for sc.Scan() { // loginWait's answer
+		}
+	}()
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prdeck serve kept running after its input closed, waiting on gh")
 	}
 }

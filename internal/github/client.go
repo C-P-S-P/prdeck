@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	ghconfig "github.com/cli/go-gh/v2/pkg/config"
 )
 
 // Client runs PR Deck's GraphQL queries. Auth comes from gh (`gh auth login`) or GH_TOKEN.
@@ -22,6 +23,9 @@ type Client struct {
 }
 
 func NewClient() (*Client, error) {
+	// go-gh reads gh's config once per process; read it again so a login made
+	// since then (Connect after sign-in) is the one used.
+	_ = ghconfig.Reload(nil)
 	opts := api.ClientOptions{Timeout: 30 * time.Second}
 	gql, err := api.NewGraphQLClient(opts)
 	if err != nil {

@@ -282,6 +282,9 @@ func (b *Backend) Setup(_ context.Context, p core.Plan) (string, error) {
 		out = append(out, "Created worktree "+p.Folder.Path, "Switched to a new branch '"+pr.HeadRefName+"'")
 	}
 	c := b.clones[pr.Repo]
+	if c == nil { // no pretend clone to change
+		return strings.Join(out, "\n"), nil
+	}
 	if strings.Contains(p.Pre, "git stash") {
 		out = append(out, "Saved working directory and index state On "+c.branch+": prdeck: before "+strings.ToLower(p.Title)+" on #"+strconv.Itoa(pr.Number))
 		c.changes = nil

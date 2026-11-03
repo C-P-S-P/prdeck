@@ -4,10 +4,13 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/cli/go-gh/v2/pkg/auth"
 )
 
 type roundTrip func(*http.Request) (*http.Response, error)
@@ -46,5 +49,27 @@ func TestSearchSkipsPRsInOrgsTheLoginCannotSee(t *testing.T) {
 	c = answering(t, `{"data":{"viewer":{"login":"me"},"search":{"nodes":[]}},"errors":[{"type":"INVALID","message":"bad query"}]}`)
 	if _, _, err := c.Search(context.Background(), "involves:@me", 10); err == nil {
 		t.Error("other GraphQL errors should still fail the search")
+	}
+}
+
+func TestNewClientSeesALoginMadeAfterStart(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GH_CONFIG_DIR", dir)
+	t.Setenv("GH_PATH", filepath.Join(dir, "no-gh")) // never ask the real gh
+	t.Setenv("GH_HOST", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	login := func(token string) {
+		if err := os.WriteFile(filepath.Join(dir, "hosts.yml"), []byte("github.com:\n    oauth_token: "+token+"\n    user: me\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewClient(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	login("old")
+	login("new")
+	if token, _ := auth.TokenFromEnvOrConfig("github.com"); token != "new" {
+		t.Errorf("token after signing in again = %q, want new", token)
 	}
 }
