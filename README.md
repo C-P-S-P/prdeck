@@ -26,7 +26,7 @@ Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/sc
 Needs Go 1.26+, `git`, and the GitHub CLI signed in (`gh auth login`). prdeck uses your gh login; it never stores a token.
 
 ```bash
-git clone https://github.com/C-P-S-P/prdeck && cd prdeck
+git clone https://github.com/MasterPushers/prdeck && cd prdeck
 go build -o ~/.local/bin/prdeck ./cmd/prdeck
 ```
 

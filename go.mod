@@ -1,4 +1,4 @@
-module github.com/C-P-S-P/prdeck
+module github.com/MasterPushers/prdeck
 
 go 1.26.7
 

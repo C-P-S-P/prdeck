@@ -58,7 +58,7 @@ func DefaultCommands() []Command {
 
 // Example is written by `prdeck config init`.
 const Example = `# PR Deck config. Everything here is optional; delete what you don't change.
-# Docs: https://github.com/C-P-S-P/prdeck#configuration
+# Docs: https://github.com/MasterPushers/prdeck#configuration
 
 github:
   refresh: 2m          # how often the PR list refreshes

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/config"
 )
 
 // First-run setup for the desktop app: sign in to GitHub (through gh, so prdeck never

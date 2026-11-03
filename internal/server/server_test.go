@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/C-P-S-P/prdeck/internal/config"
-	"github.com/C-P-S-P/prdeck/internal/demo"
-	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/demo"
+	"github.com/MasterPushers/prdeck/internal/github"
 )
 
 // client runs a demo server and sends it requests one at a time.

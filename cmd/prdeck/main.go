@@ -15,14 +15,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
 
-	"github.com/C-P-S-P/prdeck/internal/cache"
-	"github.com/C-P-S-P/prdeck/internal/config"
-	"github.com/C-P-S-P/prdeck/internal/core"
-	"github.com/C-P-S-P/prdeck/internal/demo"
-	"github.com/C-P-S-P/prdeck/internal/github"
-	"github.com/C-P-S-P/prdeck/internal/server"
-	"github.com/C-P-S-P/prdeck/internal/termout"
-	"github.com/C-P-S-P/prdeck/internal/tui"
+	"github.com/MasterPushers/prdeck/internal/cache"
+	"github.com/MasterPushers/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/core"
+	"github.com/MasterPushers/prdeck/internal/demo"
+	"github.com/MasterPushers/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/server"
+	"github.com/MasterPushers/prdeck/internal/termout"
+	"github.com/MasterPushers/prdeck/internal/tui"
 )
 
 var version = "dev"
