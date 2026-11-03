@@ -9,7 +9,7 @@ cargo build --release --manifest-path "$here/Cargo.toml"
 app="$here/dist/PR Deck.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
-cp "$here/target/release/prdeck-desktop" "$app/Contents/MacOS/PR Deck"
+cp "${CARGO_TARGET_DIR:-$here/target}/release/prdeck-desktop" "$app/Contents/MacOS/PR Deck"
 (cd "$root" && go build -o "$app/Contents/MacOS/prdeck" ./cmd/prdeck)
 version="$(grep -m1 '^version' "$here/Cargo.toml" | cut -d'"' -f2)"
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -26,6 +26,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>PR Deck opens terminal editors in Terminal.</string>
 </dict>
 </plist>
 PLIST

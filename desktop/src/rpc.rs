@@ -168,9 +168,14 @@ impl Rpc {
 /// PATH from the user's login shell. An app opened from Finder or the Dock gets a bare
 /// PATH without Homebrew, so `gh` and `git` would not be found; Zed does the same.
 fn login_path() -> Option<String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    shell_path(&std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()))
+}
+
+/// PATH as `shell` sets it up for a login. Dotfiles can print too (`eval "$(ssh-agent
+/// -s)"` prints "Agent pid 1234"), so PATH is read from between markers.
+fn shell_path(shell: &str) -> Option<String> {
     let mut child = Command::new(shell)
-        .args(["-l", "-c", "printf '%s' \"$PATH\""])
+        .args(["-l", "-c", "printf '_PRDECK_PATH_%s_PRDECK_PATH_' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -185,14 +190,15 @@ fn login_path() -> Option<String> {
             }
             _ => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return None;
             }
         }
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let out = out.trim();
-    (!out.is_empty()).then(|| out.to_string())
+    let path = out.split("_PRDECK_PATH_").nth(1)?.trim();
+    (!path.is_empty()).then(|| path.to_string())
 }
 
 /// The prdeck binary: $PRDECK_BIN, else one next to this app (inside the .app bundle),
@@ -211,4 +217,24 @@ fn sidecar() -> PathBuf {
         return built.into();
     }
     "prdeck".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_path;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn login_path_ignores_what_dotfiles_print() {
+        // A login shell whose dotfiles print before and after the command.
+        let sh = std::env::temp_dir().join(format!("prdeck-test-shell-{}", std::process::id()));
+        std::fs::write(&sh, "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n").unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS checks a new executable the first time it runs, which can take longer
+        // than shell_path waits; do that first.
+        let _ = std::process::Command::new(&sh).output();
+        let path = shell_path(sh.to_str().unwrap());
+        let _ = std::fs::remove_file(&sh);
+        assert_eq!(path.as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
+    }
 }
