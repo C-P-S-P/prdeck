@@ -1,6 +1,12 @@
 # prdeck
 
-A terminal dashboard for the pull requests you're involved in. Pick a PR, read it the way GitHub shows it, then fetch, rebase, push or open it in your editor with one key.
+A dashboard for the pull requests you're involved in, in the terminal and on the Mac. Pick a PR, read it the way GitHub shows it, then fetch, rebase, push or open it in your editor with one key.
+
+**On the Mac** ([details](#desktop-app-macos)):
+
+![PR Deck on the Mac: repositories and PRs on the left, the PR with its conversation on the right, commands along the bottom](docs/screenshots/desktop.png)
+
+**In the terminal:**
 
 ![prdeck: repos, the PRs that involve you, and the selected PR rendered like GitHub](docs/screenshots/main.png)
 
@@ -82,14 +88,14 @@ The clone search (`L` or `p`) is fuzzy, like fzf: it lists every git clone under
 
 The same PRs and commands in a native window, built with [GPUI](https://www.gpui.rs), the Rust UI framework Zed is made with. The window is Rust; everything behind it (config, GitHub, clones, commands) is the same Go core, which the app runs in the background as `prdeck serve`. Your config file and custom commands work in both.
 
-![PR Deck desktop: repos and PRs on the left, the PR with its conversation on the right, commands along the bottom](docs/screenshots/desktop.png)
-
 | | |
 | --- | --- |
-| ![Desktop setup](docs/screenshots/desktop-setup.png) | ![Desktop commits](docs/screenshots/desktop-commits.png) |
-| **First-run setup**: sign in with GitHub (through `gh`), pick your code folders and editor | **Commits** and **Files changed**, straight from GitHub |
-| ![Go to a pull request](docs/screenshots/desktop-goto.png) | |
-| **`⌘T` go to PR**: any open PR by number, title, repo or author | |
+| ![PR text with an image, a table and a task list](docs/screenshots/desktop-markdown.png) | ![Desktop commits](docs/screenshots/desktop-commits.png) |
+| **PR text like github.com**: images, tables, highlighted code, alerts | **Commits** and **Files changed**, straight from GitHub |
+| ![Desktop setup](docs/screenshots/desktop-setup.png) | ![Go to a pull request](docs/screenshots/desktop-goto.png) |
+| **First-run setup**: sign in with GitHub (through `gh`), pick your code folders and editor | **`⌘T` go to PR**: any open PR by number, title, repo or author |
+| ![Uncommitted changes](docs/screenshots/desktop-changes.png) | ![Missing clone](docs/screenshots/desktop-noclone.png) |
+| **Uncommitted changes**: `s` stash or `d` drop, then the command runs | **No clone yet**: use one found on disk, type a path, or clone |
 
 - **PR text like github.com**: images (your GitHub login is used for GitHub-hosted ones), `<img width>`, `<details>`, tables of screenshots side by side, syntax-highlighted code, `[!NOTE]`/`[!WARNING]` boxes, emoji and linked @mentions. Text is selectable.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
@@ -160,6 +166,8 @@ commands:
 Keys `j k q ? / R 1-9` are kept for navigation.
 
 ## How it's built
+
+The design and the reasons behind it are written up as decision records in [docs/adr](docs/adr/README.md), with diagrams.
 
 One Go core (`internal/core`, `config`, `github`, `cache`, `repos`, `runner`) with two front-ends:
 
