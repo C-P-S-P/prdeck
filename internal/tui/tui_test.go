@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/C-P-S-P/prdeck/internal/cache"
@@ -282,6 +283,42 @@ func TestReviewTextAsked(t *testing.T) {
 	m = send(t, m, key("enter"))
 	if len(be.ran) != 1 || be.ran[0].Action != "comment" || be.ran[0].Input != "rebased, ptal" {
 		t.Errorf("ran = %+v", be.ran)
+	}
+}
+
+func TestCommentGoesToThePRItWasTypedFor(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("i")) // on #4821
+	for _, r := range "lgtm" {
+		m = send(t, m, key(string(r)))
+	}
+	// A refresh while typing: #4821 was merged and left the list.
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: be.prs[1:]})
+	m = send(t, nm.(Model), key("enter"))
+	if len(be.ran) != 1 || be.ran[0].PR.Number != 4821 {
+		t.Errorf("the comment went to %+v", be.ran)
+	}
+}
+
+func TestWriteAnswerWrapsAndBarDims(t *testing.T) {
+	_, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 30})
+	why := "upstream/datakit does not allow auto-merge (an admin can turn on \"Allow auto-merge\" in its settings). Merge it on GitHub once it is ready"
+	nm, _ := m.Update(resultMsg(core.Result{Plan: core.Plan{Title: "Merge when ready", Action: "automerge"}, Err: errors.New(why)}))
+	m = nm.(Model)
+	v := strings.Join(strings.Fields(ansi.Strip(m.View())), " ")
+	if !strings.Contains(v, "once it is ready") {
+		t.Errorf("GitHub's answer was cut:\n%s", ansi.Strip(m.View()))
+	}
+	// #4821 is yours: Approve is on the bar but dimmed; Comment is not.
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(0) // termenv.TrueColor; tests have no colors otherwise
+	defer lipgloss.SetColorProfile(old)
+	bar := strings.Join(m.keybar(), "\n")
+	if !strings.Contains(bar, sDim.Render("approve")) || strings.Contains(bar, sDim.Render("comment")) {
+		t.Errorf("bar:\n%q", bar)
 	}
 }
 

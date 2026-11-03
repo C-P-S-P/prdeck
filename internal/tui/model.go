@@ -67,6 +67,7 @@ type output struct {
 	ok    bool
 	lines []string
 	dir   string
+	wrap  bool // GitHub's answer to a write: wrapped, not cut, so all of it shows
 }
 
 type Model struct {
@@ -103,7 +104,8 @@ type Model struct {
 	pcur    int
 
 	prompt   *config.Command
-	pathRepo string // the path prompt is open for this repo
+	promptPR github.PR // the PR the prompt was opened on
+	pathRepo string    // the path prompt is open for this repo
 	promptIn textinput.Model
 
 	// The path prompt fuzzy-searches every clone under the home folder.
@@ -437,7 +439,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.setFlash("✓ " + r.Plan.Title)
 			return m, cmd
 		}
-		m.out = &output{title: r.Plan.Title, ok: r.Err == nil, dir: r.Plan.Dir(), lines: outputLines(r.Output, r.Err)}
+		m.out = &output{title: r.Plan.Title, ok: r.Err == nil, dir: r.Plan.Dir(), lines: outputLines(r.Output, r.Err), wrap: core.Writes(r.Plan.Action)}
 		var cmds []tea.Cmd
 		if pr, ok := m.selected(); ok {
 			cmds = append(cmds, m.folderCmd(pr))
@@ -692,6 +694,12 @@ func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd
 		cmd := m.setFlash("Select a pull request first")
 		return m, cmd
 	}
+	return m.startOn(pr, c, input)
+}
+
+// startOn is startCommand for a given PR: the one a prompt was opened on, which a
+// refresh while typing can move or take out of the list.
+func (m Model) startOn(pr github.PR, c *config.Command, input string) (tea.Model, tea.Cmd) {
 	if c.Action == "setpath" {
 		return m.askPath(pr.Repo)
 	}
@@ -701,7 +709,7 @@ func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd
 		return m, cmd
 	}
 	if c.Prompt != "" && input == "" {
-		m.prompt = c
+		m.prompt, m.promptPR = c, pr
 		m.promptIn.Prompt = c.Prompt + ": "
 		m.promptIn.Placeholder = "" // the path prompt's hint would stay otherwise
 		m.promptIn.SetValue("")
@@ -815,7 +823,7 @@ func (m Model) useClone(repo, path string) (tea.Model, tea.Cmd) {
 		folder = m.folderCmd(pr)
 	}
 	if pending != nil {
-		nm, cmd := m.startCommand(&pending.cmd, pending.input)
+		nm, cmd := m.startOn(pending.pr, &pending.cmd, pending.input)
 		return nm, tea.Batch(flash, folder, cmd)
 	}
 	return m, tea.Batch(flash, folder)
@@ -934,7 +942,7 @@ func (m Model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := m.setFlash("Nothing entered; command not run")
 			return m, cmd
 		}
-		return m.startCommand(c, in)
+		return m.startOn(m.promptPR, c, in)
 	}
 	if m.pathRepo != "" {
 		n := len(m.pathMatches())

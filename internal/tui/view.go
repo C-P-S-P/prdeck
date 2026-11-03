@@ -599,6 +599,10 @@ func (m Model) bottomLines() []string {
 			ol = ol[len(ol)-maxOut:]
 		}
 		for _, l := range ol {
+			if m.out.wrap {
+				lines = append(lines, strings.Split(lipgloss.NewStyle().Width(w).PaddingLeft(2).Render(sSoft.Render(cleanOutput(l))), "\n")...)
+				continue
+			}
 			lines = append(lines, fit(sSoft.Render("  "+cleanOutput(l)), w))
 		}
 	}
@@ -731,15 +735,19 @@ type barItem struct {
 
 func (m Model) barItems() []barItem {
 	var items []barItem
+	pr, sel := m.selected()
 	for _, c := range m.cfg.Commands {
 		if !c.OnBar() || c.Key == "" {
 			continue
 		}
-		st := sKey
+		st, name := sKey, sSoft
 		if m.plan != nil && m.plan.Title == c.Name {
 			st = sKeyHot
+		} else if ok, _ := core.Allowed(c, pr, m.be.Viewer()); sel && !ok {
+			// Dimmed, not hidden, so the bar keeps its shape: Approve on your own PR.
+			st, name = sKey.Foreground(cDim), sDim
 		}
-		items = append(items, barItem{st.Render(c.Key) + " " + sSoft.Render(strings.ToLower(c.Name)), c.Key})
+		items = append(items, barItem{st.Render(c.Key) + " " + name.Render(strings.ToLower(c.Name)), c.Key})
 	}
 	for _, it := range [][2]string{{"/", "filter"}, {"tab", "pane"}, {"?", "help"}, {"q", "quit"}} {
 		items = append(items, barItem{sKey.Render(it[0]) + " " + sSoft.Render(it[1]), it[0]})
