@@ -1,0 +1,16 @@
+{
+  "at": "2026-01-02T03:04:05Z",
+  "author": "you",
+  "files": [
+    {
+      "additions": 1,
+      "deletions": 1,
+      "patch": "@@ -14,7 +14,7 @@ class StreamPushSource:\n     batch: timedelta = timedelta(milliseconds=200)\n     _writer: OnlineWriter = field(default=None, repr=False)\n \n-    def push(self, name, df, *, allow_registry_cache=True):\n+    def push(self, name, df, *, allow_registry_cache=False):\n         \"\"\"Validate df against the feature view and queue it for the online store.\"\"\"\n         fv = self._get_feature_view(name, allow_registry_cache)\n         self._validate(fv, df)",
+      "path": "sdk/python/registry/push_source.py",
+      "previousPath": "",
+      "status": "modified"
+    }
+  ],
+  "message": "Default allow_registry_cache to False\n\nA stale registry silently dropped new columns, so pushes now read the\nregistry fresh unless the caller opts in to the cache.",
+  "oid": "000000000000000000000000000000011f5b537b"
+}

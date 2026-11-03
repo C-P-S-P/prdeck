@@ -1,0 +1,50 @@
+[
+  {
+    "additions": 13,
+    "deletions": 0,
+    "patch": "@@ -0,0 +1,13 @@\n+syntax = \"proto3\";\n+\n+package registry;\n+\n+import \"google/protobuf/duration.proto\";\n+\n+message StreamPushSource {\n+  string name = 1;\n+  string feature_view = 2;\n+  google.protobuf.Duration batch = 3;\n+  // Rows that fail schema validation are dropped and counted here.\n+  string dead_letter_topic = 4;\n+}",
+    "path": "protos/registry/push_source.proto",
+    "previousPath": "",
+    "status": "added"
+  },
+  {
+    "additions": 30,
+    "deletions": 0,
+    "patch": "@@ -0,0 +1,30 @@\n+\"\"\"Push sources accept rows written by clients and land them in the online store.\"\"\"\n+\n+from dataclasses import dataclass, field\n+from datetime import timedelta\n+\n+from registry.online_writer import OnlineWriter\n+from registry.schema import FeatureViewSchema, SchemaError\n+\n+\n+@dataclass\n+class StreamPushSource:\n+    name: str\n+    schema: FeatureViewSchema\n+    batch: timedelta = timedelta(milliseconds=200)\n+    _writer: OnlineWriter = field(default=None, repr=False)\n+\n+    def push(self, name, df, *, allow_registry_cache=False):\n+        \"\"\"Validate df against the feature view and queue it for the online store.\"\"\"\n+        fv = self._get_feature_view(name, allow_registry_cache)\n+        self._validate(fv, df)\n+        self._writer.enqueue(fv, df, flush_after=self.batch)\n+        return len(df)\n+\n+    def _validate(self, fv, df):\n+        missing = [c for c in fv.columns if c not in df.columns]\n+        if missing:\n+            raise SchemaError(f\"{fv.name}: missing columns {missing}\")\n+        extra = [c for c in df.columns if c not in fv.columns]\n+        if extra:\n+            raise SchemaError(f\"{fv.name}: unknown columns {extra}\")",
+    "path": "sdk/python/registry/push_source.py",
+    "previousPath": "",
+    "status": "added"
+  },
+  {
+    "additions": 18,
+    "deletions": 5,
+    "patch": "@@ -18,14 +18,27 @@ class OnlineWriter:\n     def __init__(self, store, *, max_batch=500):\n         self._store = store\n         self._max_batch = max_batch\n-        self._pending = []\n+        self._pending = {}\n+        self._timer = None\n \n-    def write(self, fv, rows):\n-        self._store.write(fv, rows)\n+    def enqueue(self, fv, df, *, flush_after):\n+        \"\"\"Batch rows per feature view; flush when full or after flush_after.\"\"\"\n+        self._pending.setdefault(fv.name, []).extend(df.to_dict(\"records\"))\n+        if len(self._pending[fv.name]) >= self._max_batch:\n+            self.flush(fv.name)\n+        elif self._timer is None:\n+            self._timer = self._schedule(flush_after, self.flush_all)\n+\n+    def flush(self, name):\n+        rows = self._pending.pop(name, [])\n+        if rows:\n+            self._store.write(name, rows)\n \n-    def flush(self):\n-        pass\n+    def flush_all(self):\n+        self._timer = None\n+        for name in list(self._pending):\n+            self.flush(name)",
+    "path": "sdk/python/registry/online_writer.py",
+    "previousPath": "",
+    "status": "modified"
+  },
+  {
+    "additions": 27,
+    "deletions": 6,
+    "patch": "@@ -12,9 +12,30 @@\n     old_0 = schema.load(0)\n-    old_1 = schema.load(1)\n-    old_2 = schema.load(2)\n-    old_3 = schema.load(3)\n-    old_4 = schema.load(4)\n-    old_5 = schema.load(5)\n-    old_6 = schema.load(6)\n+    new_1 = schema.load(1)\n+    new_2 = schema.load(2)\n+    new_3 = schema.load(3)\n+    new_4 = schema.load(4)\n+    new_5 = schema.load(5)\n+    new_6 = schema.load(6)\n+    new_7 = schema.load(7)\n+    new_8 = schema.load(8)\n+    new_9 = schema.load(9)\n+    new_10 = schema.load(10)\n+    new_11 = schema.load(11)\n+    new_12 = schema.load(12)\n+    new_13 = schema.load(13)\n+    new_14 = schema.load(14)\n+    new_15 = schema.load(15)\n+    new_16 = schema.load(16)\n+    new_17 = schema.load(17)\n+    new_18 = schema.load(18)\n+    new_19 = schema.load(19)\n+    new_20 = schema.load(20)\n+    new_21 = schema.load(21)\n+    new_22 = schema.load(22)\n+    new_23 = schema.load(23)\n+    new_24 = schema.load(24)\n+    new_25 = schema.load(25)\n+    new_26 = schema.load(26)\n+    new_27 = schema.load(27)\n     old_99 = schema.load(99)\n     old_100 = schema.load(100)",
+    "path": "sdk/python/registry/schema.py",
+    "previousPath": "",
+    "status": "modified"
+  },
+  {
+    "additions": 60,
+    "deletions": 0,
+    "patch": "@@ -12,3 +12,63 @@\n     old_0 = test_push_source.load(0)\n+    new_1 = test_push_source.load(1)\n+    new_2 = test_push_source.load(2)\n+    new_3 = test_push_source.load(3)\n+    new_4 = test_push_source.load(4)\n+    new_5 = test_push_source.load(5)\n+    new_6 = test_push_source.load(6)\n+    new_7 = test_push_source.load(7)\n+    new_8 = test_push_source.load(8)\n+    new_9 = test_push_source.load(9)\n+    new_10 = test_push_source.load(10)\n+    new_11 = test_push_source.load(11)\n+    new_12 = test_push_source.load(12)\n+    new_13 = test_push_source.load(13)\n+    new_14 = test_push_source.load(14)\n+    new_15 = test_push_source.load(15)\n+    new_16 = test_push_source.load(16)\n+    new_17 = test_push_source.load(17)\n+    new_18 = test_push_source.load(18)\n+    new_19 = test_push_source.load(19)\n+    new_20 = test_push_source.load(20)\n+    new_21 = test_push_source.load(21)\n+    new_22 = test_push_source.load(22)\n+    new_23 = test_push_source.load(23)\n+    new_24 = test_push_source.load(24)\n+    new_25 = test_push_source.load(25)\n+    new_26 = test_push_source.load(26)\n+    new_27 = test_push_source.load(27)\n+    new_28 = test_push_source.load(28)\n+    new_29 = test_push_source.load(29)\n+    new_30 = test_push_source.load(30)\n+    new_31 = test_push_source.load(31)\n+    new_32 = test_push_source.load(32)\n+    new_33 = test_push_source.load(33)\n+    new_34 = test_push_source.load(34)\n+    new_35 = test_push_source.load(35)\n+    new_36 = test_push_source.load(36)\n+    new_37 = test_push_source.load(37)\n+    new_38 = test_push_source.load(38)\n+    new_39 = test_push_source.load(39)\n+    new_40 = test_push_source.load(40)\n+    new_41 = test_push_source.load(41)\n+    new_42 = test_push_source.load(42)\n+    new_43 = test_push_source.load(43)\n+    new_44 = test_push_source.load(44)\n+    new_45 = test_push_source.load(45)\n+    new_46 = test_push_source.load(46)\n+    new_47 = test_push_source.load(47)\n+    new_48 = test_push_source.load(48)\n+    new_49 = test_push_source.load(49)\n+    new_50 = test_push_source.load(50)\n+    new_51 = test_push_source.load(51)\n+    new_52 = test_push_source.load(52)\n+    new_53 = test_push_source.load(53)\n+    new_54 = test_push_source.load(54)\n+    new_55 = test_push_source.load(55)\n+    new_56 = test_push_source.load(56)\n+    new_57 = test_push_source.load(57)\n+    new_58 = test_push_source.load(58)\n+    new_59 = test_push_source.load(59)\n+    new_60 = test_push_source.load(60)\n     old_99 = test_push_source.load(99)\n     old_100 = test_push_source.load(100)",
+    "path": "sdk/python/tests/test_push_source.py",
+    "previousPath": "",
+    "status": "added"
+  },
+  {
+    "additions": 26,
+    "deletions": 6,
+    "patch": "@@ -12,9 +12,29 @@\n     old_0 = test_redis_push.load(0)\n-    old_1 = test_redis_push.load(1)\n-    old_2 = test_redis_push.load(2)\n-    old_3 = test_redis_push.load(3)\n-    old_4 = test_redis_push.load(4)\n-    old_5 = test_redis_push.load(5)\n-    old_6 = test_redis_push.load(6)\n+    new_1 = test_redis_push.load(1)\n+    new_2 = test_redis_push.load(2)\n+    new_3 = test_redis_push.load(3)\n+    new_4 = test_redis_push.load(4)\n+    new_5 = test_redis_push.load(5)\n+    new_6 = test_redis_push.load(6)\n+    new_7 = test_redis_push.load(7)\n+    new_8 = test_redis_push.load(8)\n+    new_9 = test_redis_push.load(9)\n+    new_10 = test_redis_push.load(10)\n+    new_11 = test_redis_push.load(11)\n+    new_12 = test_redis_push.load(12)\n+    new_13 = test_redis_push.load(13)\n+    new_14 = test_redis_push.load(14)\n+    new_15 = test_redis_push.load(15)\n+    new_16 = test_redis_push.load(16)\n+    new_17 = test_redis_push.load(17)\n+    new_18 = test_redis_push.load(18)\n+    new_19 = test_redis_push.load(19)\n+    new_20 = test_redis_push.load(20)\n+    new_21 = test_redis_push.load(21)\n+    new_22 = test_redis_push.load(22)\n+    new_23 = test_redis_push.load(23)\n+    new_24 = test_redis_push.load(24)\n+    new_25 = test_redis_push.load(25)\n+    new_26 = test_redis_push.load(26)\n     old_99 = test_redis_push.load(99)\n     old_100 = test_redis_push.load(100)",
+    "path": "sdk/python/tests/integration/test_redis_push.py",
+    "previousPath": "",
+    "status": "modified"
+  }
+]
