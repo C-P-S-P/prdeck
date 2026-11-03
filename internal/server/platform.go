@@ -21,6 +21,7 @@ var linuxTerminals = []struct{ name, run string }{
 	{"x-terminal-emulator", "-e"}, // the one Debian and Ubuntu set as default
 	{"gnome-terminal", "--"},
 	{"ptyxis", "--"}, // Fedora's default since 41
+	{"kgx", "--"},    // GNOME Console, Arch's and GNOME's own default
 	{"konsole", "-e"},
 	{"xfce4-terminal", "-x"},
 	{"kitty", ""},
@@ -41,7 +42,11 @@ func inTerminal(script, dir string) (string, error) {
 
 // terminalScript is inTerminal for goos, with sh the shell that runs scripts there.
 func terminalScript(goos, sh, script, dir string, lookPath func(string) (string, error)) (string, error) {
-	inner := "cd " + runner.Quote(dir) + " && " + script
+	// The window inherits this process's environment (Terminal.app starts afresh), so
+	// drop what runner.Command sets to stop prompts: GIT_EDITOR=true would break a git
+	// commit made from the editor.
+	// ponytail: also drops a NO_COLOR the user set themselves.
+	inner := "unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd " + runner.Quote(dir) + " && " + script
 	switch goos {
 	case "darwin":
 		return terminalApp(script, dir), nil

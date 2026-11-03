@@ -33,12 +33,13 @@ func TestTerminalScript(t *testing.T) {
 	}{
 		// The Mac keeps its Terminal.app script, byte for byte.
 		{"darwin", nil, `osascript -e 'tell application "Terminal" to do script "cd '\''/w/my tool'\'' && nvim /w/tool"' -e 'tell application "Terminal" to activate'`},
-		{"linux", []string{"xterm", "konsole"}, `konsole -e /bin/sh -c 'cd '\''/w/my tool'\'' && nvim /w/tool'`},
-		{"linux", []string{"x-terminal-emulator", "gnome-terminal"}, `x-terminal-emulator -e /bin/sh -c 'cd '\''/w/my tool'\'' && nvim /w/tool'`},
-		{"linux", []string{"gnome-terminal"}, `gnome-terminal -- /bin/sh -c 'cd '\''/w/my tool'\'' && nvim /w/tool'`},
-		{"linux", []string{"kitty"}, `kitty /bin/sh -c 'cd '\''/w/my tool'\'' && nvim /w/tool'`},
-		{"linux", []string{"wezterm"}, `wezterm start -- /bin/sh -c 'cd '\''/w/my tool'\'' && nvim /w/tool'`},
-		{"windows", nil, `PRDECK_SCRIPT='cd '\''/w/my tool'\'' && nvim /w/tool' MSYS2_ENV_CONV_EXCL=PRDECK_SCRIPT MSYS2_ARG_CONV_EXCL='*' cmd /c start "" /bin/sh -c 'eval "$PRDECK_SCRIPT"'`},
+		{"linux", []string{"xterm", "konsole"}, `konsole -e /bin/sh -c 'unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd '\''/w/my tool'\'' && nvim /w/tool'`},
+		{"linux", []string{"x-terminal-emulator", "gnome-terminal"}, `x-terminal-emulator -e /bin/sh -c 'unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd '\''/w/my tool'\'' && nvim /w/tool'`},
+		{"linux", []string{"gnome-terminal"}, `gnome-terminal -- /bin/sh -c 'unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd '\''/w/my tool'\'' && nvim /w/tool'`},
+		{"linux", []string{"xterm", "kgx"}, `kgx -- /bin/sh -c 'unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd '\''/w/my tool'\'' && nvim /w/tool'`},
+		{"linux", []string{"kitty"}, `kitty /bin/sh -c 'unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd '\''/w/my tool'\'' && nvim /w/tool'`},
+		{"linux", []string{"wezterm"}, `wezterm start -- /bin/sh -c 'unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd '\''/w/my tool'\'' && nvim /w/tool'`},
+		{"windows", nil, `PRDECK_SCRIPT='unset GIT_TERMINAL_PROMPT GH_PROMPT_DISABLED GIT_EDITOR NO_COLOR; cd '\''/w/my tool'\'' && nvim /w/tool' MSYS2_ENV_CONV_EXCL=PRDECK_SCRIPT MSYS2_ARG_CONV_EXCL='*' cmd /c start "" /bin/sh -c 'eval "$PRDECK_SCRIPT"'`},
 	}
 	for _, c := range cases {
 		got, err := terminalScript(c.goos, "/bin/sh", script, dir, finds(c.found...))
@@ -75,7 +76,8 @@ func TestTerminalScriptRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 		title := `"; touch pwned; echo "$HOME & 100%`
-		script, err := terminalScript(goos, "/bin/sh", runner.Fill("printf '%s' {title} > out", map[string]string{"title": title}), dir, finds("konsole"))
+		run := `printf '%s' {title} > out; printf '%s' "$GIT_EDITOR$NO_COLOR$GH_PROMPT_DISABLED$GIT_TERMINAL_PROMPT" > env`
+		script, err := terminalScript(goos, "/bin/sh", runner.Fill(run, map[string]string{"title": title}), dir, finds("konsole"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -88,6 +90,11 @@ func TestTerminalScriptRuns(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, "pwned")); err == nil {
 			t.Errorf("%s: the title ran as a command", goos)
+		}
+		// Run, like Execute, turns prompts off for what it captures. The editor gets the
+		// user's environment, as in Terminal.app: GIT_EDITOR=true would break git commit.
+		if env, _ := os.ReadFile(filepath.Join(dir, "env")); len(env) > 0 {
+			t.Errorf("%s: the editor got the no-prompt variables: %q", goos, env)
 		}
 	}
 }
