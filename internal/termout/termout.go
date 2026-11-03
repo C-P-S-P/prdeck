@@ -121,6 +121,9 @@ func (w *Writer) Close() error {
 func (w *Writer) Read(p []byte) (int, error) { return w.f.Read(p) }
 func (w *Writer) Fd() uintptr                { return w.f.Fd() }
 
+// File is the terminal itself, for a program that takes it over while the UI waits.
+func (w *Writer) File() *os.File { return w.f }
+
 // minRun is the shortest run of spaces worth replacing; the replacement costs ~10 bytes.
 const minRun = 12
 

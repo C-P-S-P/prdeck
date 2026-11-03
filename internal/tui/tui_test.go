@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -16,6 +19,7 @@ import (
 	"github.com/C-P-S-P/prdeck/internal/core"
 	"github.com/C-P-S-P/prdeck/internal/github"
 	"github.com/C-P-S-P/prdeck/internal/repos"
+	"github.com/C-P-S-P/prdeck/internal/termout"
 )
 
 type fakeBackend struct {
@@ -81,9 +85,9 @@ func (f *fakeBackend) Execute(_ context.Context, p core.Plan) core.Result {
 	f.ran = append(f.ran, p)
 	return core.Result{Plan: p, Output: "ok"}
 }
-func (f *fakeBackend) Setup(context.Context, core.Plan) (string, error) { return "", nil }
-func (f *fakeBackend) TerminalCmd(core.Plan) *exec.Cmd                  { return exec.Command("true") }
-func (f *fakeBackend) FindClones(context.Context, string) []string      { return f.found }
+func (f *fakeBackend) Setup(ctx context.Context, _ core.Plan) (string, error) { return "", ctx.Err() }
+func (f *fakeBackend) TerminalCmd(core.Plan) *exec.Cmd                        { return exec.Command("true") }
+func (f *fakeBackend) FindClones(context.Context, string) []string            { return f.found }
 func (f *fakeBackend) SetClonePath(repo, path string) (string, error) {
 	if f.saved == nil {
 		f.saved = map[string]string{}
@@ -474,6 +478,45 @@ func TestMissingCloneFoundAndSaved(t *testing.T) {
 	}
 }
 
+func TestMissingCloneRunsOnItsPR(t *testing.T) {
+	be, m := newTest(t)
+	be.noClone = map[string]bool{"northwind/registry": true}
+	be.found = []string{"/elsewhere/registry"}
+	m = search(t, m)
+	m = send(t, m, key("f"))
+	if m.missing == nil {
+		t.Fatal("no missing-clone dialog")
+	}
+	l := m.layout()
+	m = send(t, m, click(5, 1+l.reposH+2+2)) // the row of #77
+	if pr, _ := m.selected(); pr.Number != 4821 {
+		t.Fatalf("a click behind the dialog selected #%d", pr.Number)
+	}
+	// A refresh that drops the PR moves the selection too.
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: be.prs[1:]})
+	m = nm.(Model)
+	m = send(t, m, key("1"))
+	if len(be.ran) != 1 || be.ran[0].PR.Number != 4821 {
+		t.Errorf("the command should run on #4821: ran=%+v", be.ran)
+	}
+}
+
+func TestPromptRunsOnItsPR(t *testing.T) {
+	be, m := newTest(t)
+	m.cfg.Commands = append(m.cfg.Commands, config.Command{Name: "Commit", Key: "m", Prompt: "Message", Run: "git commit -m {input}"})
+	m = search(t, m)
+	m = send(t, m, key("m"))
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: be.prs[1:]})
+	m = nm.(Model)
+	for _, r := range "wip" {
+		m = send(t, m, key(string(r)))
+	}
+	m = send(t, m, key("enter"))
+	if len(be.ran) != 1 || be.ran[0].PR.Number != 4821 {
+		t.Errorf("the command should run on #4821: ran=%+v", be.ran)
+	}
+}
+
 func TestSetClonePathPrompt(t *testing.T) {
 	be, m := newTest(t)
 	m = search(t, m)
@@ -529,5 +572,67 @@ func TestPathPromptArrowsAndClick(t *testing.T) {
 	want := m.be.(*fakeBackend).saved["northwind/registry"]
 	if want == "" || m.pathRepo != "" {
 		t.Errorf("click did not pick a clone: saved=%v", be.saved)
+	}
+}
+
+func TestFirstResultKeepsSecondRunning(t *testing.T) {
+	_, m := newTest(t)
+	m = search(t, m)
+	nm, fetch := m.Update(key("f"))
+	m = nm.(Model)
+	nm, _ = m.Update(key("b"))
+	m = nm.(Model)
+	nm, _ = m.Update(fetch())
+	m = nm.(Model)
+	if m.running != "Open on GitHub" || m.cancel == nil {
+		t.Errorf("Fetch's result cleared the command still running: running=%q cancel=%v", m.running, m.cancel != nil)
+	}
+	if m.out == nil || m.out.title != "Fetch" {
+		t.Errorf("Fetch's output not kept: %+v", m.out)
+	}
+}
+
+func TestEscCancelsTerminalSetup(t *testing.T) {
+	_, m := newTest(t)
+	m.cfg.Commands = append(m.cfg.Commands, config.Command{Name: "Tests", Key: "T", Run: "make test", Output: "terminal"})
+	m = search(t, m)
+	nm, setup := m.Update(key("T"))
+	m = nm.(Model)
+	if m.running != "Tests" {
+		t.Fatalf("running = %q", m.running)
+	}
+	nm, _ = m.Update(key("esc"))
+	m = nm.(Model)
+	nm, _ = m.Update(setup())
+	m = nm.(Model)
+	if m.running != "" || m.out == nil || m.out.ok {
+		t.Errorf("esc should cancel the setup: running=%q out=%+v", m.running, m.out)
+	}
+}
+
+func TestTerminalCommandGetsTheTerminal(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "tty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := termout.New(f)
+	defer out.Close()
+
+	c := ttyCmd{exec.Command("true")}
+	c.SetStdout(out)
+	if c.Stdout != io.Writer(f) {
+		t.Errorf("stdout is %T, want the terminal file itself", c.Stdout)
+	}
+	var buf bytes.Buffer
+	c = ttyCmd{exec.Command("true")}
+	c.SetStdout(&buf)
+	if c.Stdout != io.Writer(&buf) {
+		t.Errorf("stdout is %T, want the writer it was given", c.Stdout)
+	}
+	c = ttyCmd{exec.Command("true")}
+	c.Stdout = &buf
+	c.SetStdout(out)
+	if c.Stdout != io.Writer(&buf) {
+		t.Error("a stdout the command set itself was replaced")
 	}
 }

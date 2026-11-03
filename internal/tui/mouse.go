@@ -26,7 +26,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	inLeft := msg.X < l.leftW
 
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
-		if msg.Y < bodyTop || msg.Y >= bodyEnd || m.palette || m.plan != nil {
+		if msg.Y < bodyTop || msg.Y >= bodyEnd || m.palette || m.plan != nil || m.missing != nil {
 			return m, nil
 		}
 		step := 1
@@ -60,7 +60,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Y >= bodyEnd {
 		return m.clickBottom(msg.Y-bodyEnd, msg.X, l)
 	}
-	if m.palette || m.plan != nil || msg.Y < bodyTop {
+	if m.palette || m.plan != nil || m.missing != nil || msg.Y < bodyTop {
 		return m, nil
 	}
 
