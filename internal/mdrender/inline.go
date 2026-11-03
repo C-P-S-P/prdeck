@@ -81,7 +81,7 @@ func (r *renderer) inlineNode(n ast.Node, base style) []run {
 	case *ast.Image:
 		st := base
 		st.fg, st.underline = cPurple, false
-		if st.link == "" {
+		if st.link == "" && !strings.HasPrefix(string(n.Destination), "data:") {
 			st.link = string(n.Destination)
 		}
 		alt := strings.TrimSpace(plainText(n, r.src))

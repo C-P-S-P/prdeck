@@ -58,3 +58,44 @@ func TestWorktreeOffByDefault(t *testing.T) {
 		t.Error("worktrees must be opt-in")
 	}
 }
+
+func TestSaveSetupKeepsTheRest(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	orig := "# mine\ngithub:\n  refresh: 5m   # slower\nrepos:\n  scan: [~/old]\n  paths:\n    a/b: ~/x\neditor:\n  default: nvim\n"
+	if err := os.WriteFile(file, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	err := SaveSetup(file, Setup{Scan: []string{home + "/projects", "~/code"}, Editor: "zed", EditorRun: `open -a "Zed" {path}`, Worktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(file)
+	got := string(raw)
+	for _, want := range []string{"# mine", "refresh: 5m", "# slower", "a/b: ~/x", "scan: [~/projects, ~/code]", "default: zed", "worktree: true", `zed: open -a "Zed" {path}`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+	cfg, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Editor.Default != "zed" || !cfg.Editor.UseWorktree() || cfg.Editor.Editors["zed"].Run != `open -a "Zed" {path}` {
+		t.Errorf("loaded back: %+v", cfg.Editor)
+	}
+}
+
+func TestSaveSetupNewFile(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "sub", "config.yaml")
+	if err := SaveSetup(file, Setup{Scan: []string{"~/src"}, Editor: "cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Repos.Scan) != 1 || cfg.Repos.Scan[0] != "~/src" || cfg.Editor.Default != "cursor" || cfg.Editor.UseWorktree() {
+		t.Errorf("got scan %v editor %+v", cfg.Repos.Scan, cfg.Editor)
+	}
+}

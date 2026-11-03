@@ -1,6 +1,8 @@
 package demo
 
 import (
+	"encoding/base64"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +63,19 @@ func (b *Backend) load() {
 				"- New `StreamPushSource` type registered in the registry proto",
 				"- `push()` validates the payload against the feature view schema",
 				"- Online writes are batched every 200 ms (set with `push_batch_ms`)",
+				"",
+				"```python",
+				"source = StreamPushSource(name=\"clicks\", schema=click_schema)",
+				"store.push(\"clicks\", df, allow_registry_cache=False)  # lands in ~200 ms",
+				"```",
+				"",
+				"## Results",
+				`<img width="560" alt="p99 write latency before and after" src="` + latencyChart() + `">`,
+				"",
+				"| Online store | p99 before | p99 after |",
+				"| --- | --- | --- |",
+				"| Redis | 1.8 s | 210 ms |",
+				"| DynamoDB | 2.1 s | 340 ms |",
 				"",
 				"## Test plan",
 				"- [x] Unit tests for schema validation",
@@ -167,8 +182,9 @@ func (b *Backend) load() {
 
 	for _, s := range samples {
 		b.prs = append(b.prs, s.pr)
+		commits, files := sampleCommits(s, b.start), sampleFiles(s)
 		b.flags[s.pr.Number] = s.flags
-		d := &github.Detail{PR: s.pr, Body: strings.Join(s.body, "\n"), Commits: s.commits, ChangedFiles: s.files, Additions: s.add, Deletions: s.del, Labels: s.labels, Timeline: s.timeline}
+		d := &github.Detail{PR: s.pr, Body: strings.Join(s.body, "\n"), Commits: s.commits, ChangedFiles: s.files, Additions: s.add, Deletions: s.del, Labels: s.labels, Timeline: s.timeline, CommitList: commits, Files: files}
 		for _, r := range s.reviewers {
 			d.Reviewers = append(d.Reviewers, github.Reviewer{Login: r[0], State: r[1]})
 		}
@@ -177,6 +193,72 @@ func (b *Backend) load() {
 		}
 		b.details[s.pr.Number] = d
 	}
+}
+
+// sampleCommits makes up a commit history for a sample PR, oldest first.
+func sampleCommits(s sample, now time.Time) []github.Commit {
+	headlines := map[int][]string{
+		4821: {
+			"Add StreamPushSource to the registry proto",
+			"Validate pushed frames against the feature view schema",
+			"Batch online writes every push_batch_ms",
+			"Add Redis integration test for streaming pushes",
+			"Default allow_registry_cache to False",
+			"Test pushes against a stale registry",
+		},
+	}[s.pr.Number]
+	var out []github.Commit
+	for i := 0; i < s.commits; i++ {
+		h := "Update " + s.pr.HeadRefName + " (" + strconv.Itoa(i+1) + "/" + strconv.Itoa(s.commits) + ")"
+		if i < len(headlines) {
+			h = headlines[i]
+		}
+		oid := fmt.Sprintf("%040x", uint64(s.pr.Number)*1_000_003+uint64(i)*7919)
+		st := "SUCCESS"
+		if i == s.commits-1 {
+			st = s.pr.CheckState
+		}
+		out = append(out, github.Commit{
+			OID: oid, Short: oid[len(oid)-7:], Headline: h, Author: s.pr.Author, CheckState: st,
+			At:        now.Add(-time.Duration(s.commits-i) * 5 * time.Hour),
+			Additions: s.add / max(s.commits, 1), Deletions: s.del / max(s.commits, 1),
+		})
+	}
+	return out
+}
+
+// sampleFiles makes up the changed files for a sample PR.
+func sampleFiles(s sample) []github.File {
+	if s.pr.Number == 4821 {
+		return []github.File{
+			{Path: "protos/registry/push_source.proto", Additions: 34, ChangeType: "ADDED"},
+			{Path: "sdk/python/registry/push_source.py", Additions: 168, Deletions: 4, ChangeType: "ADDED"},
+			{Path: "sdk/python/registry/online_writer.py", Additions: 61, Deletions: 22, ChangeType: "MODIFIED"},
+			{Path: "sdk/python/registry/schema.py", Additions: 27, Deletions: 6, ChangeType: "MODIFIED"},
+			{Path: "sdk/python/tests/test_push_source.py", Additions: 96, ChangeType: "ADDED"},
+			{Path: "sdk/python/tests/integration/test_redis_push.py", Additions: 26, Deletions: 6, ChangeType: "MODIFIED"},
+		}
+	}
+	var out []github.File
+	for i := 0; i < min(s.files, 6); i++ {
+		out = append(out, github.File{Path: s.pr.Name() + "/src/file_" + strconv.Itoa(i+1) + ".go", Additions: s.add / max(s.files, 1), Deletions: s.del / max(s.files, 1), ChangeType: "MODIFIED"})
+	}
+	return out
+}
+
+// latencyChart is a small bar chart as a data URL, so the demo shows an image
+// without going online.
+func latencyChart() string {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" width="560" height="180" viewBox="0 0 560 180">` +
+		`<rect width="560" height="180" fill="#16181c"/>` +
+		`<text x="16" y="26" fill="#c9cdd4" font-family="Helvetica" font-size="13">p99 online write latency (ms)</text>` +
+		`<text x="16" y="70" fill="#9aa1ad" font-family="Helvetica" font-size="12">Redis</text>` +
+		`<rect x="96" y="52" width="420" height="14" fill="#e57b7b"/><text x="96" y="82" fill="#8a919d" font-family="Helvetica" font-size="11">before 1800</text>` +
+		`<rect x="96" y="88" width="49" height="14" fill="#8cc47a"/><text x="152" y="100" fill="#8a919d" font-family="Helvetica" font-size="11">after 210</text>` +
+		`<text x="16" y="136" fill="#9aa1ad" font-family="Helvetica" font-size="12">DynamoDB</text>` +
+		`<rect x="96" y="118" width="440" height="14" fill="#e57b7b"/><rect x="96" y="140" width="71" height="14" fill="#8cc47a"/>` +
+		`<text x="174" y="152" fill="#8a919d" font-family="Helvetica" font-size="11">after 340</text></svg>`
+	return "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(svg))
 }
 
 func with(p github.PR, f func(*github.PR)) github.PR {

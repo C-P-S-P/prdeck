@@ -86,8 +86,14 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 
 | | |
 | --- | --- |
-| ![Desktop filter palette](docs/screenshots/desktop-palette.png) | ![Desktop uncommitted changes](docs/screenshots/desktop-changes.png) |
-| **`⌘K` filters**: saved filters, or any GitHub qualifier | **Uncommitted changes**: `s` stash or `d` drop, then the command runs |
+| ![Desktop setup](docs/screenshots/desktop-setup.png) | ![Desktop commits](docs/screenshots/desktop-commits.png) |
+| **First-run setup**: sign in with GitHub (through `gh`), pick your code folders and editor | **Commits** and **Files changed**, straight from GitHub |
+| ![Go to a pull request](docs/screenshots/desktop-goto.png) | |
+| **`⌘T` go to PR**: any open PR by number, title, repo or author | |
+
+- **PR text like github.com**: images (your GitHub login is used for GitHub-hosted ones), `<img width>`, `<details>`, tables of screenshots side by side, syntax-highlighted code, `[!NOTE]`/`[!WARNING]` boxes, emoji and linked @mentions. Text is selectable.
+- **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
+- **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
 
 Needs Rust (`rustup`) and Go. From the repo:
 
@@ -97,9 +103,22 @@ cargo run --release -- --demo   # sample data, nothing runs
 cargo run --release             # your PRs (uses your gh login)
 ```
 
-`desktop/scripts/bundle.sh` builds `desktop/dist/PR Deck.app` to keep in Applications. Keys: `j`/`k` or arrows move through PRs, `1`–`9` switch filters, `⌘K` or `/` opens the filter palette, `⌘R` or `R` refreshes, and each command's key from your config runs it. `esc` closes the command bar.
+`desktop/scripts/bundle.sh` builds `desktop/dist/PR Deck.app` to keep in Applications.
 
-Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state palette|changes|noclone]`.
+| Keys | |
+| --- | --- |
+| `j` `k` / arrows | move through PRs |
+| `⌘T` or `⌘P` | go to a PR |
+| `⌘K` or `/` | filters; `1`–`9` pick one |
+| `⌘W` / `⌘⇧T` | close tab / reopen it |
+| `⌘1`–`⌘9`, `⌘⇧[` `⌘⇧]`, `⌃Tab` | switch tabs |
+| `⌘R` | refresh |
+| `⌘O` / `⌘⇧O` | open in editor / on GitHub |
+| `⌘B` | hide the sidebar |
+| `⌘,` | edit the config |
+| your command keys | run that command; `esc` closes the command bar |
+
+Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
 
 ## Configuration
 

@@ -55,8 +55,9 @@ impl Drop for Inner {
 }
 
 impl Rpc {
-    /// Starts `prdeck serve` (with sample data when `demo` is set).
-    pub fn start(demo: bool) -> Result<Self> {
+    /// Starts `prdeck serve` (with sample data when `demo` is set; `signed_out` makes
+    /// the demo start signed out, to try the sign-in screen).
+    pub fn start(demo: bool, signed_out: bool) -> Result<Self> {
         let bin = sidecar();
         let mut cmd = Command::new(&bin);
         cmd.arg("serve");
@@ -64,7 +65,7 @@ impl Rpc {
             cmd.env("PATH", path);
         }
         if demo {
-            cmd.arg("--demo");
+            cmd.arg(if signed_out { "--demo-signed-out" } else { "--demo" });
         }
         let mut child = cmd
             .stdin(Stdio::piped())

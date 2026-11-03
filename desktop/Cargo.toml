@@ -6,12 +6,21 @@ description = "PR Deck desktop app: a GPUI front-end over prdeck's Go core"
 publish = false
 
 [dependencies]
-gpui-kit = "0.9.0"
+gpui-kit = { version = "0.9.0", features = ["syntect"] }
 anyhow = "1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Debug info for dependencies is most of target/ (GPUI is large); keep it for our
+# own code only, so a debug build takes a fraction of the disk.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [features]
 # `cargo run --features snapshot -- --demo --snapshot out.png [--state palette]` saves

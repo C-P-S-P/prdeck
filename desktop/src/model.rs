@@ -111,6 +111,41 @@ pub struct Detail {
     pub checks: Vec<Check>,
     #[serde(deserialize_with = "null_vec")]
     pub timeline: Vec<Event>,
+    #[serde(deserialize_with = "null_vec")]
+    pub commit_list: Vec<Commit>,
+    #[serde(deserialize_with = "null_vec")]
+    pub files: Vec<ChangedFile>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Commit {
+    pub oid: String,
+    pub short: String,
+    pub headline: String,
+    pub body: String,
+    pub at: String,
+    pub author: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub check_state: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChangedFile {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub change_type: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct FetchedImage {
+    pub data: String,
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 impl Detail {
@@ -288,4 +323,54 @@ pub fn short_home(p: &str) -> String {
         Ok(h) if !h.is_empty() && p.starts_with(&h) => format!("~{}", &p[h.len()..]),
         _ => p.to_string(),
     }
+}
+
+/// What first-run setup needs to know.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetupStatus {
+    pub gh_installed: bool,
+    pub gh_version: String,
+    pub brew_found: bool,
+    pub signed_in: bool,
+    pub login: String,
+    pub config_exists: bool,
+    pub config_path: String,
+    #[serde(deserialize_with = "null_vec")]
+    pub folders: Vec<FolderChoice>,
+    #[serde(deserialize_with = "null_vec")]
+    pub editors: Vec<EditorChoice>,
+    pub editor: String,
+    pub worktree: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct FolderChoice {
+    pub path: String,
+    pub clones: u64,
+    pub saved: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct EditorChoice {
+    pub name: String,
+    pub label: String,
+    pub installed: bool,
+    pub run: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct DeviceCode {
+    pub code: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct LoginDone {
+    pub ok: bool,
+    pub login: String,
 }

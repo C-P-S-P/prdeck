@@ -3,6 +3,8 @@ package mdrender
 import (
 	"regexp"
 	"strings"
+
+	"github.com/yuin/goldmark-emoji/definition"
 )
 
 // The GitHub cleanup step: PR bodies and bot comments are full of HTML and GitHub-only
@@ -94,6 +96,85 @@ func boldMentions(s string) string {
 		parts := strings.Split(line, "`")
 		for j := 0; j < len(parts); j += 2 {
 			parts[j] = mention.ReplaceAllString(parts[j], "$1**@$2**")
+		}
+		lines[i] = strings.Join(parts, "`")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// GitHubForDesktop prepares a PR or comment body for the desktop app, whose renderer
+// understands HTML (<img width>, <details>, <br>) and GitHub alerts itself. It only
+// drops HTML comments, labels suggestion blocks, and links @mentions to their
+// profiles. Fenced code blocks pass through untouched.
+func GitHubForDesktop(src string) string {
+	var out []string
+	inCode := false
+	text := []string{}
+	flush := func() {
+		if len(text) > 0 {
+			s := htmlComment.ReplaceAllString(strings.Join(text, "\n"), "")
+			out = append(out, linkMentions(s))
+			text = text[:0]
+		}
+	}
+	for _, line := range strings.Split(src, "\n") {
+		if fence.MatchString(line) {
+			if !inCode {
+				flush()
+				if lang := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "`~")); lang == "suggestion" {
+					out = append(out, "**Suggested change**", "")
+					line = strings.Replace(line, "suggestion", "diff", 1)
+				}
+			}
+			inCode = !inCode
+			out = append(out, line)
+			continue
+		}
+		if inCode {
+			out = append(out, line)
+			continue
+		}
+		text = append(text, line)
+	}
+	flush()
+	return strings.Join(out, "\n")
+}
+
+// mentionLink is a mention not already inside a link or an email address.
+var mentionLink = regexp.MustCompile(`(^|[\s(])@([A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?)`)
+
+var (
+	shortcode = regexp.MustCompile(`:([a-z0-9_+\-]+):`)
+	emojis    = definition.Github()
+)
+
+// emojiShortcodes turns :rocket: into 🚀, as GitHub does.
+func emojiShortcodes(s string) string {
+	return shortcode.ReplaceAllStringFunc(s, func(m string) string {
+		if e, ok := emojis.Get(m[1 : len(m)-1]); ok && len(e.Unicode) > 0 {
+			return string(e.Unicode)
+		}
+		return m
+	})
+}
+
+// linkMentions turns @user into a link to their profile (teams link to the org's
+// team page) and emoji shortcodes into emoji, skipping inline code.
+func linkMentions(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		parts := strings.Split(line, "`")
+		for j := 0; j < len(parts); j += 2 {
+			parts[j] = mentionLink.ReplaceAllStringFunc(parts[j], func(m string) string {
+				sub := mentionLink.FindStringSubmatch(m)
+				who := sub[2]
+				href := "https://github.com/" + who
+				if org, team, ok := strings.Cut(who, "/"); ok {
+					href = "https://github.com/orgs/" + org + "/teams/" + team
+				}
+				return sub[1] + "[@" + who + "](" + href + ")"
+			})
+			parts[j] = emojiShortcodes(parts[j])
 		}
 		lines[i] = strings.Join(parts, "`")
 	}

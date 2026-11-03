@@ -12,6 +12,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,11 +48,18 @@ type Backend interface {
 	ListClones(ctx context.Context) []repos.DiskClone
 }
 
+// imageFetcher is a backend that can download images with the user's GitHub login.
+type imageFetcher interface {
+	FetchImage(ctx context.Context, url string) ([]byte, string, error)
+}
+
 // Info describes the process to the client.
 type Info struct {
 	Version    string
 	ConfigPath string
 	Demo       bool
+	// DemoSignedOut starts demo mode signed out, to try the sign-in screen.
+	DemoSignedOut bool
 }
 
 type request struct {
@@ -82,7 +90,7 @@ func (e codedError) Unwrap() error { return e.err }
 
 // Serve answers requests from in until it is closed.
 func Serve(b Backend, info Info, in io.Reader, out io.Writer) error {
-	s := &server{b: b, info: info, enc: json.NewEncoder(out)}
+	s := &server{b: b, info: info, enc: json.NewEncoder(out), demoSignedIn: !info.DemoSignedOut}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64*1024), 32<<20)
 	var wg sync.WaitGroup
@@ -103,14 +111,19 @@ func Serve(b Backend, info Info, in io.Reader, out io.Writer) error {
 		}()
 	}
 	wg.Wait()
+	s.close()
 	return sc.Err()
 }
 
 type server struct {
 	b    Backend
 	info Info
-	mu   sync.Mutex
+	mu   sync.Mutex // guards enc and login
 	enc  *json.Encoder
+
+	login        *login
+	demoSignedIn bool
+	demoLoginAt  time.Time
 }
 
 func (s *server) send(r response) {
@@ -118,6 +131,9 @@ func (s *server) send(r response) {
 	defer s.mu.Unlock()
 	_ = s.enc.Encode(r)
 }
+
+// Close stops a sign-in still waiting when the app quits.
+func (s *server) close() { s.loginCancel() }
 
 func (s *server) handle(req request) {
 	result, err := s.call(req.Method, req.Params)
@@ -179,6 +195,9 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		d, fresh := s.b.CachedDetail(p.PR)
+		if d != nil && d.Commits > 0 && len(d.CommitList) == 0 {
+			fresh = false // saved before commits were fetched
+		}
 		return map[string]any{"detail": forDisplay(d), "fresh": fresh}, nil
 
 	case "detail":
@@ -235,6 +254,51 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return s.execute(p.Plan, p.Changes)
+
+	case "image":
+		p, err := decode[struct{ URL string }](raw)
+		if err != nil {
+			return nil, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		defer cancel()
+		var data []byte
+		var kind string
+		if f, ok := s.b.(imageFetcher); ok {
+			data, kind, err = f.FetchImage(ctx, p.URL)
+		} else {
+			data, kind, err = github.FetchPublicImage(ctx, p.URL)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"data": base64.StdEncoding.EncodeToString(data), "type": kind}, nil
+
+	case "setupStatus":
+		return s.setupStatus()
+
+	case "loginStart":
+		return s.loginStart()
+
+	case "loginWait":
+		return s.loginWait()
+
+	case "loginCancel":
+		s.loginCancel()
+		return map[string]any{"ok": true}, nil
+
+	case "installGh":
+		return s.installGh()
+
+	case "saveSetup":
+		p, err := decode[config.Setup](raw)
+		if err != nil {
+			return nil, err
+		}
+		return s.saveSetup(p)
+
+	case "openConfig":
+		return s.openConfig()
 
 	case "findClones":
 		p, err := decode[struct{ Repo string }](raw)
@@ -367,20 +431,20 @@ func (s *server) hello() any {
 	}
 }
 
-// forDisplay returns a copy of d with GitHub's HTML (comments, <details>, <img>,
-// alerts) turned into plain markdown, which the desktop app's renderer understands.
+// forDisplay returns a copy of d ready for the desktop app's renderer: HTML comments
+// dropped and @mentions linked; HTML, images and alerts are left for the renderer.
 func forDisplay(d *github.Detail) *github.Detail {
 	if d == nil {
 		return nil
 	}
 	c := *d
-	c.Body = mdrender.GitHubToMarkdown(d.Body)
+	c.Body = mdrender.GitHubForDesktop(d.Body)
 	c.Timeline = make([]github.Event, len(d.Timeline))
 	for i, e := range d.Timeline {
-		e.Body = mdrender.GitHubToMarkdown(e.Body)
+		e.Body = mdrender.GitHubForDesktop(e.Body)
 		replies := make([]github.Reply, len(e.Replies))
 		for j, r := range e.Replies {
-			r.Body = mdrender.GitHubToMarkdown(r.Body)
+			r.Body = mdrender.GitHubForDesktop(r.Body)
 			replies[j] = r
 		}
 		e.Replies = replies
@@ -389,6 +453,8 @@ func forDisplay(d *github.Detail) *github.Detail {
 	c.Labels = nonNil(c.Labels)
 	c.Reviewers = nonNil(c.Reviewers)
 	c.Checks = nonNil(c.Checks)
+	c.CommitList = nonNil(c.CommitList)
+	c.Files = nonNil(c.Files)
 	return &c
 }
 

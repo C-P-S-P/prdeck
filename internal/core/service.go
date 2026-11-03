@@ -23,8 +23,10 @@ import (
 type Service struct {
 	cfg     *config.Config
 	cfgPath string
-	gh      *github.Client
 	cache   *cache.Cache
+
+	ghMu sync.RWMutex
+	gh   *github.Client // nil until the user signs in to GitHub
 
 	mu    sync.RWMutex
 	index *repos.Index
@@ -34,7 +36,11 @@ type Service struct {
 	diskAt time.Time
 }
 
-// New wires the service. cfgPath is where SetClonePath saves repo paths.
+// ErrSignedOut means there is no GitHub login yet (`gh auth login`).
+var ErrSignedOut = errors.New("not signed in to GitHub; run `gh auth login`")
+
+// New wires the service. cfgPath is where SetClonePath saves repo paths. gh may be
+// nil when nobody is signed in yet; Connect picks the login up later.
 func New(cfg *config.Config, cfgPath string, gh *github.Client, c *cache.Cache) *Service {
 	s := &Service{cfg: cfg, cfgPath: cfgPath, gh: gh, cache: c}
 	s.Rescan()
@@ -65,7 +71,11 @@ func (s *Service) CachedSearch(query string) (cache.SearchEntry, bool) { return 
 
 // Search asks GitHub for open PRs matching a filter query and saves them.
 func (s *Service) Search(ctx context.Context, query string) ([]github.PR, error) {
-	prs, viewer, err := s.gh.Search(ctx, query, s.cfg.GitHub.Limit)
+	gh := s.client()
+	if gh == nil {
+		return nil, ErrSignedOut
+	}
+	prs, viewer, err := gh.Search(ctx, query, s.cfg.GitHub.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -78,12 +88,68 @@ func (s *Service) CachedDetail(pr github.PR) (*github.Detail, bool) { return s.c
 
 // Detail loads a PR's description, conversation, reviewers and checks.
 func (s *Service) Detail(ctx context.Context, pr github.PR) (*github.Detail, error) {
-	d, err := s.gh.Detail(ctx, pr.Repo, pr.Number)
+	gh := s.client()
+	if gh == nil {
+		return nil, ErrSignedOut
+	}
+	d, err := gh.Detail(ctx, pr.Repo, pr.Number)
 	if err != nil {
 		return nil, err
 	}
 	s.cache.PutDetail(d)
 	return d, nil
+}
+
+// FetchImage downloads an image from a PR body, with the gh login for GitHub's hosts.
+func (s *Service) FetchImage(ctx context.Context, url string) ([]byte, string, error) {
+	if gh := s.client(); gh != nil {
+		return gh.FetchImage(ctx, url)
+	}
+	return github.FetchPublicImage(ctx, url)
+}
+
+func (s *Service) client() *github.Client {
+	s.ghMu.RLock()
+	defer s.ghMu.RUnlock()
+	return s.gh
+}
+
+// Connect (re)reads the gh login, after the user signs in.
+func (s *Service) Connect() error {
+	gh, err := github.NewClient()
+	if err != nil {
+		return err
+	}
+	s.ghMu.Lock()
+	s.gh = gh
+	s.ghMu.Unlock()
+	return nil
+}
+
+// Login is the signed-in GitHub user, or "" when nobody is signed in.
+func (s *Service) Login(ctx context.Context) (string, error) {
+	gh := s.client()
+	if gh == nil {
+		return "", ErrSignedOut
+	}
+	return gh.Login(ctx)
+}
+
+// ConfigPath is the config file the service reads and writes.
+func (s *Service) ConfigPath() string { return s.cfgPath }
+
+// Reload reads the config file again, after setup changed it.
+func (s *Service) Reload() error {
+	cfg, err := config.Load(s.cfgPath)
+	if err != nil {
+		return err
+	}
+	*s.cfg = *cfg
+	s.Rescan()
+	s.diskMu.Lock()
+	s.disk = nil
+	s.diskMu.Unlock()
+	return nil
 }
 
 // ErrNoClone means no local clone of the PR's repo was found.

@@ -153,3 +153,19 @@ func TestWrappedRowsGetDividers(t *testing.T) {
 		t.Errorf("one-line rows need no dividers:\n%s", out)
 	}
 }
+
+func TestGitHubForDesktop(t *testing.T) {
+	cases := map[string]string{
+		"<!-- template -->\nHi @mlin :rocket:":           "\nHi [@mlin](https://github.com/mlin) 🚀",
+		"`@code :rocket:` stays":                         "`@code :rocket:` stays",
+		"cc @org/team, not a@b.com":                      "cc [@org/team](https://github.com/orgs/org/teams/team), not a@b.com",
+		"> [!NOTE]\n> <img width=\"300\" src=\"x.png\">": "> [!NOTE]\n> <img width=\"300\" src=\"x.png\">",
+		"```suggestion\nreturn x\n```":                   "**Suggested change**\n\n```diff\nreturn x\n```",
+		"time 10:30:00 and :not_an_emoji:":               "time 10:30:00 and :not_an_emoji:",
+	}
+	for in, want := range cases {
+		if got := GitHubForDesktop(in); got != want {
+			t.Errorf("GitHubForDesktop(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}

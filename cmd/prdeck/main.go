@@ -140,14 +140,12 @@ func serve(args []string) error {
 		return err
 	}
 	info := server.Info{Version: version, ConfigPath: config.DefaultPath()}
-	if len(args) > 0 && args[0] == "--demo" {
-		info.Demo = true
+	if len(args) > 0 && (args[0] == "--demo" || args[0] == "--demo-signed-out") {
+		info.Demo, info.DemoSignedOut = true, args[0] == "--demo-signed-out"
 		return server.Serve(demo.New(cfg), info, os.Stdin, os.Stdout)
 	}
-	gh, err := github.NewClient()
-	if err != nil {
-		return err
-	}
+	// Start without a login too: the desktop app walks the user through signing in.
+	gh, _ := github.NewClient()
 	svc := core.New(cfg, config.DefaultPath(), gh, cache.Open(cache.DefaultPath()))
 	return server.Serve(svc, info, os.Stdin, os.Stdout)
 }

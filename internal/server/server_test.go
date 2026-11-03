@@ -142,12 +142,23 @@ func TestPlansAndChanges(t *testing.T) {
 	}
 }
 
-func TestDetailIsMarkdown(t *testing.T) {
-	d := forDisplay(&github.Detail{Body: "<!-- hidden -->\n> [!NOTE]\n> hi", Timeline: []github.Event{{Body: "a<br>b"}}})
-	if strings.Contains(d.Body, "<!--") || !strings.Contains(d.Body, "**Note**") || d.Timeline[0].Body != "a b" {
-		t.Errorf("got %q / %q", d.Body, d.Timeline[0].Body)
+func TestDetailForDesktop(t *testing.T) {
+	d := forDisplay(&github.Detail{
+		Body:     "<!-- hidden -->\n> [!NOTE]\n> hi @mlin, see <img width=\"300\" src=\"https://x/y.png\">",
+		Timeline: []github.Event{{Body: "a<br>b `@code`"}},
+	})
+	for _, want := range []string{"> [!NOTE]", "[@mlin](https://github.com/mlin)", `<img width="300"`} {
+		if !strings.Contains(d.Body, want) {
+			t.Errorf("body should keep %q: %q", want, d.Body)
+		}
 	}
-	if d.Labels == nil || d.Checks == nil {
+	if strings.Contains(d.Body, "<!--") {
+		t.Errorf("comment left in: %q", d.Body)
+	}
+	if d.Timeline[0].Body != "a<br>b `@code`" {
+		t.Errorf("timeline body changed: %q", d.Timeline[0].Body)
+	}
+	if d.Labels == nil || d.Checks == nil || d.CommitList == nil || d.Files == nil {
 		t.Error("empty lists should be [] in JSON")
 	}
 }

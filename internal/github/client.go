@@ -22,6 +22,19 @@ func NewClient() (*Client, error) {
 	return &Client{gql: gql}, nil
 }
 
+// Login is the signed-in user's GitHub login.
+func (c *Client) Login(ctx context.Context) (string, error) {
+	var resp struct {
+		Viewer struct {
+			Login string `json:"login"`
+		} `json:"viewer"`
+	}
+	if err := c.gql.DoWithContext(ctx, "query PRDeckViewer { viewer { login } }", nil, &resp); err != nil {
+		return "", err
+	}
+	return resp.Viewer.Login, nil
+}
+
 // SearchQuery turns a filter like "involves:@me" into a full PR search.
 func SearchQuery(filter string) string {
 	q := strings.TrimSpace(filter)
@@ -148,6 +161,12 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
         ... on CheckRun { name status conclusion }
         ... on StatusContext { context state }
       } } } } } }
+      commitList: commits(last: 100) { nodes { commit {
+        oid abbreviatedOid messageHeadline messageBody committedDate additions deletions
+        authors(first: 1) { nodes { name user { login } } }
+        statusCheckRollup { state }
+      } } }
+      files(first: 100) { nodes { path additions deletions changeType } }
       labels(first: 20) { nodes { name } }
       reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } }
       latestReviews(first: 20) { nodes { author { login } state } }
@@ -196,6 +215,31 @@ type detailNode struct {
 			} `json:"commit"`
 		} `json:"nodes"`
 	} `json:"commits"`
+	CommitList struct {
+		Nodes []struct {
+			Commit struct {
+				OID            string    `json:"oid"`
+				AbbreviatedOID string    `json:"abbreviatedOid"`
+				Headline       string    `json:"messageHeadline"`
+				Body           string    `json:"messageBody"`
+				CommittedDate  time.Time `json:"committedDate"`
+				Additions      int       `json:"additions"`
+				Deletions      int       `json:"deletions"`
+				Authors        struct {
+					Nodes []struct {
+						Name string `json:"name"`
+						User *login `json:"user"`
+					} `json:"nodes"`
+				} `json:"authors"`
+				StatusCheckRollup *struct {
+					State string `json:"state"`
+				} `json:"statusCheckRollup"`
+			} `json:"commit"`
+		} `json:"nodes"`
+	} `json:"commitList"`
+	Files struct {
+		Nodes []File `json:"nodes"`
+	} `json:"files"`
 	Labels struct {
 		Nodes []struct {
 			Name string `json:"name"`
@@ -272,6 +316,23 @@ func (n *detailNode) toDetail() *Detail {
 	for _, l := range n.Labels.Nodes {
 		d.Labels = append(d.Labels, l.Name)
 	}
+	for _, c := range n.CommitList.Nodes {
+		cm := Commit{
+			OID: c.Commit.OID, Short: c.Commit.AbbreviatedOID, Headline: c.Commit.Headline, Body: c.Commit.Body,
+			At: c.Commit.CommittedDate, Additions: c.Commit.Additions, Deletions: c.Commit.Deletions,
+		}
+		if a := c.Commit.Authors.Nodes; len(a) > 0 {
+			cm.Author = a[0].Name
+			if a[0].User != nil && a[0].User.Login != "" {
+				cm.Author = a[0].User.Login
+			}
+		}
+		if c.Commit.StatusCheckRollup != nil {
+			cm.CheckState = c.Commit.StatusCheckRollup.State
+		}
+		d.CommitList = append(d.CommitList, cm)
+	}
+	d.Files = n.Files.Nodes
 
 	if len(n.Commits.Nodes) > 0 {
 		if r := n.Commits.Nodes[0].Commit.StatusCheckRollup; r != nil {

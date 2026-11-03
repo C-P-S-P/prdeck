@@ -48,6 +48,29 @@ type Detail struct {
 	Reviewers    []Reviewer `json:"reviewers"`
 	Checks       []Check    `json:"checks"`
 	Timeline     []Event    `json:"timeline"`
+	CommitList   []Commit   `json:"commitList"` // oldest first, up to the last 100
+	Files        []File     `json:"files"`      // up to the first 100
+}
+
+// Commit is one commit on the PR branch.
+type Commit struct {
+	OID        string    `json:"oid"`
+	Short      string    `json:"short"`
+	Headline   string    `json:"headline"`
+	Body       string    `json:"body"`
+	At         time.Time `json:"at"`
+	Author     string    `json:"author"` // GitHub login, or the git author name
+	Additions  int       `json:"additions"`
+	Deletions  int       `json:"deletions"`
+	CheckState string    `json:"checkState"`
+}
+
+// File is one changed file.
+type File struct {
+	Path       string `json:"path"`
+	Additions  int    `json:"additions"`
+	Deletions  int    `json:"deletions"`
+	ChangeType string `json:"changeType"` // ADDED, MODIFIED, DELETED, RENAMED, COPIED, CHANGED
 }
 
 type Reviewer struct {

@@ -4,15 +4,27 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use futures::StreamExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use serde_json::json;
 
+use crate::layout::Layout;
+use crate::markdown::{self, Images};
 use crate::model::*;
 use crate::rpc::Rpc;
 use crate::theme::*;
+
+mod setup;
+use setup::*;
+
+gpui_kit::actions!(
+    prdeck,
+    [GoToPr, Filters, CloseTab, ReopenTab, Refresh, NextTab, PrevTab, OpenConfig, OpenInEditor, OpenOnGitHub, ToggleSidebar, RunSetup]
+);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -52,9 +64,18 @@ enum Stage {
     Failed(String),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum PaletteMode {
+    /// ⌘K: saved filters, or any GitHub search qualifier.
+    Filters,
+    /// ⌘T / ⌘P: jump to a pull request by number, title, repo or author.
+    Prs,
+}
+
 struct Palette {
     input: Entity<InputState>,
     hi: usize,
+    mode: PaletteMode,
     _sub: Subscription,
 }
 
@@ -62,6 +83,7 @@ struct Palette {
 enum Apply {
     Filter(usize),
     Query(String),
+    Pr(Pr),
 }
 
 struct PaletteItem {
@@ -93,6 +115,17 @@ pub struct Deck {
     section: Section,
     run: Option<Run>,
     palette: Option<Palette>,
+    images: Images,
+    layout: Layout,
+    /// Recently closed tabs, for ⌘⇧T.
+    closed: Vec<Pr>,
+    /// A PR to open once a search returns it (key: "owner/repo#n").
+    want: Option<String>,
+    /// Scroll position of the PR's conversation; back to the top on a new PR.
+    detail_scroll: ScrollHandle,
+    /// First-run setup, while it shows.
+    setup: Option<Setup>,
+    force_setup: bool,
     _timer: Option<Task<()>>,
 }
 
@@ -100,6 +133,7 @@ impl Deck {
     pub fn new(demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let (images, queue) = Images::new();
         let mut this = Self {
             rpc: None,
             focus,
@@ -121,12 +155,21 @@ impl Deck {
             section: Section::Conversation,
             run: None,
             palette: None,
+            images,
+            layout: Layout::load(),
+            closed: vec![],
+            want: None,
+            detail_scroll: ScrollHandle::new(),
+            setup: None,
+            force_setup: std::env::args().any(|a| a == "--setup"),
             _timer: None,
         };
-        match Rpc::start(demo) {
+        let signed_out = std::env::args().any(|a| a == "--signed-out");
+        match Rpc::start(demo, signed_out) {
             Ok(rpc) => {
                 this.rpc = Some(rpc);
-                this.say_hello(cx);
+                this.say_hello(window, cx);
+                this.load_images(queue, cx);
             }
             Err(e) => {
                 this.loading = false;
@@ -136,21 +179,58 @@ impl Deck {
         this
     }
 
+    /// Downloads images from PR text as the markdown view asks for them, several at
+    /// a time, and redraws as each arrives.
+    fn load_images(&mut self, mut queue: futures::channel::mpsc::UnboundedReceiver<String>, cx: &mut Context<Self>) {
+        let (Some(rpc), images) = (self.rpc.clone(), self.images.clone()) else { return };
+        cx.spawn(async move |this, cx| {
+            while let Some(url) = queue.next().await {
+                let fetch = rpc.call::<FetchedImage>("image", json!({ "url": url }));
+                let (images, this) = (images.clone(), this.clone());
+                cx.spawn(async move |cx| {
+                    let bytes = fetch.await.ok().and_then(|f| {
+                        let data = base64::engine::general_purpose::STANDARD.decode(f.data).ok()?;
+                        Some((data, f.kind))
+                    });
+                    images.put(url, bytes);
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            }
+        })
+        .detach();
+    }
+
     // ── data ────────────────────────────────────────────────────────────────
 
-    fn say_hello(&mut self, cx: &mut Context<Self>) {
+    fn say_hello(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rpc) = self.rpc.clone() else { return };
         let hello = rpc.call::<Hello>("hello", json!({}));
-        cx.spawn(async move |this, cx| {
+        let status = rpc.call::<SetupStatus>("setupStatus", json!({}));
+        cx.spawn_in(window, async move |this, cx| {
             let res = hello.await;
-            let _ = this.update(cx, |this, cx| {
+            let status = status.await.ok();
+            let _ = this.update_in(cx, |this, window, cx| {
                 match res {
                     Ok(h) => {
                         if !h.warnings.is_empty() {
                             this.banner = Some(format!("Config: {}", h.warnings.join(" · ")));
                         }
+                        let demo = h.demo;
                         this.hello = h;
-                        this.load(cx);
+                        let signed_in = status.as_ref().is_none_or(|st| st.signed_in);
+                        // Setup shows on the first launch and whenever nobody is signed
+                        // in; the demo skips it unless asked (--setup).
+                        let first_run = !this.layout.onboarded && !demo;
+                        if this.setup.is_none() && (!signed_in || first_run || this.force_setup) {
+                            this.force_setup = false;
+                            this.open_setup(window, cx);
+                        }
+                        if signed_in {
+                            this.load(cx);
+                        } else {
+                            this.loading = false;
+                        }
                         this.start_timer(cx);
                     }
                     Err(e) => {
@@ -250,6 +330,13 @@ impl Deck {
             }
         }
         self.prs = prs;
+        if let Some(want) = self.want.clone() {
+            if let Some(pr) = self.prs.iter().find(|p| p.key() == want).cloned() {
+                self.want = None;
+                self.select(pr, cx);
+                return;
+            }
+        }
         if self.selected.is_none() {
             if let Some(first) = self.visible().first().cloned() {
                 self.select(first, cx);
@@ -280,6 +367,9 @@ impl Deck {
 
     fn select(&mut self, pr: Pr, cx: &mut Context<Self>) {
         let key = pr.key();
+        if self.selected.as_ref() != Some(&key) {
+            self.detail_scroll.set_offset(point(px(0.), px(0.)));
+        }
         self.selected = Some(key.clone());
         match self.tabs.iter_mut().find(|t| t.key() == key) {
             Some(t) => *t = pr.clone(),
@@ -297,7 +387,9 @@ impl Deck {
 
     fn close_tab(&mut self, key: &str, cx: &mut Context<Self>) {
         let Some(i) = self.tabs.iter().position(|t| t.key() == key) else { return };
-        self.tabs.remove(i);
+        let closed = self.tabs.remove(i);
+        self.closed.retain(|p| p.key() != closed.key());
+        self.closed.push(closed);
         if self.selected.as_deref() == Some(key) {
             self.selected = None;
             if let Some(next) = self.tabs.get(i.min(self.tabs.len().saturating_sub(1))).cloned() {
@@ -566,9 +658,12 @@ impl Deck {
 
     // ── palette ─────────────────────────────────────────────────────────────
 
-    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Type a filter, or a qualifier like involves:@me"));
+    fn open_palette(&mut self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
+        let hint = match mode {
+            PaletteMode::Filters => "Type a filter, or a qualifier like involves:@me",
+            PaletteMode::Prs => "Go to a pull request: number, title, repo or author",
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
         let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::Change => {
                 if let Some(p) = this.palette.as_mut() {
@@ -585,8 +680,17 @@ impl Deck {
             _ => {}
         });
         input.update(cx, |s, cx| s.focus(window, cx));
-        self.palette = Some(Palette { input, hi: 0, _sub: sub });
+        self.palette = Some(Palette { input, hi: 0, mode, _sub: sub });
         cx.notify();
+    }
+
+    /// Opens the palette in `mode`, or closes it when it is already showing that.
+    fn toggle_palette(&mut self, mode: PaletteMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.as_ref().is_some_and(|p| p.mode == mode) {
+            self.close_palette(window, cx);
+        } else {
+            self.open_palette(mode, window, cx);
+        }
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -596,8 +700,34 @@ impl Deck {
     }
 
     fn palette_items(&self, cx: &App) -> Vec<PaletteItem> {
-        let q = self.palette.as_ref().map(|p| p.input.read(cx).value().to_string()).unwrap_or_default();
+        let Some(p) = self.palette.as_ref() else { return vec![] };
+        let q = p.input.read(cx).value().to_string();
         let needle = q.trim().to_lowercase();
+        if p.mode == PaletteMode::Prs {
+            let mut seen = HashSet::new();
+            let mut scored: Vec<(usize, PaletteItem)> = self
+                .prs
+                .iter()
+                .chain(self.tabs.iter())
+                .filter(|pr| seen.insert(pr.key()))
+                .filter_map(|pr| {
+                    let hay = format!("#{} {} {} {}", pr.number, pr.title, pr.repo, pr.author).to_lowercase();
+                    let score = fuzzy_score(&needle, &hay)?;
+                    Some((
+                        score,
+                        PaletteItem {
+                            group: "Pull requests",
+                            label: format!("#{}  {}", pr.number, pr.title),
+                            qual: pr.repo.clone(),
+                            apply: Apply::Pr(pr.clone()),
+                            active: self.selected.as_ref() == Some(&pr.key()),
+                        },
+                    ))
+                })
+                .collect();
+            scored.sort_by_key(|(s, _)| *s);
+            return scored.into_iter().map(|(_, it)| it).take(80).collect();
+        }
         let mut items: Vec<PaletteItem> = self
             .hello
             .filters
@@ -633,10 +763,113 @@ impl Deck {
                 self.custom = None;
             }
             Apply::Query(q) => self.custom = Some(q),
+            Apply::Pr(pr) => {
+                self.close_palette(window, cx);
+                self.select(pr, cx);
+                return;
+            }
         }
         self.repo = None;
         self.close_palette(window, cx);
         self.load(cx);
+    }
+
+    // ── shortcuts ───────────────────────────────────────────────────────────
+
+    fn on_go_to_pr(&mut self, _: &GoToPr, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_palette(PaletteMode::Prs, window, cx);
+    }
+
+    fn on_filters(&mut self, _: &Filters, window: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_palette(PaletteMode::Filters, window, cx);
+    }
+
+    /// ⌘W closes the PR tab; with no tabs left it closes the window, like any Mac app.
+    fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return self.close_palette(window, cx);
+        }
+        match self.selected.clone() {
+            Some(key) if self.tabs.iter().any(|t| t.key() == key) => self.close_tab(&key, cx),
+            _ => window.remove_window(),
+        }
+    }
+
+    fn on_reopen_tab(&mut self, _: &ReopenTab, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pr) = self.closed.pop() {
+            self.select(pr, cx);
+        }
+    }
+
+    fn on_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.load(cx);
+        if let Some(pr) = self.selected_pr() {
+            self.details.remove(&pr.key());
+            self.load_detail(pr.clone(), cx);
+            self.load_folder(pr, cx);
+        }
+    }
+
+    fn step_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let n = self.tabs.len() as isize;
+        let cur = self.selected.as_ref().and_then(|k| self.tabs.iter().position(|t| &t.key() == k)).unwrap_or(0) as isize;
+        let next = self.tabs[((cur + delta) % n + n) as usize % n as usize].clone();
+        self.select(next, cx);
+    }
+
+    fn on_next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(1, cx);
+    }
+
+    fn on_prev_tab(&mut self, _: &PrevTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(-1, cx);
+    }
+
+    /// ⌘1–⌘8 pick that tab, ⌘9 the last one, as in browsers and Zed.
+    fn activate_tab(&mut self, n: usize, cx: &mut Context<Self>) {
+        let pick = if n == 9 { self.tabs.last() } else { self.tabs.get(n.saturating_sub(1)) };
+        if let Some(pr) = pick.cloned() {
+            self.select(pr, cx);
+        }
+    }
+
+    fn on_open_config(&mut self, _: &OpenConfig, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        let res = rpc.call::<serde_json::Value>("openConfig", json!({}));
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = res.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.banner = Some(format!("Opening the config: {}", e.message));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn on_open_in_editor(&mut self, _: &OpenInEditor, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.find_cmd(|c| c.action == "open" && !c.worktree) {
+            self.start(c, window, cx);
+        }
+    }
+
+    fn on_open_on_github(&mut self, _: &OpenOnGitHub, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pr) = self.selected_pr() {
+            cx.open_url(&pr.url);
+        }
+    }
+
+    fn on_run_setup(&mut self, _: &RunSetup, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_setup(window, cx);
+    }
+
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.layout.sidebar_hidden = !self.layout.sidebar_hidden;
+        self.layout.save();
+        cx.notify();
     }
 
     fn palette_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -665,6 +898,9 @@ impl Deck {
 
     fn typing(&self, window: &Window, cx: &App) -> bool {
         let focused = |s: &Entity<InputState>| s.read(cx).focus_handle(cx).is_focused(window);
+        if self.setup.as_ref().is_some_and(|s| focused(s.add_input())) {
+            return true;
+        }
         match self.run.as_ref().map(|r| &r.stage) {
             Some(Stage::Prompt(s)) => focused(s),
             Some(Stage::NoClone { path, .. }) => focused(path),
@@ -675,26 +911,25 @@ impl Deck {
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = &ks.modifiers;
-        if m.platform && ks.key == "k" {
-            if self.palette.is_some() {
-                self.close_palette(window, cx);
-            } else {
-                self.open_palette(window, cx);
-            }
-            cx.stop_propagation();
+        if self.palette.is_some() {
             return;
         }
-        if self.palette.is_some() {
+        if self.setup.is_some() {
+            if ks.key == "enter" && !self.typing(window, cx) && !m.modified() {
+                self.setup_enter(window, cx);
+            }
+            return;
+        }
+        if m.platform && !m.shift && !m.alt && !m.control {
+            if let Ok(n @ 1..=9) = ks.key.parse::<usize>() {
+                self.activate_tab(n, cx);
+            }
             return;
         }
         if self.typing(window, cx) {
             if ks.key == "escape" {
                 self.close_run(window, cx);
             }
-            return;
-        }
-        if m.platform && ks.key == "r" {
-            self.load(cx);
             return;
         }
         if m.control || m.platform || m.alt || m.function {
@@ -722,7 +957,7 @@ impl Deck {
             "j" => return self.move_selection(1, cx),
             "k" => return self.move_selection(-1, cx),
             "R" => return self.load(cx),
-            "/" => return self.open_palette(window, cx),
+            "/" => return self.open_palette(PaletteMode::Filters, window, cx),
             d if d.len() == 1 && ('1'..='9').contains(&d.chars().next().unwrap()) => {
                 let i = d.parse::<usize>().unwrap() - 1;
                 if i < self.hello.filters.len() {
@@ -801,11 +1036,11 @@ fn card_head() -> Div {
         .text_color(rgb(SOFT))
 }
 
-fn markdown(id: String, body: &str) -> AnyElement {
+fn md_body(id: String, body: &str, images: &Images) -> AnyElement {
     if body.trim().is_empty() {
         return div().italic().text_color(rgb(DIM)).child("No description provided.").into_any_element();
     }
-    TextView::markdown(SharedString::from(id), body.to_string()).selectable(true).into_any_element()
+    markdown::view(id, body, images).into_any_element()
 }
 
 impl Deck {
@@ -857,7 +1092,7 @@ impl Deck {
                         .cursor_pointer()
                         .hover(|s| s.border_color(rgb(BORDER_3)))
                         .on_mouse_down(MouseButton::Left, stop)
-                        .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_palette(PaletteMode::Filters, window, cx)))
                         .child(icon("search", 13., DIM))
                         .child(
                             div()
@@ -961,28 +1196,34 @@ impl Deck {
         let rows: Vec<AnyElement> = visible.iter().enumerate().map(|(i, p)| self.pr_row(i, p, cx)).collect();
         let empty = rows.is_empty();
 
+        let repos = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(section_head("Repositories", None))
+            .child(div().id("repos").flex_1().min_h(px(0.)).py(px(4.)).overflow_y_scroll().children(repo_rows));
+        let deck = cx.entity().downgrade();
         div()
-            .w(px(320.))
-            .flex_none()
+            .size_full()
             .flex()
             .flex_col()
             .bg(rgb(BG_SIDE))
             .border_r_1()
             .border_color(rgb(BORDER))
             .child(
+                v_resizable("sidebar-split")
+                    .on_resize(move |state, _, cx| {
+                        if let Some(h) = state.read(cx).sizes().first().copied() {
+                            let _ = deck.update(cx, |d, _| {
+                                d.layout.repos = f32::from(h);
+                                d.layout.save();
+                            });
+                        }
+                    })
+                    .child(resizable_panel().size(px(self.layout.repos)).size_range(px(64.)..px(1200.)).child(repos))
+                    .child(resizable_panel().child(
                 div()
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(section_head("Repositories", None))
-                    .child(div().id("repos").max_h(px(30. * 7. + 8.)).py(px(4.)).overflow_y_scroll().children(repo_rows)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
+                    .size_full()
                     .flex()
                     .flex_col()
                     .child(
@@ -998,7 +1239,7 @@ impl Deck {
                                 .text_color(rgb(TEXT_SOFT))
                                 .cursor_pointer()
                                 .hover(|s| s.bg(rgb(BG_HOVER)))
-                                .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                                .on_click(cx.listener(|this, _, window, cx| this.open_palette(PaletteMode::Filters, window, cx)))
                                 .child(div().max_w(px(150.)).truncate().child(self.query_label()))
                                 .child(icon("chevron-down", 12., SOFT)),
                         ),
@@ -1033,6 +1274,7 @@ impl Deck {
                                 )
                             }),
                     ),
+                    )),
             )
     }
 
@@ -1148,6 +1390,31 @@ impl Deck {
             }))
     }
 
+    /// Sidebar and PR, with a handle between them to drag.
+    fn body(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.layout.sidebar_hidden {
+            return div().flex_1().min_h(px(0.)).flex().child(self.main_area(cx)).into_any_element();
+        }
+        let deck = cx.entity().downgrade();
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                h_resizable("body-split")
+                    .on_resize(move |state, _, cx| {
+                        if let Some(w) = state.read(cx).sizes().first().copied() {
+                            let _ = deck.update(cx, |d, _| {
+                                d.layout.sidebar = f32::from(w);
+                                d.layout.save();
+                            });
+                        }
+                    })
+                    .child(resizable_panel().size(px(self.layout.sidebar)).size_range(px(220.)..px(900.)).child(self.sidebar(cx)))
+                    .child(resizable_panel().child(self.main_area(cx))),
+            )
+            .into_any_element()
+    }
+
     fn main_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.selected_pr() {
             None => div()
@@ -1160,7 +1427,7 @@ impl Deck {
                 .into_any_element(),
             Some(pr) => self.pr_view(pr, cx).into_any_element(),
         };
-        div().flex_1().min_w(px(0.)).flex().flex_col().bg(rgb(BG)).child(self.tabs(cx)).child(body)
+        div().size_full().min_w(px(0.)).flex().flex_col().bg(rgb(BG)).child(self.tabs(cx)).child(body)
     }
 
     fn pr_view(&self, pr: Pr, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1296,16 +1563,51 @@ impl Deck {
             .child(self.section_tabs(detail, cx));
 
         let content = match (detail, self.detail_err.get(&key)) {
-            (Some(d), _) => div()
-                .flex()
-                .items_start()
-                .gap(px(20.))
-                .px(px(20.))
-                .pt(px(20.))
-                .pb(px(64.))
-                .child(div().flex_1().min_w(px(0.)).max_w(px(900.)).flex().flex_col().gap(px(16.)).child(self.section_body(d, cx)))
-                .child(self.aside(d, cx))
-                .into_any_element(),
+            (Some(d), _) => {
+                let deck = cx.entity().downgrade();
+                h_resizable("detail-split")
+                    .on_resize(move |state, _, cx| {
+                        if let Some(w) = state.read(cx).sizes().get(1).copied() {
+                            let _ = deck.update(cx, |d, _| {
+                                d.layout.aside = f32::from(w);
+                                d.layout.save();
+                            });
+                        }
+                    })
+                    .child(
+                        resizable_panel().child(
+                            div()
+                                .id(SharedString::from(format!("scroll-{key}")))
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.detail_scroll)
+                                .child(
+                                    div()
+                                        .px(px(20.))
+                                        .pt(px(20.))
+                                        .pb(px(64.))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(16.))
+                                        .child(self.section_body(d, cx)),
+                                ),
+                        ),
+                    )
+                    .child(
+                        resizable_panel().size(px(self.layout.aside)).size_range(px(200.)..px(560.)).child(
+                            div()
+                                .id(SharedString::from(format!("aside-{key}")))
+                                .size_full()
+                                .overflow_y_scroll()
+                                .pl(px(4.))
+                                .pr(px(20.))
+                                .pt(px(20.))
+                                .pb(px(64.))
+                                .child(self.aside(d, cx)),
+                        ),
+                    )
+                    .into_any_element()
+            }
             (None, Some(err)) => div().p(px(20.)).text_color(rgb(RED)).child(err.clone()).into_any_element(),
             (None, None) => div().p(px(20.)).text_color(rgb(DIM)).child("Loading…").into_any_element(),
         };
@@ -1316,7 +1618,7 @@ impl Deck {
             .flex()
             .flex_col()
             .child(header)
-            .child(div().id(SharedString::from(format!("scroll-{key}"))).flex_1().min_h(px(0.)).overflow_y_scroll().child(content))
+            .child(div().flex_1().min_h(px(0.)).child(content))
     }
 
     fn section_tabs(&self, d: Option<&Detail>, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1355,37 +1657,219 @@ impl Deck {
         match self.section {
             Section::Conversation => self.conversation(d).into_any_element(),
             Section::Checks => checks_view(d).into_any_element(),
-            Section::Commits | Section::Files => {
-                let what = if self.section == Section::Commits {
-                    format!("{} commits", d.commits)
-                } else {
-                    format!("{} changed files (+{} −{})", d.changed_files, d.additions, d.deletions)
-                };
-                let editor = self.hello.editor.clone();
-                card()
-                    .border_dashed()
-                    .border_color(rgb(BORDER_3))
-                    .bg(rgb(BG))
-                    .px(px(24.))
-                    .py(px(28.))
-                    .gap(px(10.))
-                    .items_start()
-                    .child(div().text_size(px(15.)).text_color(rgb(TEXT_BRIGHT)).child(format!("Review {what} in your editor")))
-                    .child(div().text_color(rgb(SOFT)).child(format!(
-                        "PR Deck stays out of diff review. Open the branch in {editor} to read the changes with your own tools."
-                    )))
+            Section::Commits => self.commits_view(d, cx),
+            Section::Files => self.files_view(d, cx),
+        }
+    }
+
+    fn handoff(&self, what: String, cx: &mut Context<Self>) -> AnyElement {
+        let editor = self.hello.editor.clone();
+        card()
+            .border_dashed()
+            .border_color(rgb(BORDER_3))
+            .bg(rgb(BG))
+            .px(px(24.))
+            .py(px(28.))
+            .gap(px(10.))
+            .items_start()
+            .child(div().text_size(px(15.)).text_color(rgb(TEXT_BRIGHT)).child(format!("Review {what} in your editor")))
+            .child(div().text_color(rgb(SOFT)).child(format!(
+                "Open the branch in {editor} to read the changes with your own tools."
+            )))
+            .child(
+                primary_look("handoff")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
+                            this.start(c, window, cx);
+                        }
+                    }))
+                    .child(format!("Open in {editor}")),
+            )
+            .into_any_element()
+    }
+
+    fn commits_view(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
+        if d.commit_list.is_empty() {
+            return self.handoff(format!("{} commits", d.commits), cx);
+        }
+        let url = d.pr.url.clone();
+        let shown = d.commit_list.len() as u64;
+        let more = d.commits.saturating_sub(shown);
+        let rows = d.commit_list.iter().enumerate().map(|(i, c)| {
+            let open = format!("{url}/commits/{}", c.oid);
+            let sha = c.oid.clone();
+            let first_body_line = c.body.lines().find(|l| !l.trim().is_empty()).map(|l| l.to_string());
+            div()
+                .id(("commit", i))
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .px(px(14.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(rgb(BORDER))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(BG_HOVER)))
+                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&open)))
+                .child(div().pt(px(2.)).child(icon("git-commit-horizontal", 15., DIM)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.))
+                        .child(div().truncate().text_color(rgb(TEXT)).font_weight(FontWeight::MEDIUM).child(c.headline.clone()))
+                        .when_some(first_body_line, |d, l| {
+                            d.child(div().truncate().text_size(px(12.)).text_color(rgb(DIM)).child(l))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(12.))
+                                .text_color(rgb(SOFT))
+                                .child(avatar(&c.author, 16.))
+                                .child(div().text_color(rgb(TEXT_SOFT)).child(c.author.clone()))
+                                .child(format!("committed {} ago", ago(&c.at)))
+                                .when(c.additions + c.deletions > 0, |d| {
+                                    d.child(div().text_color(rgb(GREEN)).child(format!("+{}", c.additions)))
+                                        .child(div().text_color(rgb(RED)).child(format!("−{}", c.deletions)))
+                                }),
+                        ),
+                )
+                .children(ci(&c.check_state).map(|(g, col, _)| div().pt(px(2.)).text_color(rgb(col)).child(g)))
+                .child(
+                    div()
+                        .id(("sha", i))
+                        .px(px(6.))
+                        .border_1()
+                        .border_color(rgb(BORDER_3))
+                        .font_family(MONO)
+                        .text_size(px(11.5))
+                        .text_color(rgb(BLUE_LIGHT))
+                        .hover(|s| s.bg(rgb(BG_CODE)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
+                            this.banner = Some(format!("Copied {sha}"));
+                            cx.notify();
+                        }))
+                        .child(c.short.clone()),
+                )
+        });
+        card()
+            .child(
+                card_head()
+                    .child(icon("git-commit-horizontal", 14., SOFT))
+                    .child(div().text_color(rgb(TEXT)).child(format!("{} commit{}", d.commits, if d.commits == 1 { "" } else { "s" })))
+                    .child(div().text_color(rgb(DIM)).child("· click a commit to open it on GitHub, the hash to copy it")),
+            )
+            .children(rows)
+            .when(more > 0, |c| {
+                c.child(div().px(px(14.)).py(px(10.)).border_t_1().border_color(rgb(BORDER)).text_color(rgb(DIM)).child(format!(
+                    "{more} earlier commits are not shown"
+                )))
+            })
+            .into_any_element()
+    }
+
+    fn files_view(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
+        if d.files.is_empty() {
+            return self.handoff(format!("{} changed files", d.changed_files), cx);
+        }
+        let editor = self.hello.editor.clone();
+        let max = d.files.iter().map(|f| f.additions + f.deletions).max().unwrap_or(1).max(1);
+        let rows = d.files.iter().map(|f| {
+            let (badge, color) = match f.change_type.as_str() {
+                "ADDED" => ("A", GREEN),
+                "DELETED" => ("D", RED),
+                "RENAMED" => ("R", BLUE),
+                "COPIED" => ("C", BLUE),
+                _ => ("M", YELLOW),
+            };
+            let (dir, base) = match f.path.rsplit_once('/') {
+                Some((d, b)) => (format!("{d}/"), b.to_string()),
+                None => (String::new(), f.path.clone()),
+            };
+            let total = f.additions + f.deletions;
+            let blocks = ((total * 5 + max - 1) / max).clamp(if total > 0 { 1 } else { 0 }, 5);
+            let green = if total == 0 { 0 } else { (blocks * f.additions + total / 2) / total };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(14.))
+                .h(px(34.))
+                .border_t_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .size(px(18.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_1()
+                        .border_color(rgb(color))
+                        .text_color(rgb(color))
+                        .text_size(px(10.5))
+                        .font_family(MONO)
+                        .child(badge),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .font_family(MONO)
+                        .text_size(px(12.5))
+                        .child(div().flex().child(div().text_color(rgb(DIM)).child(dir)).child(div().text_color(rgb(TEXT)).child(base))),
+                )
+                .child(div().text_size(px(12.)).text_color(rgb(GREEN)).child(format!("+{}", f.additions)))
+                .child(div().text_size(px(12.)).text_color(rgb(RED)).child(format!("−{}", f.deletions)))
+                .child(div().flex().gap(px(2.)).children((0..5u64).map(|b| {
+                    let c = if b < green { GREEN } else if b < blocks { RED } else { BORDER_3 };
+                    div().size(px(8.)).bg(rgb(c))
+                })))
+        });
+        let more = d.changed_files.saturating_sub(d.files.len() as u64);
+        card()
+            .child(
+                card_head()
+                    .child(icon("file-diff", 14., SOFT))
+                    .child(div().text_color(rgb(TEXT)).child(format!("{} files changed", d.changed_files)))
+                    .child(div().text_color(rgb(GREEN)).child(format!("+{}", d.additions)))
+                    .child(div().text_color(rgb(RED)).child(format!("−{}", d.deletions)))
+                    .child(div().flex_1())
                     .child(
-                        primary_look("handoff")
+                        div()
+                            .id("files-open")
+                            .px(px(8.))
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .border_1()
+                            .border_color(rgb(BORDER_3))
+                            .text_color(rgb(TEXT))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(BG_HOVER)))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
                                     this.start(c, window, cx);
                                 }
                             }))
-                            .child(format!("Open in {editor}")),
-                    )
-                    .into_any_element()
-            }
-        }
+                            .child(format!("Review in {editor}")),
+                    ),
+            )
+            .children(rows)
+            .when(more > 0, |c| {
+                c.child(div().px(px(14.)).py(px(10.)).border_t_1().border_color(rgb(BORDER)).text_color(rgb(DIM)).child(format!(
+                    "{more} more files; open the branch in {editor} to see them all"
+                )))
+            })
+            .into_any_element()
     }
 
     fn conversation(&self, d: &Detail) -> impl IntoElement {
@@ -1406,12 +1890,12 @@ impl Deck {
                         .pb(px(16.))
                         .text_size(px(14.))
                         .text_color(rgb(TEXT_BODY))
-                        .child(markdown(format!("body-{key}"), &d.body)),
+                        .child(md_body(format!("body-{key}"), &d.body, &self.images)),
                 )
                 .into_any_element(),
         ];
         for (i, e) in d.timeline.iter().enumerate() {
-            items.push(event_view(&key, i, e));
+            items.push(event_view(&key, i, e, &self.images));
         }
         div().flex().flex_col().gap(px(14.)).children(items)
     }
@@ -1453,8 +1937,7 @@ impl Deck {
         let base = pr.base.clone();
 
         div()
-            .w(px(250.))
-            .flex_none()
+            .w_full()
             .flex()
             .flex_col()
             .text_size(px(12.))
@@ -1628,7 +2111,7 @@ impl Deck {
                     .border_color(rgb(BORDER_2))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(BG_HOVER)))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(PaletteMode::Filters, window, cx)))
                     .child(kbd("⌘K"))
                     .child(div().text_color(rgb(TEXT)).child("Filters")),
             )
@@ -1945,8 +2428,12 @@ impl Deck {
                                 .text_size(px(11.))
                                 .text_color(rgb(DIM))
                                 .child(hint("↑↓", "move"))
-                                .child(hint("↵", "apply"))
-                                .child(div().ml_auto().font_family(MONO).text_color(rgb(SOFT)).child("author: involves: review-requested: label: repo:")),
+                                .child(hint("↵", if p.mode == PaletteMode::Prs { "open" } else { "apply" }))
+                                .child(div().ml_auto().font_family(MONO).text_color(rgb(SOFT)).child(if p.mode == PaletteMode::Prs {
+                                    "⌘T go to PR · ⌘K filters"
+                                } else {
+                                    "author: involves: review-requested: label: repo:"
+                                })),
                         ),
                 )
                 .into_any_element(),
@@ -2046,7 +2533,7 @@ fn checks_view(d: &Detail) -> impl IntoElement {
         .when(d.checks.is_empty(), |c| c.child(div().p(px(12.)).text_color(rgb(DIM)).child("No checks reported.")))
 }
 
-fn event_view(key: &str, i: usize, e: &Event) -> AnyElement {
+fn event_view(key: &str, i: usize, e: &Event, images: &Images) -> AnyElement {
     let (verb, verb_color, border) = match (e.kind.as_str(), e.state.as_str()) {
         ("review", "APPROVED") => ("approved these changes".to_string(), GREEN, 0x2f4a2c),
         ("review", "CHANGES_REQUESTED") => ("requested changes".to_string(), RED, 0x5a3236),
@@ -2129,7 +2616,7 @@ fn event_view(key: &str, i: usize, e: &Event) -> AnyElement {
                 }))),
         );
     }
-    body = body.child(markdown(format!("ev-{key}-{i}"), &e.body));
+    body = body.child(md_body(format!("ev-{key}-{i}"), &e.body, images));
     for (j, r) in e.replies.iter().enumerate() {
         body = body.child(
             div()
@@ -2150,7 +2637,7 @@ fn event_view(key: &str, i: usize, e: &Event) -> AnyElement {
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(r.author.clone()))
                         .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&r.at)))),
                 )
-                .child(markdown(format!("ev-{key}-{i}-{j}"), &r.body)),
+                .child(md_body(format!("ev-{key}-{i}-{j}"), &r.body, images)),
         );
     }
     card()
@@ -2174,6 +2661,18 @@ impl Render for Deck {
             .key_context("Deck")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(Self::on_go_to_pr))
+            .on_action(cx.listener(Self::on_filters))
+            .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_reopen_tab))
+            .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_next_tab))
+            .on_action(cx.listener(Self::on_prev_tab))
+            .on_action(cx.listener(Self::on_open_config))
+            .on_action(cx.listener(Self::on_open_in_editor))
+            .on_action(cx.listener(Self::on_open_on_github))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_run_setup))
             .size_full()
             .relative()
             .flex()
@@ -2183,9 +2682,8 @@ impl Render for Deck {
             .text_size(px(13.))
             .child(self.header(cx))
             .children(self.banner_view(cx))
-            .child(div().flex_1().min_h(px(0.)).flex().child(self.sidebar(cx)).child(self.main_area(cx)))
-            .children(self.run_bar(cx))
-            .child(self.footer(cx))
+            .when(self.setup.is_some(), |d| d.child(self.setup_view(cx)))
+            .when(self.setup.is_none(), |d| d.child(self.body(cx)).children(self.run_bar(cx)).child(self.footer(cx)))
             .children(self.palette_view(cx))
     }
 }
@@ -2193,11 +2691,51 @@ impl Render for Deck {
 /// Puts the window in a known state for README screenshots (demo data only).
 #[cfg(feature = "snapshot")]
 impl Deck {
+    /// One line about the window, for checking shortcuts.
+    pub fn describe(&self) -> String {
+        let sel = self.selected_pr().map(|p| format!("#{}", p.number)).unwrap_or("-".into());
+        let tabs: Vec<String> = self.tabs.iter().map(|t| format!("#{}", t.number)).collect();
+        let palette = match self.palette.as_ref().map(|p| p.mode) {
+            Some(PaletteMode::Prs) => "go-to-PR",
+            Some(PaletteMode::Filters) => "filters",
+            None => "closed",
+        };
+        format!(
+            "selected {sel}, tabs [{}], palette {palette}, sidebar {}",
+            tabs.join(" "),
+            if self.layout.sidebar_hidden { "hidden" } else { "shown" }
+        )
+    }
+
     pub fn show_state(&mut self, state: &str, window: &mut Window, cx: &mut Context<Self>) {
         let pick = |this: &Self, n: u64| this.prs.iter().find(|p| p.number == n).cloned();
         match state {
+            "goto" => {
+                self.open_palette(PaletteMode::Prs, window, cx);
+                if let Some(p) = self.palette.as_ref() {
+                    p.input.update(cx, |s, cx| s.set_value("reg", window, cx));
+                }
+            }
+            s if s.starts_with("pr:") => {
+                // pr:owner/repo#123 opens that PR from a search of its repo.
+                if let Some((repo, _)) = s[3..].split_once('#') {
+                    self.want = Some(s[3..].to_lowercase());
+                    self.custom = Some(format!("repo:{repo}"));
+                    self.selected = None;
+                    self.load(cx);
+                }
+            }
+            s if s.starts_with("scroll:") => {
+                let y: f32 = s[7..].parse().unwrap_or(0.);
+                self.detail_scroll.set_offset(point(px(0.), px(-y)));
+            }
+            "setup-signin" => self.sign_in(cx),
+            "setup-folders" => self.setup_step(SetupStep::Folders, cx),
+            "setup-editor" => self.setup_step(SetupStep::Editor, cx),
+            "commits" => self.section = Section::Commits,
+            "files" => self.section = Section::Files,
             "palette" => {
-                self.open_palette(window, cx);
+                self.open_palette(PaletteMode::Filters, window, cx);
                 if let Some(p) = self.palette.as_ref() {
                     p.input.update(cx, |s, cx| s.set_value("re", window, cx));
                 }
@@ -2225,4 +2763,17 @@ impl Deck {
         }
         cx.notify();
     }
+}
+
+/// Scores `hay` against a query: every word must appear, in any order. Lower is
+/// better; None means no match. Matches at the start of a word rank first.
+fn fuzzy_score(query: &str, hay: &str) -> Option<usize> {
+    let mut score = 0;
+    for word in query.split_whitespace() {
+        let word = word.trim_start_matches('#');
+        let at = hay.find(word)?;
+        let boundary = at == 0 || !hay.as_bytes()[at - 1].is_ascii_alphanumeric();
+        score += at + if boundary { 0 } else { 50 };
+    }
+    Some(score)
 }
