@@ -103,6 +103,8 @@ func Allowed(c config.Command, pr github.PR, viewer string) (bool, string) {
 				what = "other people's PRs"
 			case "ready":
 				what = "PRs that are ready for review"
+			case "ci_failed":
+				what = "PRs whose CI failed"
 			}
 			return false, fmt.Sprintf("%s only runs on %s", c.Name, what)
 		}

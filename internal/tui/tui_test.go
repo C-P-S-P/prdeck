@@ -238,7 +238,7 @@ func TestFailingChecksLinkAndRerun(t *testing.T) {
 
 	m = send(t, m, key("j")) // #312, CI passed
 	m = send(t, m, key("F"))
-	if len(be.ran) != 1 || !strings.Contains(m.flash, "only runs on PRs that are ci failed") {
+	if len(be.ran) != 1 || !strings.Contains(m.flash, "Re-run failed only runs on PRs whose CI failed") {
 		t.Errorf("re-run on a green PR: ran %d, flash %q", len(be.ran), m.flash)
 	}
 }

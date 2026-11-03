@@ -257,6 +257,9 @@ func TestAllowedSaysWhy(t *testing.T) {
 	if _, why := Allowed(command("Merge when ready"), mine, "you"); why != "Merge when ready only runs on PRs that are ready for review" {
 		t.Errorf("why = %q", why)
 	}
+	if _, why := Allowed(command("Re-run failed"), mine, "you"); why != "Re-run failed only runs on PRs whose CI failed" {
+		t.Errorf("why = %q", why)
+	}
 	if ok, _ := Allowed(command("Approve"), pr, "you"); !ok {
 		t.Error("approving someone else's PR was refused")
 	}
