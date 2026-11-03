@@ -191,6 +191,26 @@ func TestListAndDetail(t *testing.T) {
 	}
 }
 
+func TestCarriageReturnsNeverReachTheTerminal(t *testing.T) {
+	be, m := newTest(t)
+	be.prs[0].Title = "Add streaming\r push source\v"
+	m = search(t, m)
+	pr, _ := m.selected()
+	d, _ := m.be.Detail(context.Background(), pr)
+	d.Timeline[1].DiffHunk = "@@ -1 +1 @@\r\n-def pull():\r\n+def push():\r\n"
+	nm, _ := m.Update(detailMsg{key: pr.Key(), d: d})
+	m = nm.(Model)
+	view := m.View()
+	if strings.ContainsAny(view, "\r\v") {
+		t.Errorf("a \\r or \\v reached the terminal:\n%q", view)
+	}
+	for _, want := range []string{"Add streaming push source", "+def push():"} {
+		if !strings.Contains(ansi.Strip(view), want) {
+			t.Errorf("view missing %q\n%s", want, ansi.Strip(view))
+		}
+	}
+}
+
 func TestMoveAndRepoFilter(t *testing.T) {
 	_, m := newTest(t)
 	m = search(t, m)

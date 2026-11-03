@@ -169,3 +169,32 @@ func TestGitHubForDesktop(t *testing.T) {
 		}
 	}
 }
+
+func TestHostileTextIsHarmless(t *testing.T) {
+	// Each quote or list level takes columns; deep nesting used to panic.
+	deep := strings.Repeat("> ", 50) + "---\n\n" + strings.Repeat("- ", 30) + "# x\n\n" + strings.Repeat("> ", 30) + "```\ncode\n```"
+	for _, w := range []int{20, 97} {
+		for _, l := range strings.Split(Render(deep, Options{Width: w}), "\n") {
+			if ansi.StringWidth(l) > w {
+				t.Errorf("width %d: %q is %d wide", w, plain(l), ansi.StringWidth(l))
+			}
+		}
+	}
+
+	// Escape sequences in PR text, written as entities or raw, never reach the terminal.
+	src := "a &#27;]52;c;eA==&#7; &#155;2J `&#27;]0;t&#7;` raw\x1b]0;t\x07 ![al&#27;[2Jt](u)\n\n```\nx\x1b[2J\n```\n\n# h&#13;i" +
+		"\n\n```suggestion\nrm -rf ~\recho safe\n```"
+	out := Render(src, Options{Width: 80, Links: true})
+	for _, bad := range []string{"\x1b]52", "\x1b]0", "\x1b[2J", "\a", "\u009b", "\r"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("%q reached the output:\n%q", bad, out)
+		}
+	}
+	if !strings.Contains(plain(out), "]52;c;eA==") || !strings.Contains(plain(out), "hi") {
+		t.Errorf("text around the escapes went missing:\n%s", plain(out))
+	}
+	// A lone \r ends a line, as on GitHub, so a suggestion can't hide its first part.
+	if !strings.Contains(plain(out), " rm -rf ~ ") || !strings.Contains(plain(out), " echo safe ") {
+		t.Errorf("a \\r in a code block hid part of it:\n%s", plain(out))
+	}
+}

@@ -104,7 +104,20 @@ func (r *renderer) inlineNode(n ast.Node, base style) []run {
 
 // textOf is source text as it reads: "schema\\_discovery" → "schema_discovery", "&amp;" → "&".
 func textOf(b []byte) string {
-	return string(util.UnescapePunctuations(util.ResolveEntityNames(util.ResolveNumericReferences(b))))
+	return noControls(string(util.UnescapePunctuations(util.ResolveEntityNames(util.ResolveNumericReferences(b)))), "\n\t")
+}
+
+// noControls drops control characters other than those in keep. PR text is written
+// by anyone who can comment, and ESC, BEL or a C1 code (raw, or as &#27; and the
+// like) would reach the terminal as an escape sequence: a new clipboard (OSC 52),
+// window title or screen contents.
+func noControls(s, keep string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && !strings.ContainsRune(keep, r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 var genericAlt = map[string]bool{"": true, "image": true, "img": true, "icon": true, "svg": true, "logo": true, "badge": true}
