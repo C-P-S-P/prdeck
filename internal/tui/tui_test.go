@@ -32,18 +32,26 @@ type fakeBackend struct {
 	saved    map[string]string
 	loaded   int  // Detail calls
 	news     bool // Detail marks mlin's thread new since your last visit
+	cached   bool // the list and details are saved; showing a saved detail marks it seen
 }
 
 func (f *fakeBackend) Config() *config.Config { return f.cfg }
 func (f *fakeBackend) Viewer() string         { return "you" }
 func (f *fakeBackend) CachedSearch(string) (cache.SearchEntry, bool) {
-	return cache.SearchEntry{}, false
+	return cache.SearchEntry{PRs: f.prs}, f.cached
 }
 func (f *fakeBackend) Search(_ context.Context, q string) ([]github.PR, error) {
 	f.searched = append(f.searched, q)
 	return f.prs, nil
 }
-func (f *fakeBackend) CachedDetail(github.PR) (*github.Detail, bool) { return nil, false }
+func (f *fakeBackend) CachedDetail(pr github.PR) (*github.Detail, bool) {
+	if !f.cached {
+		return nil, false
+	}
+	d, _ := f.Detail(context.Background(), pr)
+	f.news = false // seen now, as the core marks it
+	return d, true
+}
 func (f *fakeBackend) Detail(_ context.Context, pr github.PR) (*github.Detail, error) {
 	f.loaded++
 	lastSeen := time.Now() // your visit before this load, as the core sets it
@@ -438,6 +446,24 @@ func TestUnreadAndJumpToNew(t *testing.T) {
 	m.help = false
 	if v, _ := m.detailContent(100); !strings.Contains(ansi.Strip(v), "1 since you last looked") || strings.Contains(ansi.Strip(v), "jump to the first") {
 		t.Errorf("the PR view offers n while your command has it:\n%s", v)
+	}
+}
+
+func TestNewTagsOfTheFirstPRStay(t *testing.T) {
+	// At start the list and the first PR are saved ones; the first search finds the
+	// same PR selected, which is not a second visit.
+	be, _ := newTest(t)
+	be.cached, be.news = true, true
+	m := New(be)
+	m = send(t, m, tea.WindowSizeMsg{Width: 140, Height: 40})
+	for _, msg := range collect(m.Init(), 3) {
+		m = send(t, m, msg)
+	}
+	if len(be.searched) == 0 {
+		t.Fatal("Init should search")
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "1 since you last looked") {
+		t.Errorf("the first PR shown keeps what was new:\n%s", v)
 	}
 }
 

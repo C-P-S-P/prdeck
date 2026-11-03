@@ -103,6 +103,7 @@ type Model struct {
 	// again while it stays on screen keeps what was new then.
 	openKey   string
 	openSince time.Time
+	start     tea.Cmd // what the first PR needs loaded; Init runs it
 
 	palette bool
 	pin     textinput.Model
@@ -156,6 +157,9 @@ func New(be Backend) Model {
 		seq: 1, loading: true, newAt: -1,
 	}
 	m.loadCached()
+	// The first PR is opened here, not in Init: Init works on a copy of m, so the
+	// first search would count as a second visit and drop its new tags.
+	m.start = m.selectionCmds()
 	return m
 }
 
@@ -191,13 +195,13 @@ type (
 	clearFlashMsg struct{ text string }
 )
 
-// Init starts the first search (New already counted it as m.seq).
+// Init starts the first search (New already counted it as m.seq) and loads what the
+// first PR needs.
 //
 // Throughout this file, a method that changes the model is called on its own line before
 // `return m, cmd`: Go does not fix the order between reading m and calling the method.
 func (m Model) Init() tea.Cmd {
-	sel := m.selectionCmds()
-	return tea.Batch(m.fetchSearch(m.seq), m.tick(), m.spin.Tick, sel)
+	return tea.Batch(m.fetchSearch(m.seq), m.tick(), m.spin.Tick, m.start)
 }
 
 func (m Model) tick() tea.Cmd {
