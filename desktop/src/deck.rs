@@ -1724,10 +1724,12 @@ impl Deck {
         }
     }
 
-    /// The Re-run failed button, when checks failed and the command is set up.
+    /// The Re-run failed button, when checks failed and the command is set up. The
+    /// PR list's rollup must say failed too, since that is what the command checks.
     fn rerun_button(&self, id: &'static str, d: &Detail, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let cmd = self.find_cmd(|c| c.action == "rerun")?;
-        if d.check_counts().1 == 0 {
+        let ci_failed = self.selected_pr().is_some_and(|p| p.check_state == "FAILURE" || p.check_state == "ERROR");
+        if d.check_counts().1 == 0 || !ci_failed {
             return None;
         }
         let (name, key) = (cmd.name.clone(), cmd.key.clone());
@@ -1909,7 +1911,8 @@ impl Deck {
                             .child(div().flex_1().text_color(rgb(TEXT)).child(summary))
                             .child(div().text_color(rgb(DIM)).child("View")),
                     )
-                    .children(d.checks.iter().enumerate().filter(|(_, c)| matches!(check_kind(&c.state), CheckKind::Fail)).map(|(i, c)| {
+                    // The first few failing checks; a big failing matrix would push the rest of the panel away.
+                    .children(d.checks.iter().enumerate().filter(|(_, c)| matches!(check_kind(&c.state), CheckKind::Fail)).take(5).map(|(i, c)| {
                         let row = div()
                             .id(("failed-check", i))
                             .flex()
@@ -1921,6 +1924,21 @@ impl Deck {
                             .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT_SOFT)).child(c.name.clone()));
                         opens_log(row, c, 11.)
                     }))
+                    .when(d.check_counts().1 > 5, |s| {
+                        s.child(
+                            div()
+                                .id("more-failed")
+                                .px(px(4.))
+                                .py(px(2.))
+                                .cursor_pointer()
+                                .text_color(rgb(DIM))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.section = Section::Checks;
+                                    cx.notify();
+                                }))
+                                .child(format!("and {} more", d.check_counts().1 - 5)),
+                        )
+                    })
                     .children(self.rerun_button("rerun-aside", d, cx).map(|b| b.h(px(28.)).justify_center())),
             )
             .child(
