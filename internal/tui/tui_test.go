@@ -393,6 +393,13 @@ func TestUnreadAndJumpToNew(t *testing.T) {
 	if m.flash != "Nothing new since you last looked" {
 		t.Errorf("n on #%d with nothing new: flash %q", pr.Number, m.flash)
 	}
+
+	// A command of yours on n still runs.
+	be.cfg.Commands = append(be.cfg.Commands, config.Command{Name: "Notes", Key: "n", Run: "echo notes"})
+	m = send(t, m, key("n"))
+	if len(be.ran) != 1 || be.ran[0].Title != "Notes" {
+		t.Errorf("your n command should run: %+v", be.ran)
+	}
 }
 
 func TestMoveAndRepoFilter(t *testing.T) {

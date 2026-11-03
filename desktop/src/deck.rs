@@ -365,6 +365,11 @@ impl Deck {
             }
         }
         self.prs = prs;
+        // The PR on screen changed since it was loaded (a comment, or your own push):
+        // load it again, as the terminal does, which tags what is new and marks it seen.
+        if let Some(pr) = self.selected_pr().filter(|p| p.unread) {
+            self.load_detail(pr, cx);
+        }
         if let Some(want) = self.want.clone() {
             if let Some(pr) = self.prs.iter().find(|p| p.key() == want).cloned() {
                 self.want = None;
