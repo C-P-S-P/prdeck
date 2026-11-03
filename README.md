@@ -18,6 +18,8 @@ A dashboard for the pull requests you're involved in, in the terminal and on the
 | **Uncommitted changes**: stash or drop them first, your choice | **`r` rebase**: the exact commands, run only on `enter` |
 | ![Rebase output](docs/screenshots/conflict.png) | ![Help](docs/screenshots/help.png) |
 | **Output**: conflicts show right away; fix them, then `C` | **`?` help**: every key and the command it runs |
+| ![Re-run failed](docs/screenshots/rerun.png) | |
+| **`F` re-run failed**: failing checks link to their logs; only the failed jobs run again | |
 
 Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/screenshots/capture.sh`.
 
@@ -53,6 +55,7 @@ prdeck config init         # write a starter config
 | `o` | Check out the PR's branch and open your clone in your editor (Zed by default) |
 | `w` | Open the PR in a separate git worktree instead |
 | `b` | Open the PR on GitHub |
+| `F` | Re-run the failed GitHub Actions jobs, when CI failed |
 | `L` | Find your clone of this repo with fuzzy search; saved to the config |
 | `?` | Help: every key and the exact command it runs |
 | Mouse | Click a repo, PR, filter tab or a key in the bottom bar; click the selected PR again to open it; the wheel scrolls the pane under it |
@@ -65,6 +68,8 @@ PR descriptions and comments render like on GitHub, inside the pane:
 - **GitHub extras:** alerts (`> [!NOTE]`, colored by type), task lists, `<details>` sections, emoji codes (`:warning:` → ⚠️), `@mentions`, suggestion blocks, and images as `[image: …]` links. A newline is a line break, as on GitHub.
 
 `prdeck md FILE [WIDTH]` renders a markdown file the same way, to check something without opening a PR.
+
+**Failing checks** are listed under the PR's title, each name a link to its log (hold ⌘ to click with mouse support on). `F` re-runs only the failed jobs of each failed GitHub Actions run, with your gh login; checks from other CI services, such as Codecov, are skipped and named, since they re-run from their own page.
 
 With mouse support on, hold Option (or Shift, depending on your terminal) to select text. Set `ui.mouse: false` to turn it off.
 
@@ -100,11 +105,14 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 | **Comment, approve or request changes**, and reply on code threads | **Click a commit** to see what it changed |
 | ![Files changed](docs/screenshots/desktop-files.png) | ![Inline review](docs/screenshots/desktop-inline.png) |
 | **Files changed**: every file's diff, each one collapsible | **Inline review**: click a line number to comment; send them all as one review |
+| ![Checks](docs/screenshots/desktop-checks.png) | ![Re-run failed](docs/screenshots/desktop-rerun.png) |
+| **Checks**: click one to open its log | **Re-run failed**: only the failed jobs, with your gh login |
 
 - **PR text like github.com**: images (your GitHub login is used for GitHub-hosted ones), `<img width>`, `<details>`, tables of screenshots side by side, syntax-highlighted code, `[!NOTE]`/`[!WARNING]` boxes, emoji and linked @mentions. Text is selectable.
 - **Comment and review**: a reply box at the end of every conversation (Write / Preview) with Comment, Approve and Request changes, and Reply on each code thread. Drafts are kept per PR. `⌘⇧C` or the Review button jumps there; `⌘↵` comments.
 - **Diffs**: click a commit to see what it changed (Previous / Next steps through them), or open Files changed for every file's diff with line numbers. Big PRs open the first ~1,500 lines and keep the rest one click away.
 - **Inline review**: click a line number in Files changed to comment on that line. Add a single comment, or start a review: comments stay pending under their lines until you Submit review, Approve or Request changes, and go to GitHub together. Existing review threads show at their lines with Reply.
+- **Checks**: every check opens its log in the browser; the side panel lists the failing ones. When CI failed, **Re-run failed** (or `F`) re-runs only the failed GitHub Actions jobs.
 - **Profile photos** from GitHub next to every author and reviewer.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
 - **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
@@ -134,7 +142,7 @@ cargo run --release             # your PRs (uses your gh login)
 | `⌘,` | edit the config |
 | your command keys | run that command; `esc` closes the command bar |
 
-Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
+Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
 
 ## Configuration
 

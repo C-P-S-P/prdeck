@@ -65,3 +65,9 @@ shot review "prdeck — review requested" 1.5
 
 keys "?"
 shot help "prdeck — help"
+keys "?"
+
+keys "1"
+sleep 1.5
+keys "F"
+shot rerun "prdeck — re-run failed checks" 1.5
