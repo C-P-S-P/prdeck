@@ -188,6 +188,23 @@ func (d *Detail) SinceSeen(seen time.Time, viewer string) *Detail {
 	return &c
 }
 
+// Latest is the newest thing d shows: its update time, or a comment, review or reply
+// dated after it. Marking the PR seen as of Latest means nothing on screen stays new.
+func (d *Detail) Latest() time.Time {
+	t := d.UpdatedAt
+	for _, e := range d.Timeline {
+		if e.At.After(t) {
+			t = e.At
+		}
+		for _, r := range e.Replies {
+			if r.At.After(t) {
+				t = r.At
+			}
+		}
+	}
+	return t
+}
+
 // CheckCounts returns passed, failed and pending check counts.
 func (d *Detail) CheckCounts() (pass, fail, pend int) {
 	for _, c := range d.Checks {

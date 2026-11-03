@@ -114,7 +114,7 @@ func (s *Service) CachedDetail(pr github.PR) (*github.Detail, bool) {
 // opened marks a PR seen as of the detail shown, and returns that detail with what
 // came after the visit before marked new.
 func (s *Service) opened(d *github.Detail) *github.Detail {
-	return d.SinceSeen(s.cache.MarkSeen(d.Key(), d.UpdatedAt), s.Viewer())
+	return d.SinceSeen(s.cache.MarkSeen(d.Key(), d.Latest()), s.Viewer())
 }
 
 // Detail loads a PR's description, conversation, reviewers and checks. Like

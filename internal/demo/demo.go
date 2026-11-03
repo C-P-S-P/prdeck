@@ -102,8 +102,8 @@ func (b *Backend) CachedDetail(pr github.PR) (*github.Detail, bool) {
 	d, ok := b.details[pr.Number]
 	if ok {
 		last := b.seen[pr.Number]
-		if d.UpdatedAt.After(last) {
-			b.seen[pr.Number] = d.UpdatedAt
+		if d.Latest().After(last) {
+			b.seen[pr.Number] = d.Latest()
 		}
 		return d.SinceSeen(last, "you"), true
 	}

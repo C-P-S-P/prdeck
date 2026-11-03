@@ -38,3 +38,17 @@ func TestOpeningMarksSeen(t *testing.T) {
 		t.Error("the saved list was changed")
 	}
 }
+
+func TestCommentAfterUpdateTimeIsNewOnce(t *testing.T) {
+	c := cache.Open(filepath.Join(t.TempDir(), "cache.json"))
+	s := New(&config.Config{}, "", nil, c)
+	pr := github.PR{Number: 8, Repo: "acme/tool", UpdatedAt: time.Now().Add(time.Minute)}
+	// A review dated after the PR's update time, as in the demo's #4807.
+	c.PutDetail(&github.Detail{PR: pr, Timeline: []github.Event{{Kind: "review", Author: "mlin", At: pr.UpdatedAt.Add(time.Hour)}}})
+	if d, _ := s.CachedDetail(pr); !d.Timeline[0].New {
+		t.Fatal("first visit: the review is new")
+	}
+	if d, _ := s.CachedDetail(pr); d.Timeline[0].New {
+		t.Error("seen once, it must not stay new on every visit")
+	}
+}

@@ -232,7 +232,7 @@ func (b *Backend) load() {
 	// Every sample PR was opened as it is now, except four that changed since: rdavis
 	// commented on #4821 after your reply, #312 was approved, #1188 and #77 moved on.
 	for _, p := range b.prs {
-		b.seen[p.Number] = p.UpdatedAt
+		b.seen[p.Number] = b.details[p.Number].Latest()
 	}
 	b.seen[4821], b.seen[312], b.seen[1188], b.seen[77] = b.ago(90*m), b.ago(4*h), b.ago(8*h), b.ago(2*day)
 }

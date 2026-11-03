@@ -156,8 +156,9 @@ func (c *Cache) seenAt(key string) time.Time {
 // Unread reports a PR updated since you last opened it.
 func (c *Cache) Unread(pr github.PR) bool { return pr.UpdatedAt.After(c.SeenAt(pr.Key())) }
 
-// MarkSeen records that you opened the PR as it was at its update time at, and
-// returns when you had seen it before. It is saved with the next change.
+// MarkSeen records that you opened the PR as it was at at (GitHub's time of the
+// newest thing shown), and returns when you had seen it before. It is saved with the
+// next change.
 func (c *Cache) MarkSeen(key string, at time.Time) time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
