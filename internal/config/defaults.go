@@ -52,6 +52,7 @@ func DefaultCommands() []Command {
 		{Name: "Open in editor", Key: "o", Action: "open", Branch: true, Bar: on()},
 		{Name: "Open in worktree", Key: "w", Action: "open", Worktree: true, Bar: on()},
 		{Name: "Open on GitHub", Key: "b", Action: "browse", Bar: on()},
+		{Name: "Re-run failed", Key: "F", Action: "rerun", When: StringList{"ci_failed"}},
 		{Name: "Set clone path", Key: "L", Action: "setpath"},
 	}
 }

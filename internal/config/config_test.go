@@ -99,6 +99,30 @@ commands:
 	}
 }
 
+func TestRerunFailedOverrides(t *testing.T) {
+	def, _ := find(DefaultCommands(), "Re-run failed")
+	if def.Key == "" || Reserved[def.Key] || def.Action != "rerun" || len(def.When) != 1 || def.When[0] != "ci_failed" {
+		t.Fatalf("built-in = %+v", def)
+	}
+	for _, c := range DefaultCommands() {
+		if c.Name != def.Name && c.Key == def.Key {
+			t.Errorf("%q shares key %q", c.Name, c.Key)
+		}
+	}
+	cfg, err := Load(write(t, "commands:\n  - name: Re-run failed\n    key: x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := find(cfg.Commands, "Re-run failed")
+	if moved.Key != "x" || moved.Action != "rerun" || len(moved.When) != 1 || len(cfg.Warnings) != 0 {
+		t.Errorf("moved key lost the built-in: %+v %v", moved, cfg.Warnings)
+	}
+	cfg, _ = Load(write(t, "commands:\n  - name: Re-run failed\n    hidden: true\n"))
+	if _, ok := find(cfg.Commands, "Re-run failed"); ok {
+		t.Error("hidden Re-run failed still present")
+	}
+}
+
 func TestKeyTakenByUserCommand(t *testing.T) {
 	cfg, err := Load(write(t, "commands:\n  - name: Test\n    key: f\n    run: make test\n"))
 	if err != nil {

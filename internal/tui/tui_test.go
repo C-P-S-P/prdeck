@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -43,7 +44,7 @@ func (f *fakeBackend) CachedDetail(github.PR) (*github.Detail, bool) { return ni
 func (f *fakeBackend) Detail(_ context.Context, pr github.PR) (*github.Detail, error) {
 	return &github.Detail{
 		PR: pr, Body: "## Summary\nAdds a `StreamPushSource`.", Commits: 6, ChangedFiles: 14,
-		Checks:    []github.Check{{Name: "lint", State: "SUCCESS"}, {Name: "integration", State: "FAILURE"}},
+		Checks:    []github.Check{{Name: "lint", State: "SUCCESS"}, {Name: "integration", State: "FAILURE", URL: "https://github.com/northwind/registry/actions/runs/5/job/9", RunID: 5}},
 		Reviewers: []github.Reviewer{{Login: "mlin", State: "CHANGES_REQUESTED"}},
 		Timeline: []github.Event{
 			{Kind: "review", Author: "mlin", State: "CHANGES_REQUESTED", Body: "One thing first.", At: time.Now().Add(-2 * time.Hour)},
@@ -67,6 +68,12 @@ func (f *fakeBackend) ResolveFolder(pr github.PR, wantWorktree bool) (core.Folde
 func (f *fakeBackend) Prepare(c config.Command, pr github.PR, input string) (core.Plan, error) {
 	if c.Action == "browse" {
 		return core.Plan{Title: c.Name, Action: "browse", Script: "open " + pr.URL, PR: pr}, nil
+	}
+	if c.Action == "rerun" {
+		if ok, why := core.Allowed(c, pr, "you"); !ok {
+			return core.Plan{}, errors.New(why)
+		}
+		return core.RerunPlan(c, pr, nil), nil
 	}
 	folder, err := f.ResolveFolder(pr, c.Worktree)
 	if err != nil {
@@ -188,6 +195,32 @@ func TestListAndDetail(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("detail missing %q\n%s", want, view)
 		}
+	}
+}
+
+func TestFailingChecksLinkAndRerun(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	pr, _ := m.selected()
+	d, _ := m.be.Detail(context.Background(), pr)
+	nm, _ := m.Update(detailMsg{key: pr.Key(), d: d})
+	m = nm.(Model)
+	link := "\x1b]8;;https://github.com/northwind/registry/actions/runs/5/job/9\x1b\\"
+	if !strings.Contains(m.View(), link) {
+		t.Error("the failing check should link to its log")
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "F re-run failed") {
+		t.Error("the failing line should say which key re-runs the checks")
+	}
+	m = send(t, m, key("F"))
+	if len(be.ran) != 1 || be.ran[0].Action != "rerun" || be.ran[0].PR.Number != 4821 {
+		t.Fatalf("ran = %+v", be.ran)
+	}
+
+	m = send(t, m, key("j")) // #312, CI passed
+	m = send(t, m, key("F"))
+	if len(be.ran) != 1 || !strings.Contains(m.flash, "only runs on PRs that are ci failed") {
+		t.Errorf("re-run on a green PR: ran %d, flash %q", len(be.ran), m.flash)
 	}
 }
 

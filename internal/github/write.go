@@ -70,6 +70,19 @@ func (c *Client) ReplyThread(ctx context.Context, threadID, body string) error {
 	return c.gql.DoWithContext(ctx, q, map[string]any{"id": threadID, "body": body}, &resp)
 }
 
+// RerunFailedJobs re-runs the failed jobs of one GitHub Actions run, and the jobs
+// that depend on them. GraphQL has no mutation for this, so it goes through REST.
+func (c *Client) RerunFailedJobs(ctx context.Context, repo string, runID int64) error {
+	if !strings.Contains(repo, "/") || runID <= 0 {
+		return fmt.Errorf("bad run %s %d", repo, runID)
+	}
+	resp, err := c.rest.RequestWithContext(ctx, "POST", fmt.Sprintf("repos/%s/actions/runs/%d/rerun-failed-jobs", repo, runID), nil)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
 // CheckReview reports what is wrong with a review before it is sent.
 func CheckReview(event, body string, threads []DraftThread) error {
 	for _, t := range threads {

@@ -408,7 +408,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || pr.Key() != msg.key || m.fetching[msg.key] {
 			return m, nil
 		}
-		if d, ok := m.details[msg.key]; ok && !d.UpdatedAt.Before(pr.UpdatedAt) && !pr.UpdatedAt.IsZero() {
+		if d, ok := m.details[msg.key]; ok && !d.UpdatedAt.Before(pr.UpdatedAt) && !pr.UpdatedAt.IsZero() && d.CheckState == pr.CheckState {
 			return m, nil
 		}
 		m.fetching[msg.key] = true

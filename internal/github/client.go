@@ -3,8 +3,10 @@ package github
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 )
@@ -123,6 +125,17 @@ func (n prNode) toPR() PR {
 	return p
 }
 
+// webURL keeps a check's link only when it is a plain http(s) URL. Check links come
+// from CI services, not GitHub, and are printed as terminal hyperlinks and opened in
+// the browser, so anything else (other schemes, control characters) is dropped.
+func webURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || strings.ContainsFunc(s, unicode.IsControl) {
+		return ""
+	}
+	return s
+}
+
 func loginOf(l *login) string {
 	if l == nil || l.Login == "" {
 		return "ghost"
@@ -164,8 +177,8 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
       commitCount: commits { totalCount }
       commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 60) { nodes {
         __typename
-        ... on CheckRun { name status conclusion }
-        ... on StatusContext { context state }
+        ... on CheckRun { name status conclusion detailsUrl checkSuite { workflowRun { databaseId } } }
+        ... on StatusContext { context state targetUrl }
       } } } } } }
       commitList: commits(last: 100) { nodes { commit {
         oid abbreviatedOid messageHeadline messageBody committedDate additions deletions
@@ -214,8 +227,15 @@ type detailNode struct {
 							Name       string `json:"name"`
 							Status     string `json:"status"`
 							Conclusion string `json:"conclusion"`
-							Context    string `json:"context"`
-							State      string `json:"state"`
+							DetailsURL string `json:"detailsUrl"`
+							CheckSuite *struct {
+								WorkflowRun *struct {
+									DatabaseID int64 `json:"databaseId"`
+								} `json:"workflowRun"`
+							} `json:"checkSuite"`
+							Context   string `json:"context"`
+							State     string `json:"state"`
+							TargetURL string `json:"targetUrl"`
 						} `json:"nodes"`
 					} `json:"contexts"`
 				} `json:"statusCheckRollup"`
@@ -352,9 +372,13 @@ func (n *detailNode) toDetail() *Detail {
 					if st == "" {
 						st = "PENDING"
 					}
-					d.Checks = append(d.Checks, Check{Name: c.Name, State: st})
+					ch := Check{Name: c.Name, State: st, URL: webURL(c.DetailsURL)}
+					if c.CheckSuite != nil && c.CheckSuite.WorkflowRun != nil {
+						ch.RunID = c.CheckSuite.WorkflowRun.DatabaseID
+					}
+					d.Checks = append(d.Checks, ch)
 				} else {
-					d.Checks = append(d.Checks, Check{Name: c.Context, State: c.State})
+					d.Checks = append(d.Checks, Check{Name: c.Context, State: c.State, URL: webURL(c.TargetURL)})
 				}
 			}
 		}

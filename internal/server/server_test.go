@@ -300,3 +300,67 @@ func TestReviewWithLineComments(t *testing.T) {
 		t.Errorf("thread should carry its diff context: %q", got[0].DiffHunk)
 	}
 }
+
+func TestChecksAndRerun(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	var failed, green github.PR
+	for _, p := range res.PRs {
+		switch {
+		case p.CIFailed() && failed.Number == 0:
+			failed = p
+		case p.CheckState == "SUCCESS" && green.Number == 0:
+			green = p
+		}
+	}
+	if failed.Number == 0 || green.Number == 0 {
+		t.Fatal("demo data changed: need a PR whose CI failed and one whose CI passed")
+	}
+
+	// Each check carries its log link; Actions jobs also carry their run.
+	var d struct {
+		Checks []struct {
+			Name, State, URL string
+			RunID            int64
+		}
+	}
+	_ = json.Unmarshal(c.call("detail", map[string]any{"pr": failed}).Result, &d)
+	var runs, links int
+	for _, ch := range d.Checks {
+		if ch.RunID > 0 {
+			runs++
+		}
+		if strings.HasPrefix(ch.URL, "https://") {
+			links++
+		}
+	}
+	if links != len(d.Checks) || runs == 0 || runs == len(d.Checks) {
+		t.Errorf("checks should link to their logs, some with a run and some without: %+v", d.Checks)
+	}
+
+	if r := c.call("prepare", map[string]any{"command": "Re-run failed", "pr": green}); r.Error == nil {
+		t.Error("re-running a PR whose CI passed should be refused")
+	}
+	r := c.call("prepare", map[string]any{"command": "Re-run failed", "pr": failed})
+	if r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	var plan map[string]any
+	_ = json.Unmarshal(r.Result, &plan)
+	if plan["action"] != "rerun" || !strings.HasPrefix(plan["script"].(string), "gh run rerun ") {
+		t.Fatalf("plan: %v", plan)
+	}
+	r = c.call("execute", map[string]any{"plan": plan})
+	if r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	var out struct {
+		OK     bool
+		Output string
+	}
+	_ = json.Unmarshal(r.Result, &out)
+	if !out.OK || !strings.Contains(out.Output, "Re-running the failed jobs of run ") || !strings.Contains(out.Output, "Skipped codecov/patch") {
+		t.Errorf("re-run: %+v", out)
+	}
+}

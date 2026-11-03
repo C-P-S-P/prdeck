@@ -216,6 +216,10 @@ func (b *Backend) Prepare(c config.Command, pr github.PR, input string) (core.Pl
 	if c.Action == "browse" {
 		return core.Plan{Title: c.Name, Action: "browse", Script: "open " + pr.URL, PR: pr}, nil
 	}
+	if c.Action == "rerun" {
+		d, _ := b.CachedDetail(pr)
+		return core.RerunPlan(c, pr, d), nil
+	}
 	f, err := b.ResolveFolder(pr, c.Worktree)
 	if err != nil {
 		return core.Plan{}, err
@@ -299,6 +303,11 @@ func (b *Backend) Setup(_ context.Context, p core.Plan) (string, error) {
 
 func (b *Backend) Execute(ctx context.Context, p core.Plan) core.Result {
 	time.Sleep(300 * time.Millisecond)
+	if p.Action == "rerun" {
+		// Says what it would re-run; nothing is sent and the checks stay failed.
+		d, _ := b.Detail(ctx, p.PR)
+		return core.RerunFailed(p, d, func(int64) error { return nil })
+	}
 	pre, _ := b.Setup(ctx, p)
 	out := []string{}
 	if pre != "" {

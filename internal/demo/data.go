@@ -51,7 +51,7 @@ func (b *Backend) load() {
 			}),
 			flags: []string{"authored"}, commits: 6, files: 14, add: 412, del: 38, labels: []string{"feature", "registry"},
 			reviewers: [][2]string{{"mlin", "CHANGES_REQUESTED"}, {"rdavis", "COMMENTED"}, {"kopal", "PENDING"}},
-			checks:    append(pass("lint", "unit", "type-check"), [2]string{"integration-redis", "FAILURE"}),
+			checks:    append(pass("lint", "unit", "type-check"), [2]string{"integration-redis", "FAILURE"}, [2]string{"codecov/patch", "FAILURE"}),
 			body: []string{
 				"## Summary",
 				"Adds a `StreamPushSource` that accepts streaming writes and lands them in the online store without waiting for the next materialization run.",
@@ -193,8 +193,19 @@ func (b *Backend) load() {
 		for _, r := range s.reviewers {
 			d.Reviewers = append(d.Reviewers, github.Reviewer{Login: r[0], State: r[1]})
 		}
-		for _, c := range s.checks {
-			d.Checks = append(d.Checks, github.Check{Name: c[0], State: c[1]})
+		// The checks are jobs of one GitHub Actions run, linked to their logs. A name
+		// with a slash (codecov/patch) is a commit status from another service: it
+		// links to that service and has no run to re-run.
+		run := 11873400000 + int64(s.pr.Number)
+		for i, c := range s.checks {
+			ch := github.Check{Name: c[0], State: c[1]}
+			if strings.Contains(c[0], "/") {
+				ch.URL = "https://app.codecov.io/gh/" + s.pr.Repo + "/pull/" + strconv.Itoa(s.pr.Number)
+			} else {
+				ch.RunID = run
+				ch.URL = fmt.Sprintf("https://github.com/%s/actions/runs/%d/job/%d", s.pr.Repo, run, 33093400000+int64(s.pr.Number)*10+int64(i))
+			}
+			d.Checks = append(d.Checks, ch)
 		}
 		b.details[s.pr.Number] = d
 	}

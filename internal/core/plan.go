@@ -19,7 +19,7 @@ type Plan struct {
 	Title    string    `json:"title"`
 	Pre      string    `json:"pre"`    // runs first: stash/drop changes, check out the PR branch
 	Script   string    `json:"script"` // the main command
-	Action   string    `json:"action"` // "", "open", "browse", "clone"
+	Action   string    `json:"action"` // "", "open", "browse", "rerun", "clone"
 	Folder   Folder    `json:"folder"`
 	Confirm  bool      `json:"confirm"`
 	Terminal bool      `json:"terminal"` // hand the terminal to the main command
@@ -107,6 +107,10 @@ func (s *Service) Prepare(c config.Command, pr github.PR, input string) (Plan, e
 	if c.Action == "browse" {
 		return Plan{Title: c.Name, Action: "browse", Script: openURLCommand() + " " + runner.Quote(pr.URL), PR: pr}, nil
 	}
+	if c.Action == "rerun" {
+		d, _ := s.cache.Detail(pr)
+		return RerunPlan(c, pr, d), nil
+	}
 	f, err := s.ResolveFolder(pr, c.Worktree)
 	if err != nil {
 		return Plan{}, err
@@ -154,6 +158,54 @@ func BuildPlan(cfg *config.Config, c config.Command, pr github.PR, f Folder, inp
 		p.Script = "gh pr checkout " + runner.Quote(pr.URL)
 	}
 	return p, nil
+}
+
+// RerunPlan re-runs the failed jobs of a PR's GitHub Actions runs. It needs no clone
+// and no shell: Execute asks GitHub for the PR's checks again and re-runs each failed
+// run with the gh login. Script shows the gh commands that do the same, for the
+// failed runs in d (the checks on screen; nil when they are not loaded).
+func RerunPlan(c config.Command, pr github.PR, d *github.Detail) Plan {
+	p := Plan{Title: c.Name, Action: "rerun", Confirm: c.Confirm, Silent: c.Output == "silent", PR: pr}
+	if d != nil {
+		runs, _ := d.FailedRuns()
+		var cmds []string
+		for _, r := range runs {
+			cmds = append(cmds, fmt.Sprintf("gh run rerun %d --failed -R %s", r.ID, runner.Quote(pr.Repo)))
+		}
+		p.Script = strings.Join(cmds, " && ")
+	}
+	return p
+}
+
+// RerunFailed re-runs the failed jobs of each failed GitHub Actions run in d with
+// rerun, and says what it did. Failed checks from other CI services and commit
+// statuses cannot be re-run this way; they are named as skipped.
+func RerunFailed(p Plan, d *github.Detail, rerun func(runID int64) error) Result {
+	runs, other := d.FailedRuns()
+	var log, failed []string
+	for _, r := range runs {
+		what := fmt.Sprintf("run %d: %s", r.ID, strings.Join(r.Checks, ", "))
+		if err := rerun(r.ID); err != nil {
+			failed = append(failed, what+" ("+err.Error()+")")
+			continue
+		}
+		log = append(log, "Re-running the failed jobs of "+what)
+	}
+	switch len(other) {
+	case 0:
+	case 1:
+		log = append(log, "Skipped "+other[0]+": not a GitHub Actions job; re-run it from its own page")
+	default:
+		log = append(log, "Skipped "+strings.Join(other, ", ")+": not GitHub Actions jobs; re-run them from their own pages")
+	}
+	var err error
+	switch {
+	case len(runs) == 0:
+		err = errors.New("no failed GitHub Actions runs to re-run")
+	case len(failed) > 0:
+		err = errors.New("could not re-run " + strings.Join(failed, "; "))
+	}
+	return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
 }
 
 // ClonePlan offers to clone a repo that has no local clone yet.

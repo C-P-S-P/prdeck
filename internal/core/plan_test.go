@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -78,5 +79,58 @@ func TestOpenInClone(t *testing.T) {
 	p, err := BuildPlan(cfg, command("Open in editor"), pr, f, "")
 	if err != nil || p.Script != "zed /w/tool" || !strings.HasPrefix(p.Pre, "gh pr checkout") || p.Folder.Worktree {
 		t.Errorf("plan = %+v, err = %v", p, err)
+	}
+}
+
+func TestRerunFailed(t *testing.T) {
+	d := &github.Detail{PR: pr, Checks: []github.Check{
+		{Name: "lint", State: "SUCCESS", RunID: 11},
+		{Name: "unit", State: "FAILURE", RunID: 11},
+		{Name: "e2e", State: "FAILURE", RunID: 12},
+		{Name: "codecov/patch", State: "FAILURE"},
+	}}
+	p := RerunPlan(command("Re-run failed"), pr, d)
+	if p.Action != "rerun" || p.Script != "gh run rerun 11 --failed -R acme/tool && gh run rerun 12 --failed -R acme/tool" {
+		t.Errorf("plan = %+v", p)
+	}
+	if p := RerunPlan(command("Re-run failed"), pr, nil); p.Action != "rerun" || p.Script != "" {
+		t.Errorf("plan without checks = %+v", p)
+	}
+
+	var ran []int64
+	r := RerunFailed(p, d, func(id int64) error {
+		ran = append(ran, id)
+		if id == 12 {
+			return errors.New("HTTP 403: This workflow is already running")
+		}
+		return nil
+	})
+	if len(ran) != 2 || ran[0] != 11 || ran[1] != 12 {
+		t.Errorf("re-ran %v", ran)
+	}
+	want := "Re-running the failed jobs of run 11: unit\nSkipped codecov/patch: not a GitHub Actions job; re-run it from its own page"
+	if r.Output != want || r.Err == nil || !strings.Contains(r.Err.Error(), "run 12: e2e (HTTP 403") {
+		t.Errorf("output = %q, err = %v", r.Output, r.Err)
+	}
+
+	only := &github.Detail{Checks: []github.Check{{Name: "codecov/patch", State: "FAILURE"}}}
+	r = RerunFailed(p, only, func(int64) error {
+		t.Error("nothing should be re-run")
+		return nil
+	})
+	if r.Err == nil || !strings.Contains(r.Output, "Skipped codecov/patch") {
+		t.Errorf("only other CI: output = %q, err = %v", r.Output, r.Err)
+	}
+}
+
+func TestRerunOnlyWhenCIFailed(t *testing.T) {
+	c := command("Re-run failed")
+	if ok, _ := Allowed(c, pr, "you"); ok {
+		t.Error("re-run allowed on a PR whose CI did not fail")
+	}
+	failed := pr
+	failed.CheckState = "FAILURE"
+	if ok, _ := Allowed(c, failed, "you"); !ok {
+		t.Error("re-run not allowed on a PR whose CI failed")
 	}
 }

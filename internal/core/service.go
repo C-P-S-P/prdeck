@@ -301,6 +301,9 @@ func (s *Service) createWorktree(ctx context.Context, pr github.PR, f Folder) (s
 // Execute runs a plan: Setup, then the main command. GUI editors are started and left
 // running.
 func (s *Service) Execute(ctx context.Context, p Plan) Result {
+	if p.Action == "rerun" {
+		return s.rerunFailed(ctx, p)
+	}
 	var log []string
 	out, err := s.Setup(ctx, p)
 	if out != "" {
@@ -328,6 +331,20 @@ func (s *Service) Execute(ctx context.Context, p Plan) Result {
 		s.Rescan()
 	}
 	return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
+}
+
+// rerunFailed loads the PR's checks fresh from GitHub, since the ones on screen can be
+// minutes old, then re-runs the failed jobs of each failed GitHub Actions run.
+func (s *Service) rerunFailed(ctx context.Context, p Plan) Result {
+	gh := s.client()
+	if gh == nil {
+		return Result{Plan: p, Err: ErrSignedOut}
+	}
+	d, err := s.Detail(ctx, p.PR)
+	if err != nil {
+		return Result{Plan: p, Err: err}
+	}
+	return RerunFailed(p, d, func(id int64) error { return gh.RerunFailedJobs(ctx, p.PR.Repo, id) })
 }
 
 // TerminalCmd is the process for plans that take over the terminal. Call Setup first.

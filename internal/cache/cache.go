@@ -85,7 +85,9 @@ func (c *Cache) PutSearch(query, viewer string, prs []github.PR) {
 	c.save()
 }
 
-// Detail returns the cached detail only if it is as new as the PR summary.
+// Detail returns the cached detail only if it is as new as the PR summary. CI
+// finishing does not change a PR's update time, so a different check rollup also
+// makes it stale.
 func (c *Cache) Detail(pr github.PR) (*github.Detail, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -93,7 +95,7 @@ func (c *Cache) Detail(pr github.PR) (*github.Detail, bool) {
 	if !ok || e.Detail == nil {
 		return nil, false
 	}
-	if !pr.UpdatedAt.IsZero() && e.Detail.UpdatedAt.Before(pr.UpdatedAt) {
+	if !pr.UpdatedAt.IsZero() && e.Detail.UpdatedAt.Before(pr.UpdatedAt) || e.Detail.CheckState != pr.CheckState {
 		return e.Detail, false // stale, but still useful to show while refreshing
 	}
 	return e.Detail, true

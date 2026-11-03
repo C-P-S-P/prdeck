@@ -11,7 +11,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/C-P-S-P/prdeck/internal/core"
 	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/mdrender"
 )
 
 func stripANSI(s string) string { return ansi.Strip(s) }
@@ -289,10 +291,15 @@ func (m Model) detailContent(w int) string {
 			for _, c := range d.Checks {
 				switch c.State {
 				case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE":
-					names = append(names, c.Name)
+					name := sRed.Render(c.Name)
+					if c.URL != "" {
+						// A link to the check's log, like links in PR text.
+						name = mdrender.Link(c.URL, sRed.Underline(true).Render(c.Name))
+					}
+					names = append(names, name)
 				}
 			}
-			line(wrap.Render(sRed.Render("failing: " + strings.Join(names, ", "))))
+			line(wrap.Render(sRed.Render("failing: ") + strings.Join(names, sRed.Render(", ")) + m.rerunHint(pr)))
 		}
 		if len(d.Reviewers) > 0 {
 			var rs []string
@@ -384,6 +391,19 @@ func (m Model) detailContent(w int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// rerunHint names the key that re-runs failed checks, when it can run on pr.
+func (m Model) rerunHint(pr github.PR) string {
+	for _, c := range m.cfg.Commands {
+		if c.Action != "rerun" || c.Key == "" {
+			continue
+		}
+		if ok, _ := core.Allowed(c, pr, m.be.Viewer()); ok {
+			return sDim.Render("  ·  ") + sText.Render(c.Key) + sDim.Render(" "+strings.ToLower(c.Name))
+		}
+	}
+	return ""
+}
+
 func plural(n int, word string) string {
 	if n == 1 {
 		return "1 " + word
@@ -447,6 +467,8 @@ func (m Model) helpContent(w int) string {
 			what = "opens your clone in " + m.cfg.Editor.Default
 		case c.Action == "browse":
 			what = "opens the PR in your browser"
+		case c.Action == "rerun":
+			what = "re-runs the failed GitHub Actions jobs (when CI failed)"
 		case c.Action == "setpath":
 			what = "points this repo at a clone on disk (saved to config)"
 		case c.Run == "" && c.Branch:

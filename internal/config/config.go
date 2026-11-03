@@ -77,7 +77,7 @@ type Command struct {
 	Name     string     `yaml:"name"`
 	Key      string     `yaml:"key"`
 	Run      string     `yaml:"run"`
-	Action   string     `yaml:"action"` // built-in actions: open, browse, setpath
+	Action   string     `yaml:"action"` // built-in actions: open, browse, rerun, setpath
 	Bar      *bool      `yaml:"bar"`
 	Confirm  bool       `yaml:"confirm"`
 	Prompt   string     `yaml:"prompt"`
