@@ -207,8 +207,24 @@ func (b *Backend) load() {
 			}
 			d.Checks = append(d.Checks, ch)
 		}
+		// northwind squashes and allows auto-merge; upstream/datakit merges and does
+		// not, so Merge when ready there says what to do instead.
+		d.MergeStatus, d.AutoMergeAllowed, d.MergeMethods = "BLOCKED", s.pr.Owner() == "northwind", []string{"SQUASH", "MERGE"}
+		if !d.AutoMergeAllowed {
+			d.MergeMethods = []string{"MERGE", "REBASE"}
+		}
+		switch {
+		case s.pr.IsDraft:
+			d.MergeStatus = "DRAFT"
+		case s.pr.Mergeable == "CONFLICTING":
+			d.MergeStatus = "DIRTY"
+		case s.pr.ReviewDecision == "APPROVED" && s.pr.CheckState == "SUCCESS":
+			d.MergeStatus = "CLEAN" // ready: Merge when ready merges it at once
+		}
 		b.details[s.pr.Number] = d
 	}
+	// The author turned on auto-merge; it waits for your review.
+	b.details[1188].AutoMerge = &github.AutoMerge{Method: "SQUASH", By: "tnguyen", At: b.ago(5 * time.Hour)}
 }
 
 // sampleCommits makes up a commit history for a sample PR, oldest first.

@@ -304,6 +304,12 @@ func (s *Service) Execute(ctx context.Context, p Plan) Result {
 	if p.Action == "rerun" {
 		return s.rerunFailed(ctx, p)
 	}
+	if p.Action == "automerge" {
+		return s.mergeWhenReady(ctx, p)
+	}
+	if Writes(p.Action) {
+		return s.review(ctx, p)
+	}
 	var log []string
 	out, err := s.Setup(ctx, p)
 	if out != "" {
@@ -345,6 +351,47 @@ func (s *Service) rerunFailed(ctx context.Context, p Plan) Result {
 		return Result{Plan: p, Err: err}
 	}
 	return RerunFailed(p, d, func(id int64) error { return gh.RerunFailedJobs(ctx, p.PR.Repo, id) })
+}
+
+// review approves, requests changes or comments with the gh login. A PR's node ID
+// never changes, so a saved detail's is used when there is one.
+func (s *Service) review(ctx context.Context, p Plan) Result {
+	d, _ := s.cache.Detail(p.PR)
+	if d == nil || d.NodeID == "" {
+		var err error
+		if d, err = s.Detail(ctx, p.PR); err != nil {
+			return Result{Plan: p, Err: err}
+		}
+	}
+	return PostReview(ctx, p, d.NodeID, s)
+}
+
+// mergeWhenReady asks GitHub for the PR's merge state, since the one on screen can be
+// minutes old, then merges it or turns on auto-merge. GitHub works mergeability out in
+// the background, so an UNKNOWN answer is asked again a couple of times.
+func (s *Service) mergeWhenReady(ctx context.Context, p Plan) Result {
+	gh := s.client()
+	if gh == nil {
+		return Result{Plan: p, Err: ErrSignedOut}
+	}
+	var d *github.Detail
+	for try := 0; ; try++ {
+		var err error
+		if d, err = s.Detail(ctx, p.PR); err != nil {
+			return Result{Plan: p, Err: err}
+		}
+		if d.MergeStatus != "UNKNOWN" || try == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return Result{Plan: p, Err: ctx.Err()}
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return MergeWhenReady(p, d,
+		func(method string) error { return gh.EnableAutoMerge(ctx, d.NodeID, method) },
+		func(method, head string) error { return gh.Merge(ctx, d.NodeID, method, head) })
 }
 
 // TerminalCmd is the process for plans that take over the terminal. Call Setup first.

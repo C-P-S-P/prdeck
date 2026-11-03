@@ -364,3 +364,65 @@ func TestChecksAndRerun(t *testing.T) {
 		t.Errorf("re-run: %+v", out)
 	}
 }
+
+func TestReviewCommandsAndMergeWhenReady(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	prs := map[int]github.PR{}
+	for _, p := range res.PRs {
+		prs[p.Number] = p
+	}
+	run := func(command string, pr github.PR, input string) (out string, err string) {
+		t.Helper()
+		r := c.call("prepare", map[string]any{"command": command, "pr": pr, "input": input})
+		if r.Error != nil {
+			return "", r.Error.Message
+		}
+		var plan map[string]any
+		_ = json.Unmarshal(r.Result, &plan)
+		r = c.call("execute", map[string]any{"plan": plan})
+		var done struct {
+			OK            bool
+			Output, Error string
+		}
+		_ = json.Unmarshal(r.Result, &done)
+		return done.Output, done.Error
+	}
+	detail := func(pr github.PR) github.Detail {
+		var d github.Detail
+		_ = json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d)
+		return d
+	}
+	deprecate, reviewMe, ready, flight := prs[2398], prs[4807], prs[312], prs[2410]
+	if deprecate.Author == "you" || reviewMe.Author == "you" || flight.Repo != "upstream/datakit" {
+		t.Fatal("demo data changed: need #2398 and #4807 by others, #312 ready, #2410 in upstream/datakit")
+	}
+
+	// upstream/datakit has no clone: GitHub writes need none.
+	if out, err := run("Approve", deprecate, ""); err != "" || !strings.Contains(out, "Approved upstream/datakit#2398") {
+		t.Fatalf("approve: %q %q", out, err)
+	}
+	if d := detail(deprecate); d.Timeline[len(d.Timeline)-1].State != "APPROVED" {
+		t.Errorf("approval not in the conversation: %+v", d.Timeline)
+	}
+	if _, err := run("Request changes", flight, "x"); !strings.Contains(err, "other people's PRs") {
+		t.Errorf("request changes on your own PR: %q", err)
+	}
+	if out, err := run("Comment", flight, "Rebased; ptal"); err != "" || !strings.Contains(out, "Commented on upstream/datakit#2410") {
+		t.Errorf("comment: %q %q", out, err)
+	}
+
+	if out, err := run("Merge when ready", reviewMe, ""); err != "" || !strings.Contains(out, "Auto-merge is on: GitHub will squash and merge") {
+		t.Fatalf("merge when ready: %q %q", out, err)
+	}
+	if a := detail(reviewMe).AutoMerge; a == nil || a.Method != "SQUASH" || a.By != "you" {
+		t.Errorf("auto-merge not on: %+v", a)
+	}
+	if out, _ := run("Merge when ready", ready, ""); !strings.Contains(out, "Merged northwind/operator#312") {
+		t.Errorf("a ready PR should merge at once: %q", out)
+	}
+	if _, err := run("Merge when ready", flight, ""); !strings.Contains(err, "does not allow auto-merge") {
+		t.Errorf("repo without auto-merge: %q", err)
+	}
+}

@@ -187,7 +187,9 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
     pullRequest(number: $number) {
       id number title url body isDraft state updatedAt createdAt
       headRefName baseRefName isCrossRepository mergeable reviewDecision
-      additions deletions changedFiles
+      additions deletions changedFiles mergeStateStatus
+      autoMergeRequest { mergeMethod enabledAt enabledBy { login } }
+      baseRepository { autoMergeAllowed viewerDefaultMergeMethod mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed }
       author { login }
       repository { nameWithOwner }
       comments(last: 50) { totalCount nodes { author { login } body createdAt } }
@@ -222,7 +224,20 @@ type detailNode struct {
 	Additions    int    `json:"additions"`
 	Deletions    int    `json:"deletions"`
 	ChangedFiles int    `json:"changedFiles"`
-	Comments     struct {
+	MergeState   string `json:"mergeStateStatus"`
+	AutoMerge    *struct {
+		MergeMethod string    `json:"mergeMethod"`
+		EnabledAt   time.Time `json:"enabledAt"`
+		EnabledBy   *login    `json:"enabledBy"`
+	} `json:"autoMergeRequest"`
+	BaseRepository struct {
+		AutoMergeAllowed   bool   `json:"autoMergeAllowed"`
+		DefaultMethod      string `json:"viewerDefaultMergeMethod"`
+		MergeCommitAllowed bool   `json:"mergeCommitAllowed"`
+		SquashMergeAllowed bool   `json:"squashMergeAllowed"`
+		RebaseMergeAllowed bool   `json:"rebaseMergeAllowed"`
+	} `json:"baseRepository"`
+	Comments struct {
 		TotalCount int `json:"totalCount"`
 		Nodes      []struct {
 			Author    *login    `json:"author"`
@@ -359,6 +374,12 @@ func (n *detailNode) toDetail() *Detail {
 	d.Comments = n.Comments.TotalCount
 	d.Body, d.Additions, d.Deletions, d.ChangedFiles = n.Body, n.Additions, n.Deletions, n.ChangedFiles
 	d.Commits = n.CommitCount.TotalCount
+	r := n.BaseRepository
+	d.MergeStatus, d.AutoMergeAllowed = n.MergeState, r.AutoMergeAllowed
+	d.MergeMethods = MergeMethods(r.DefaultMethod, r.MergeCommitAllowed, r.SquashMergeAllowed, r.RebaseMergeAllowed)
+	if a := n.AutoMerge; a != nil {
+		d.AutoMerge = &AutoMerge{Method: a.MergeMethod, By: loginOf(a.EnabledBy), At: a.EnabledAt}
+	}
 	for _, l := range n.Labels.Nodes {
 		d.Labels = append(d.Labels, l.Name)
 	}

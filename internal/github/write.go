@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/cli/go-gh/v2/pkg/api"
 )
 
 // Review events, as GitHub names them.
@@ -68,6 +70,45 @@ func (c *Client) ReplyThread(ctx context.Context, threadID, body string) error {
 }`
 	var resp map[string]any
 	return c.gql.DoWithContext(ctx, q, map[string]any{"id": threadID, "body": body}, &resp)
+}
+
+// EnableAutoMerge turns on auto-merge: GitHub merges the PR with method (MERGE, SQUASH
+// or REBASE) once its checks and reviews pass. GitHub refuses it for a PR that can be
+// merged now, and in repos that do not allow auto-merge.
+func (c *Client) EnableAutoMerge(ctx context.Context, prID, method string) error {
+	const q = `mutation PRDeckAutoMerge($id: ID!, $method: PullRequestMergeMethod!) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { clientMutationId }
+}`
+	var resp map[string]any
+	return Refusal(c.gql.DoWithContext(ctx, q, map[string]any{"id": prID, "method": method}, &resp))
+}
+
+// Merge merges the PR now with method. head is the commit that was checked; GitHub
+// refuses the merge if the branch moved on since ("" merges whatever is there).
+func (c *Client) Merge(ctx context.Context, prID, method, head string) error {
+	const q = `mutation PRDeckMerge($id: ID!, $method: PullRequestMergeMethod!, $head: GitObjectID) {
+  mergePullRequest(input: {pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head}) { clientMutationId }
+}`
+	vars := map[string]any{"id": prID, "method": method, "head": nil}
+	if head != "" {
+		vars["head"] = head
+	}
+	var resp map[string]any
+	return Refusal(c.gql.DoWithContext(ctx, q, vars, &resp))
+}
+
+// Refusal is GitHub's own words for why it refused a write: the messages of a GraphQL
+// error, without go-gh's "GraphQL:" prefix and field paths. Other errors stay as they are.
+func Refusal(err error) error {
+	var ge *api.GraphQLError
+	if !errors.As(err, &ge) || len(ge.Errors) == 0 {
+		return err
+	}
+	var msgs []string
+	for _, e := range ge.Errors {
+		msgs = append(msgs, e.Message)
+	}
+	return errors.New(strings.Join(msgs, "; "))
 }
 
 // RerunFailedJobs re-runs the failed jobs of one GitHub Actions run, and the jobs

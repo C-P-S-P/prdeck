@@ -220,6 +220,10 @@ func (b *Backend) Prepare(c config.Command, pr github.PR, input string) (core.Pl
 		d, _ := b.CachedDetail(pr)
 		return core.RerunPlan(c, pr, d), nil
 	}
+	if core.Writes(c.Action) {
+		d, _ := b.CachedDetail(pr)
+		return core.WritePlan(c, pr, d, input), nil
+	}
 	f, err := b.ResolveFolder(pr, c.Worktree)
 	if err != nil {
 		return core.Plan{}, err
@@ -308,6 +312,9 @@ func (b *Backend) Execute(ctx context.Context, p core.Plan) core.Result {
 		d, _ := b.Detail(ctx, p.PR)
 		return core.RerunFailed(p, d, func(int64) error { return nil })
 	}
+	if core.Writes(p.Action) {
+		return b.write(ctx, p)
+	}
 	pre, _ := b.Setup(ctx, p)
 	out := []string{}
 	if pre != "" {
@@ -350,6 +357,33 @@ func (b *Backend) Execute(ctx context.Context, p core.Plan) core.Result {
 		out = append(out, "(demo) would run: "+p.Script)
 	}
 	return core.Result{Plan: p, Output: strings.Join(out, "\n")}
+}
+
+// write approves, requests changes, comments or merges when ready on a sample PR, the
+// same way the core decides, and says so. Reviews and auto-merge show up in the sample
+// PR; a merge only says what it would do. Nothing is sent to GitHub.
+func (b *Backend) write(ctx context.Context, p core.Plan) core.Result {
+	d, err := b.Detail(ctx, p.PR)
+	if err != nil {
+		return core.Result{Plan: p, Err: err}
+	}
+	var r core.Result
+	if p.Action == "automerge" {
+		r = core.MergeWhenReady(p, d, func(method string) error {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			if s := b.details[d.Number]; s != nil {
+				s.AutoMerge = &github.AutoMerge{Method: method, By: "you", At: time.Now()}
+			}
+			return nil
+		}, func(string, string) error { return nil })
+	} else {
+		r = core.PostReview(ctx, p, d.NodeID, b)
+	}
+	if r.Err == nil {
+		r.Output += "\n(demo) nothing was sent to GitHub"
+	}
+	return r
 }
 
 func (b *Backend) TerminalCmd(p core.Plan) *exec.Cmd {

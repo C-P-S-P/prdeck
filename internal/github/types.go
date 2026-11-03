@@ -51,6 +51,39 @@ type Detail struct {
 	Timeline     []Event    `json:"timeline"`
 	CommitList   []Commit   `json:"commitList"` // oldest first, up to the last 100
 	Files        []File     `json:"files"`      // up to the first 100
+
+	// Merging: GitHub's merge state (CLEAN, BLOCKED, BEHIND, UNSTABLE, DIRTY,
+	// HAS_HOOKS, DRAFT, UNKNOWN), auto-merge when it is on, and how the repo merges.
+	MergeStatus      string     `json:"mergeStatus,omitempty"`
+	AutoMerge        *AutoMerge `json:"autoMerge,omitempty"`
+	AutoMergeAllowed bool       `json:"autoMergeAllowed,omitempty"`
+	MergeMethods     []string   `json:"mergeMethods,omitempty"` // allowed ones (MERGE, SQUASH, REBASE), the viewer's default first
+}
+
+// AutoMerge is turned on for a PR: GitHub merges it once checks and reviews pass.
+type AutoMerge struct {
+	Method string    `json:"method"` // MERGE, SQUASH or REBASE
+	By     string    `json:"by"`
+	At     time.Time `json:"at"`
+}
+
+// MergeMethods lists the methods a repo allows, the default one first: the viewer's
+// last used method, which GitHub's merge button also starts with.
+func MergeMethods(def string, merge, squash, rebase bool) []string {
+	var out []string
+	for _, m := range []struct {
+		name string
+		ok   bool
+	}{{"MERGE", merge}, {"SQUASH", squash}, {"REBASE", rebase}} {
+		switch {
+		case !m.ok:
+		case m.name == def:
+			out = append([]string{m.name}, out...)
+		default:
+			out = append(out, m.name)
+		}
+	}
+	return out
 }
 
 // Commit is one commit on the PR branch.

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -143,5 +144,118 @@ func TestRerunOnlyWhenCIFailed(t *testing.T) {
 	failed.CheckState = "FAILURE"
 	if ok, _ := Allowed(c, failed, "you"); !ok {
 		t.Error("re-run not allowed on a PR whose CI failed")
+	}
+}
+
+func TestWritePlans(t *testing.T) {
+	cases := []struct {
+		cmd, input string
+		d          *github.Detail
+		want       string
+	}{
+		{"Approve", "", nil, "gh pr review 7 --approve -R acme/tool"},
+		{"Request changes", "add a test", nil, "gh pr review 7 --request-changes --body 'add a test' -R acme/tool"},
+		{"Comment", "it's fine; ship it", nil, `gh pr comment 7 --body 'it'\''s fine; ship it' -R acme/tool`},
+		{"Merge when ready", "", nil, "gh pr merge 7 --auto -R acme/tool"},
+		{"Merge when ready", "", &github.Detail{MergeStatus: "BLOCKED", MergeMethods: []string{"REBASE", "MERGE"}}, "gh pr merge 7 --auto --rebase -R acme/tool"},
+		{"Merge when ready", "", &github.Detail{MergeStatus: "CLEAN", MergeMethods: []string{"SQUASH"}}, "gh pr merge 7 --squash -R acme/tool"},
+	}
+	for _, c := range cases {
+		cmd := command(c.cmd)
+		p := WritePlan(cmd, pr, c.d, c.input)
+		if !Writes(p.Action) || p.Script != c.want || p.Input != c.input || p.Confirm != cmd.Confirm {
+			t.Errorf("%s: plan = %+v", c.cmd, p)
+		}
+	}
+	if Writes("rerun") || Writes("") || Writes("open") {
+		t.Error("only the GitHub writes count")
+	}
+}
+
+type fakeReviewer struct{ sent []string }
+
+func (f *fakeReviewer) Comment(_ context.Context, id, body string) error {
+	f.sent = append(f.sent, "comment "+id+" "+body)
+	return nil
+}
+
+func (f *fakeReviewer) Review(_ context.Context, id, event, body string, threads []github.DraftThread) error {
+	if err := github.CheckReview(event, body, threads); err != nil {
+		return err
+	}
+	f.sent = append(f.sent, strings.TrimSpace(event+" "+id+" "+body))
+	return nil
+}
+
+func TestPostReview(t *testing.T) {
+	ctx := context.Background()
+	r := &fakeReviewer{}
+	for _, c := range []struct{ cmd, input, out string }{
+		{"Approve", "", "Approved acme/tool#7"},
+		{"Request changes", "add a test", "Requested changes on acme/tool#7"},
+		{"Comment", "thanks", "Commented on acme/tool#7"},
+	} {
+		res := PostReview(ctx, WritePlan(command(c.cmd), pr, nil, c.input), "PR_7", r)
+		if res.Err != nil || res.Output != c.out {
+			t.Errorf("%s: %q %v", c.cmd, res.Output, res.Err)
+		}
+	}
+	if strings.Join(r.sent, "|") != "APPROVE PR_7|REQUEST_CHANGES PR_7 add a test|comment PR_7 thanks" {
+		t.Errorf("sent = %q", r.sent)
+	}
+	if res := PostReview(ctx, WritePlan(command("Request changes"), pr, nil, ""), "PR_7", r); res.Err == nil {
+		t.Error("requesting changes without saying what should change was sent")
+	}
+}
+
+func TestMergeWhenReady(t *testing.T) {
+	open := github.Detail{PR: pr, MergeStatus: "BLOCKED", AutoMergeAllowed: true, MergeMethods: []string{"SQUASH", "MERGE"},
+		CommitList: []github.Commit{{OID: "old"}, {OID: "head"}}}
+	open.State = "OPEN"
+	with := func(f func(d *github.Detail)) *github.Detail { d := open; f(&d); return &d }
+	cases := []struct {
+		name          string
+		d             *github.Detail
+		enableErr     error
+		did, out, err string
+	}{
+		{"waits for checks and reviews", &open, nil, "enable SQUASH", "Auto-merge is on: GitHub will squash and merge acme/tool#7 once checks and reviews pass", ""},
+		{"behind or still computing", with(func(d *github.Detail) { d.MergeStatus = "UNKNOWN" }), nil, "enable SQUASH", "Auto-merge is on", ""},
+		{"ready: merges the checked commit now", with(func(d *github.Detail) { d.MergeStatus = "CLEAN" }), nil, "merge SQUASH head", "Merged acme/tool#7 (squash and merge): it was ready", ""},
+		{"ready with hooks", with(func(d *github.Detail) { d.MergeStatus, d.MergeMethods = "HAS_HOOKS", []string{"REBASE"} }), nil, "merge REBASE head", "(rebase and merge)", ""},
+		{"checks not passing, none required", with(func(d *github.Detail) { d.MergeStatus = "UNSTABLE" }), nil, "", "", "none of them is required"},
+		{"repo without auto-merge", with(func(d *github.Detail) { d.AutoMergeAllowed = false }), nil, "", "", `does not allow auto-merge (an admin can turn on "Allow auto-merge"`},
+		{"ready in a repo without auto-merge still merges", with(func(d *github.Detail) { d.AutoMergeAllowed, d.MergeStatus = false, "CLEAN" }), nil, "merge SQUASH head", "Merged", ""},
+		{"already on", with(func(d *github.Detail) { d.AutoMerge = &github.AutoMerge{Method: "MERGE", By: "mlin"} }), nil, "", "already on for acme/tool#7 (merge, turned on by mlin)", ""},
+		{"already merged", with(func(d *github.Detail) { d.State = "MERGED" }), nil, "", "", "acme/tool#7 is already merged"},
+		{"closed", with(func(d *github.Detail) { d.State = "CLOSED" }), nil, "", "", "is closed"},
+		{"GitHub refuses", &open, errors.New("Pull request is in dirty status"), "enable SQUASH", "", "GitHub did not turn on auto-merge for acme/tool#7: Pull request is in dirty status"},
+	}
+	for _, c := range cases {
+		var did []string
+		r := MergeWhenReady(Plan{Action: "automerge"}, c.d,
+			func(m string) error { did = append(did, "enable "+m); return c.enableErr },
+			func(m, head string) error { did = append(did, "merge "+m+" "+head); return nil })
+		got := ""
+		if r.Err != nil {
+			got = r.Err.Error()
+		}
+		if strings.Join(did, ",") != c.did || !strings.Contains(r.Output, c.out) || (c.err == "") != (r.Err == nil) || !strings.Contains(got, c.err) {
+			t.Errorf("%s: did %v, output %q, err %v", c.name, did, r.Output, r.Err)
+		}
+	}
+}
+
+func TestAllowedSaysWhy(t *testing.T) {
+	mine := pr
+	mine.Author, mine.IsDraft = "you", true
+	if _, why := Allowed(command("Approve"), mine, "you"); why != "Approve only runs on other people's PRs" {
+		t.Errorf("why = %q", why)
+	}
+	if _, why := Allowed(command("Merge when ready"), mine, "you"); why != "Merge when ready only runs on PRs that are ready for review" {
+		t.Errorf("why = %q", why)
+	}
+	if ok, _ := Allowed(command("Approve"), pr, "you"); !ok {
+		t.Error("approving someone else's PR was refused")
 	}
 }

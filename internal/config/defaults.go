@@ -38,6 +38,9 @@ func Default() *Config {
 // asks to stash or drop changes when there are some. Only "Open in worktree" makes a
 // worktree, unless editor.worktree is turned on.
 //
+// Approve, Request changes, Comment, Merge when ready and Re-run failed change the PR
+// on GitHub instead, with the gh login; they need no clone.
+//
 // Placeholders: {number} {branch} {base} {repo} {owner} {name} {title} {author} {url}
 // {remote} (the remote that points at the PR's repo) {path} (the PR folder) {input}.
 func DefaultCommands() []Command {
@@ -52,6 +55,10 @@ func DefaultCommands() []Command {
 		{Name: "Open in editor", Key: "o", Action: "open", Branch: true, Bar: on()},
 		{Name: "Open in worktree", Key: "w", Action: "open", Worktree: true, Bar: on()},
 		{Name: "Open on GitHub", Key: "b", Action: "browse", Bar: on()},
+		{Name: "Approve", Key: "a", Action: "approve", When: StringList{"others"}, Confirm: true, Bar: on()},
+		{Name: "Request changes", Key: "x", Action: "request_changes", Prompt: "What should change", When: StringList{"others"}, Bar: on()},
+		{Name: "Comment", Key: "i", Action: "comment", Prompt: "Comment", Bar: on()},
+		{Name: "Merge when ready", Key: "M", Action: "automerge", When: StringList{"ready"}, Confirm: true, Bar: on()},
 		{Name: "Re-run failed", Key: "F", Action: "rerun", When: StringList{"ci_failed"}},
 		{Name: "Set clone path", Key: "L", Action: "setpath"},
 	}

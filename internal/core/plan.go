@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -19,7 +20,8 @@ type Plan struct {
 	Title    string    `json:"title"`
 	Pre      string    `json:"pre"`    // runs first: stash/drop changes, check out the PR branch
 	Script   string    `json:"script"` // the main command
-	Action   string    `json:"action"` // "", "open", "browse", "rerun", "clone"
+	Action   string    `json:"action"` // "", "open", "browse", "rerun", "clone", or a GitHub write (see Writes)
+	Input    string    `json:"input"`  // the text a GitHub write sends: a comment, what should change
 	Folder   Folder    `json:"folder"`
 	Confirm  bool      `json:"confirm"`
 	Terminal bool      `json:"terminal"` // hand the terminal to the main command
@@ -93,7 +95,16 @@ func Allowed(c config.Command, pr github.PR, viewer string) (bool, string) {
 			ok = pr.Mergeable == "CONFLICTING"
 		}
 		if !ok {
-			return false, fmt.Sprintf("%s only runs on PRs that are %s", c.Name, strings.ReplaceAll(w, "_", " "))
+			what := "PRs that are " + strings.ReplaceAll(w, "_", " ")
+			switch w {
+			case "authored":
+				what = "your own PRs"
+			case "others":
+				what = "other people's PRs"
+			case "ready":
+				what = "PRs that are ready for review"
+			}
+			return false, fmt.Sprintf("%s only runs on %s", c.Name, what)
 		}
 	}
 	return true, ""
@@ -110,6 +121,10 @@ func (s *Service) Prepare(c config.Command, pr github.PR, input string) (Plan, e
 	if c.Action == "rerun" {
 		d, _ := s.cache.Detail(pr)
 		return RerunPlan(c, pr, d), nil
+	}
+	if Writes(c.Action) {
+		d, _ := s.cache.Detail(pr)
+		return WritePlan(c, pr, d, input), nil
 	}
 	f, err := s.ResolveFolder(pr, c.Worktree)
 	if err != nil {
@@ -214,6 +229,128 @@ func someOf(names []string) string {
 		return strings.Join(names[:3], ", ") + fmt.Sprintf(" and %d more", len(names)-3)
 	}
 	return strings.Join(names, ", ")
+}
+
+// Writes reports the built-in actions that change the PR on GitHub with the gh login:
+// approve, request_changes, comment (they send Plan.Input) and automerge. Like
+// Re-run failed they need no clone and no shell.
+func Writes(action string) bool {
+	switch action {
+	case "approve", "request_changes", "comment", "automerge":
+		return true
+	}
+	return false
+}
+
+// WritePlan is a command that changes the PR on GitHub; input is the text it sends.
+// Script shows the gh command that does the same, so `y` copies something that works;
+// for Merge when ready it follows the PR as last loaded (d; nil when not loaded yet).
+func WritePlan(c config.Command, pr github.PR, d *github.Detail, input string) Plan {
+	p := Plan{Title: c.Name, Action: c.Action, Input: input, Confirm: c.Confirm, Silent: c.Output == "silent", PR: pr}
+	n, repo, body := strconv.Itoa(pr.Number), " -R "+runner.Quote(pr.Repo), ""
+	if input != "" {
+		body = " --body " + runner.Quote(input)
+	}
+	switch c.Action {
+	case "approve":
+		p.Script = "gh pr review " + n + " --approve" + body + repo
+	case "request_changes":
+		p.Script = "gh pr review " + n + " --request-changes" + body + repo
+	case "comment":
+		p.Script = "gh pr comment " + n + body + repo
+	case "automerge":
+		how := " --auto"
+		if d != nil && readyNow(d.MergeStatus) {
+			how = ""
+		}
+		if d != nil && len(d.MergeMethods) > 0 {
+			how += " --" + strings.ToLower(d.MergeMethods[0])
+		}
+		p.Script = "gh pr merge " + n + how + repo
+	}
+	return p
+}
+
+// Reviewer comments on and reviews PRs: the Service, or the demo's sample PRs.
+type Reviewer interface {
+	Comment(ctx context.Context, prID, body string) error
+	Review(ctx context.Context, prID, event, body string, threads []github.DraftThread) error
+}
+
+// PostReview sends what a review command's plan asks for (approve, request changes
+// or comment on the PR whose node ID is prID) and says what it did. It is the same
+// write the desktop's review box makes.
+func PostReview(ctx context.Context, p Plan, prID string, r Reviewer) Result {
+	var err error
+	did := "Commented on"
+	switch p.Action {
+	case "approve":
+		did, err = "Approved", r.Review(ctx, prID, github.Approve, p.Input, nil)
+	case "request_changes":
+		did, err = "Requested changes on", r.Review(ctx, prID, github.RequestChanges, p.Input, nil)
+	default:
+		err = r.Comment(ctx, prID, p.Input)
+	}
+	if err != nil {
+		return Result{Plan: p, Err: github.Refusal(err)}
+	}
+	return Result{Plan: p, Output: fmt.Sprintf("%s %s#%d", did, p.PR.Repo, p.PR.Number)}
+}
+
+// readyNow reports the merge states in which GitHub would merge a PR at once (all
+// checks and reviews passed), and so refuses to turn on auto-merge for it.
+func readyNow(status string) bool { return status == "CLEAN" || status == "HAS_HOOKS" }
+
+// MergeWhenReady turns on auto-merge, so GitHub merges the PR once its checks and
+// reviews pass, or merges it now when nothing is left to wait for. d is the PR as
+// GitHub sees it now. enable and merge take the merge method: the viewer's default
+// from the repo's allowed ones, as on GitHub's merge button.
+func MergeWhenReady(p Plan, d *github.Detail, enable func(method string) error, merge func(method, head string) error) Result {
+	ref := fmt.Sprintf("%s#%d", d.Repo, d.Number)
+	refuse := func(why string) Result { return Result{Plan: p, Err: errors.New(why)} }
+	switch {
+	case d.State == "MERGED":
+		return refuse(ref + " is already merged")
+	case d.State == "CLOSED":
+		return refuse(ref + " is closed")
+	case d.AutoMerge != nil:
+		return Result{Plan: p, Output: fmt.Sprintf("Auto-merge is already on for %s (%s, turned on by %s)", ref, MergeWord(d.AutoMerge.Method), d.AutoMerge.By)}
+	case len(d.MergeMethods) == 0:
+		return refuse(d.Repo + " allows no merge method")
+	}
+	method := d.MergeMethods[0]
+	switch {
+	case readyNow(d.MergeStatus):
+		// Merge the commit whose checks passed, not one pushed since.
+		head := ""
+		if n := len(d.CommitList); n > 0 {
+			head = d.CommitList[n-1].OID
+		}
+		if err := merge(method, head); err != nil {
+			return refuse("GitHub did not merge " + ref + ": " + err.Error())
+		}
+		return Result{Plan: p, Output: fmt.Sprintf("Merged %s (%s): it was ready, so there was nothing to wait for", ref, MergeWord(method))}
+	case d.MergeStatus == "UNSTABLE":
+		// GitHub would merge now, and refuses auto-merge, though checks are not green.
+		return refuse("checks on " + ref + " are failing or still running, but none of them is required, so GitHub has nothing to wait for. Try again once they pass, or merge it on GitHub")
+	case !d.AutoMergeAllowed:
+		return refuse(d.Repo + " does not allow auto-merge (an admin can turn on \"Allow auto-merge\" in its settings). Merge it on GitHub once it is ready")
+	}
+	if err := enable(method); err != nil {
+		return refuse("GitHub did not turn on auto-merge for " + ref + ": " + err.Error())
+	}
+	return Result{Plan: p, Output: fmt.Sprintf("Auto-merge is on: GitHub will %s %s once checks and reviews pass", MergeWord(method), ref)}
+}
+
+// MergeWord names a merge method the way GitHub's merge button does.
+func MergeWord(method string) string {
+	switch method {
+	case "SQUASH":
+		return "squash and merge"
+	case "REBASE":
+		return "rebase and merge"
+	}
+	return "merge"
 }
 
 // ClonePlan offers to clone a repo that has no local clone yet.
