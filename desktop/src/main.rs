@@ -90,8 +90,11 @@ fn shortcut(mac: &'static str) -> &'static str {
     }
 }
 
+/// Windows and Linux type Shift+] as "}" with shift dropped, so a binding names the
+/// shifted key there.
+/// ponytail: the US layout's brackets; Ctrl+Tab switches tabs on any layout.
 fn ctrl_for_cmd(mac: &str) -> String {
-    mac.replace("cmd-", "ctrl-")
+    mac.replace("cmd-", "ctrl-").replace("shift-]", "}").replace("shift-[", "{")
 }
 
 fn menus() -> Vec<Menu> {
@@ -205,7 +208,14 @@ mod tests {
     #[test]
     fn shortcuts_use_ctrl_off_the_mac() {
         assert_eq!(ctrl_for_cmd("cmd-k"), "ctrl-k");
-        assert_eq!(ctrl_for_cmd("cmd-shift-]"), "ctrl-shift-]");
+        // Windows and Linux report Shift+] as "}" without shift, so "ctrl-shift-]" never fires.
+        assert_eq!(ctrl_for_cmd("cmd-shift-]"), "ctrl-}");
+        assert_eq!(ctrl_for_cmd("cmd-shift-["), "ctrl-{");
+        // KeyBinding::new panics on a keystroke it cannot parse.
+        let next: &'static str = Box::leak(ctrl_for_cmd("cmd-shift-]").into_boxed_str());
+        let k = gpui_kit::Keystroke::parse(next).unwrap();
+        assert_eq!((k.key.as_str(), k.modifiers.control, k.modifiers.shift), ("}", true, false));
+        assert_eq!(ctrl_for_cmd("cmd-shift-t"), "ctrl-shift-t");
         assert_eq!(ctrl_for_cmd("cmd-,"), "ctrl-,");
         assert_eq!(ctrl_for_cmd("ctrl-tab"), "ctrl-tab");
     }
