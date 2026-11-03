@@ -99,6 +99,8 @@ sequenceDiagram
 | `internal/tui`, `internal/mdrender`, `internal/termout` | The terminal app, its markdown renderer, and its terminal writer. |
 | `internal/demo` | Sample PRs and pretend clones for `prdeck demo`, `--demo` and the screenshots. |
 | `desktop/src` | The desktop app: window (`deck.rs`), setup (`deck/setup.rs`), PR text (`markdown.rs`), the pipe to the core (`rpc.rs`). |
+| `desktop/tests/fixtures` | The replies the desktop app reads, recorded from the demo; both sides' tests check them ([0015](0015-ci-and-a-protocol-contract.md)). |
+| `.github/workflows` | CI: the Go checks on Linux, the desktop app's build and tests on a Mac. |
 
 ## Decisions
 
@@ -118,5 +120,6 @@ sequenceDiagram
 | [0012](0012-comment-and-review-from-the-app.md) | Comment and review from the app |
 | [0013](0013-diffs-in-the-app.md) | Diffs in the app |
 | [0014](0014-inline-review.md) | Inline review on the diff |
+| [0015](0015-ci-and-a-protocol-contract.md) | CI, and a contract test between Go and Rust |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.

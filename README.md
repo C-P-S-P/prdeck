@@ -188,7 +188,15 @@ GitHub data comes from the GraphQL API through [go-gh](https://github.com/cli/go
 
 ```bash
 go test ./...
-cd desktop && cargo build
+cd desktop && cargo build && cargo test
+```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on every push to main and every pull request: `gofmt`, `go vet` and `go test -race` on Linux, and the desktop app's build and tests on a Mac.
+
+The replies the desktop app reads from `prdeck serve` are saved in `desktop/tests/fixtures`, one file per method. `go test` checks that the demo replies still match them and `cargo test` reads them into the app's types, so the Go and Rust sides cannot drift apart. After changing a reply on purpose, rewrite them and commit the diff:
+
+```bash
+go test ./internal/server -run TestContract -update
 ```
 
 ## Roadmap
