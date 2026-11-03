@@ -48,6 +48,10 @@ keys() { tmux send-keys -t "$SESSION" "$@"; }
 
 shot main "prdeck — PRs you're involved in"
 
+keys "n"
+shot unread "prdeck — what changed since you last looked"
+keys "g" Escape
+
 keys "/"
 shot palette "prdeck — filter palette"
 keys Escape

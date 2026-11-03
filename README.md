@@ -20,8 +20,8 @@ A dashboard for the pull requests you're involved in, in the terminal and on the
 | **Output**: conflicts show right away; fix them, then `C` | **`?` help**: every key and the command it runs |
 | ![Re-run failed](docs/screenshots/rerun.png) | ![Approve](docs/screenshots/approve.png) |
 | **`F` re-run failed**: failing checks link to their logs; only the failed jobs run again | **`a` approve**: shows what it sends, then approves on `enter` |
-| ![Merge when ready](docs/screenshots/merge.png) | |
-| **`M` merge when ready**: auto-merge on, so GitHub merges once checks and reviews pass | |
+| ![Merge when ready](docs/screenshots/merge.png) | ![New since you last looked](docs/screenshots/unread.png) |
+| **`M` merge when ready**: auto-merge on, so GitHub merges once checks and reviews pass | **`n` what's new**: unread PRs are blue and bold; new comments are tagged, `n` jumps to the first |
 
 Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/screenshots/capture.sh`.
 
@@ -51,6 +51,7 @@ prdeck config init         # write a starter config
 | `1`–`9` | Switch filter (Involves me, Authored, Review requested, Assigned, Mentions) |
 | `/` | Filter palette: pick a filter or type any qualifier (`label:bug repo:org/x`) |
 | `R` | Refresh now (it also refreshes every 2 minutes) |
+| `n` | Jump to the first comment, review or reply that is new since you last opened the PR |
 | `f` `c` `u` | Fetch, check out the PR's branch, pull |
 | `r` `C` `A` | Rebase on the base branch, continue, abort |
 | `p` | Push with `--force-with-lease` |
@@ -77,6 +78,8 @@ PR descriptions and comments render like on GitHub, inside the pane:
 **Failing checks** are listed under the PR's title, each name a link to its log (hold ⌘ to click with mouse support on). `F` re-runs only the failed jobs of each failed GitHub Actions run, with your gh login; checks from other CI services, such as Codecov, are skipped and named, since they re-run from their own page.
 
 **Review and merge** with your gh login, no clone needed: `a` approves, `x` asks what should change and requests changes, `i` asks for a comment and posts it. `M` (merge when ready) turns on GitHub's auto-merge, so GitHub merges once checks and reviews pass, with the merge method GitHub's own button starts with (your last used one the repo allows). A PR that is ready already is merged at once. A repo that does not allow auto-merge, conflicts, or checks that fail but are not required, are explained instead; when GitHub refuses, its own words are shown in full. The PR view then shows the new review, comment or `auto-merge on`. On your own PRs, Approve and Request changes are dimmed in the key bar.
+
+**What's new since you last looked.** A PR updated since you last opened it has a blue dot and a bold title in the list. Opening it (selecting it is enough) clears that, and the PR view says how many comments, reviews and replies came in since your last visit, each tagged `new`; `n` jumps to the first. Your own comments are never new, and what you do from prdeck does not make your PR unread. Both apps keep this in the same cache file, so a PR opened on the desktop shows as read in the terminal on its next refresh. The first run counts everything listed as seen.
 
 With mouse support on, hold Option (or Shift, depending on your terminal) to select text. Set `ui.mouse: false` to turn it off.
 
@@ -116,6 +119,8 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 | **Checks**: click one to open its log | **Re-run failed**: only the failed jobs, with your gh login |
 | ![Merge when ready](docs/screenshots/desktop-merge.png) | ![Auto-merge on](docs/screenshots/desktop-automerge.png) |
 | **Merge when ready** next to Approve; asks first | **Auto-merge on**: GitHub merges once checks and reviews pass |
+| ![Unread PRs and what is new](docs/screenshots/desktop-unread.png) | ![Jump to first new](docs/screenshots/desktop-new.png) |
+| **Unread**: a dot on PRs that changed since you last looked; the conversation says how many are new | **Jump to first new** (or `n`): what came in since is tagged New |
 
 - **PR text like github.com**: images (your GitHub login is used for GitHub-hosted ones), `<img width>`, `<details>`, tables of screenshots side by side, syntax-highlighted code, `[!NOTE]`/`[!WARNING]` boxes, emoji and linked @mentions. Text is selectable.
 - **Comment and review**: a reply box at the end of every conversation (Write / Preview) with Comment, Approve and Request changes, and Reply on each code thread. Drafts are kept per PR. `⌘⇧C`, the Review button, or the `a` `x` `i` keys jump there; `⌘↵` comments.
@@ -123,6 +128,7 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 - **Diffs**: click a commit to see what it changed (Previous / Next steps through them), or open Files changed for every file's diff with line numbers. Big PRs open the first ~1,500 lines and keep the rest one click away.
 - **Inline review**: click a line number in Files changed to comment on that line, or drag across line numbers (or Shift-click) to comment on several. The comment box can copy the selected lines or turn them into a suggested change. Add a single comment, or start a review: comments stay pending under their lines until you Submit review, Approve or Request changes, and go to GitHub together. Existing review threads show at their lines with Reply.
 - **Checks**: every check opens its log in the browser; the side panel lists the first few failing ones. When CI failed, **Re-run failed** (or `F`) re-runs only the failed GitHub Actions jobs.
+- **What's new**: a blue dot and a bold title on PRs updated since you last opened them, in either app. In the conversation, comments, reviews and replies from others since your last visit are tagged New, and a bar at the top counts them, with Jump to first new (or `n`).
 - **Profile photos** from GitHub next to every author and reviewer.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
 - **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
@@ -148,12 +154,13 @@ cargo run --release             # your PRs (uses your gh login)
 | `⌘O` / `⌘⇧O` | open in editor / on GitHub |
 | `⌘⇧C` / `⌘↵` | write a comment or review / post the comment |
 | `a` `x` `i` / `M` | open the reply box / merge when ready |
+| `n` | jump to the first new comment, review or reply |
 | `esc` | back from a commit to the list |
 | `⌘B` | hide the sidebar |
 | `⌘,` | edit the config |
 | your command keys | run that command; `esc` closes the command bar |
 
-Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
+Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|new|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
 
 ## Configuration
 
