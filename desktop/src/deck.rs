@@ -514,6 +514,9 @@ impl Deck {
             if let Some(shown) = self.details.get(&key).filter(|_| self.looked.as_ref() == Some(&key)) {
                 d.keep_new(shown);
             }
+            if d.new_count() == 0 {
+                self.jump_new.set(false); // n pressed on the last visit's copy: nothing to jump to
+            }
             self.looked = Some(key.clone());
         }
         self.details.insert(key, d);
