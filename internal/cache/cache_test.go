@@ -20,4 +20,8 @@ func TestDetailStaleWhenChecksChange(t *testing.T) {
 	if d, fresh := c.Detail(pr); d == nil || fresh {
 		t.Errorf("checks changed: got %v, fresh %v; want the old detail, stale", d, fresh)
 	}
+	// A PR known only by its number says nothing about its checks either.
+	if _, fresh := c.Detail(github.PR{Number: 7, Repo: "acme/tool"}); !fresh {
+		t.Error("a PR without a summary should take the saved detail as it is")
+	}
 }

@@ -95,7 +95,7 @@ func (c *Cache) Detail(pr github.PR) (*github.Detail, bool) {
 	if !ok || e.Detail == nil {
 		return nil, false
 	}
-	if !pr.UpdatedAt.IsZero() && e.Detail.UpdatedAt.Before(pr.UpdatedAt) || e.Detail.CheckState != pr.CheckState {
+	if !pr.UpdatedAt.IsZero() && (e.Detail.UpdatedAt.Before(pr.UpdatedAt) || e.Detail.CheckState != pr.CheckState) {
 		return e.Detail, false // stale, but still useful to show while refreshing
 	}
 	return e.Detail, true
