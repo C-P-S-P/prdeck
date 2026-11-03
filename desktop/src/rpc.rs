@@ -61,8 +61,8 @@ impl Rpc {
         let bin = sidecar();
         let mut cmd = Command::new(&bin);
         cmd.arg("serve");
-        if let Some(path) = login_path() {
-            cmd.env("PATH", path);
+        for (name, value) in login_env() {
+            cmd.env(name, value);
         }
         if demo {
             cmd.arg(if signed_out { "--demo-signed-out" } else { "--demo" });
@@ -165,17 +165,36 @@ impl Rpc {
     }
 }
 
-/// PATH from the user's login shell. An app opened from Finder or the Dock gets a bare
-/// PATH without Homebrew, so `gh` and `git` would not be found; Zed does the same.
-fn login_path() -> Option<String> {
-    shell_path(&std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()))
+/// Settings prdeck needs from the user's login shell: PATH (an app opened from Finder
+/// or the Dock gets a bare one, without Homebrew's `gh` and `git`; Zed does the same)
+/// and where the config lives, so the app and the terminal read the same file.
+const SHELL_VARS: [&str; 4] = ["PATH", "XDG_CONFIG_HOME", "PRDECK_CONFIG", "GH_CONFIG_DIR"];
+
+/// The SHELL_VARS the login shell sets differently from this process.
+fn login_env() -> Vec<(&'static str, String)> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let Some(out) = shell_values(&shell) else { return vec![] };
+    SHELL_VARS
+        .iter()
+        .zip(out.split('\0'))
+        .filter(|(name, value)| !value.is_empty() && std::env::var(name).ok().as_deref() != Some(*value))
+        .map(|(name, value)| (*name, value.to_string()))
+        .collect()
 }
 
-/// PATH as `shell` sets it up for a login. Dotfiles can print too (`eval "$(ssh-agent
-/// -s)"` prints "Agent pid 1234"), so PATH is read from between markers.
-fn shell_path(shell: &str) -> Option<String> {
+/// SHELL_VARS as `shell` sets them up for a login, each followed by a NUL. Dotfiles can
+/// print too (`eval "$(ssh-agent -s)"` prints "Agent pid 1234"), so the values are read
+/// from between markers.
+fn shell_values(shell: &str) -> Option<String> {
+    let vars = SHELL_VARS.iter().map(|v| format!("printf '%s\\0' \"${v}\"")).collect::<Vec<_>>().join("; ");
+    let out = login_shell(shell, &format!("printf _PRDECK_ENV_; {vars}; printf _PRDECK_ENV_"))?;
+    out.split("_PRDECK_ENV_").nth(1).map(str::to_string)
+}
+
+/// Runs a script in `shell` as a login shell (3 seconds at most) and returns its output.
+fn login_shell(shell: &str, script: &str) -> Option<String> {
     let mut child = Command::new(shell)
-        .args(["-l", "-c", "printf '_PRDECK_PATH_%s_PRDECK_PATH_' \"$PATH\""])
+        .args(["-l", "-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -197,8 +216,7 @@ fn shell_path(shell: &str) -> Option<String> {
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let path = out.split("_PRDECK_PATH_").nth(1)?.trim();
-    (!path.is_empty()).then(|| path.to_string())
+    Some(out)
 }
 
 /// The prdeck binary: $PRDECK_BIN, else one next to this app (inside the .app bundle),
@@ -221,7 +239,7 @@ fn sidecar() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_path;
+    use super::shell_values;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -231,10 +249,10 @@ mod tests {
         std::fs::write(&sh, "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n").unwrap();
         std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
         // macOS checks a new executable the first time it runs, which can take longer
-        // than shell_path waits; do that first.
+        // than login_shell waits; do that first.
         let _ = std::process::Command::new(&sh).output();
-        let path = shell_path(sh.to_str().unwrap());
+        let values = shell_values(sh.to_str().unwrap());
         let _ = std::fs::remove_file(&sh);
-        assert_eq!(path.as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(values.as_deref().and_then(|v| v.split('\0').next()), Some("/opt/homebrew/bin:/usr/bin"));
     }
 }

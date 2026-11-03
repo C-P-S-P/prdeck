@@ -118,5 +118,6 @@ sequenceDiagram
 | [0012](0012-comment-and-review-from-the-app.md) | Comment and review from the app |
 | [0013](0013-diffs-in-the-app.md) | Diffs in the app |
 | [0014](0014-inline-review.md) | Inline review on the diff |
+| [0015](0015-comments-on-several-lines.md) | Comments on several lines |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.

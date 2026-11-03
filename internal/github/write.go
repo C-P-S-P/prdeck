@@ -31,7 +31,10 @@ type DraftThread struct {
 	Path string `json:"path"`
 	Line int    `json:"line"` // in the new file (RIGHT) or the old one (LEFT)
 	Side string `json:"side"` // RIGHT: added or unchanged lines; LEFT: removed lines
-	Body string `json:"body"`
+	// A comment on several lines starts here and ends at Line (same hunk).
+	StartLine int    `json:"startLine,omitempty"`
+	StartSide string `json:"startSide,omitempty"`
+	Body      string `json:"body"`
 }
 
 // Review submits a review with any line comments: Approve, RequestChanges (needs a
@@ -50,7 +53,11 @@ func (c *Client) Review(ctx context.Context, prID, event, body string, threads [
 	if len(threads) > 0 {
 		var ts []map[string]any
 		for _, t := range threads {
-			ts = append(ts, map[string]any{"path": t.Path, "line": t.Line, "side": t.Side, "body": t.Body})
+			m := map[string]any{"path": t.Path, "line": t.Line, "side": t.Side, "body": t.Body}
+			if t.StartLine > 0 {
+				m["startLine"], m["startSide"] = t.StartLine, t.StartSide
+			}
+			ts = append(ts, m)
 		}
 		vars["threads"] = ts
 	}
@@ -78,6 +85,14 @@ func CheckReview(event, body string, threads []DraftThread) error {
 		}
 		if strings.TrimSpace(t.Body) == "" {
 			return fmt.Errorf("the comment on %s:%d is empty", t.Path, t.Line)
+		}
+		if t.StartLine != 0 {
+			if t.StartLine < 1 || (t.StartSide != "LEFT" && t.StartSide != "RIGHT") {
+				return fmt.Errorf("a comment on several lines needs a start line and side (got %d %q)", t.StartLine, t.StartSide)
+			}
+			if t.StartSide == t.Side && t.StartLine >= t.Line {
+				return fmt.Errorf("a comment on several lines must start before it ends (%d to %d)", t.StartLine, t.Line)
+			}
 		}
 	}
 	empty := strings.TrimSpace(body) == ""

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/C-P-S-P/prdeck/internal/config"
-	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/github"
 )
 
 func git(t *testing.T, dir string, args ...string) {

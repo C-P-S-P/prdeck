@@ -6,7 +6,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/github"
 )
 
 // Sample diffs: hand-written for the push-source PR (#4821), made up for the rest.

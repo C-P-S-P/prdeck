@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/github"
 )
 
 func TestConcurrentSavesLeaveTheWholeCache(t *testing.T) {
