@@ -1,0 +1,123 @@
+// Package github talks to the GitHub GraphQL API using the user's gh login.
+package github
+
+import (
+	"sort"
+	"strings"
+	"time"
+)
+
+// PR is the summary shown in the PR list.
+type PR struct {
+	Number         int       `json:"number"`
+	Title          string    `json:"title"`
+	URL            string    `json:"url"`
+	IsDraft        bool      `json:"isDraft"`
+	State          string    `json:"state"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+	CreatedAt      time.Time `json:"createdAt"`
+	HeadRefName    string    `json:"headRefName"`
+	BaseRefName    string    `json:"baseRefName"`
+	IsCrossRepo    bool      `json:"isCrossRepository"`
+	Mergeable      string    `json:"mergeable"`      // MERGEABLE, CONFLICTING, UNKNOWN
+	ReviewDecision string    `json:"reviewDecision"` // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, ""
+	Author         string    `json:"author"`
+	Repo           string    `json:"repo"` // owner/name
+	Comments       int       `json:"comments"`
+	CheckState     string    `json:"checkState"` // SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, ""
+}
+
+// Key identifies a PR across repos.
+func (p PR) Key() string { return strings.ToLower(p.Repo) + "#" + itoa(p.Number) }
+
+func (p PR) Owner() string { o, _, _ := strings.Cut(p.Repo, "/"); return o }
+func (p PR) Name() string  { _, n, _ := strings.Cut(p.Repo, "/"); return n }
+
+// CIFailed reports a failing or errored check rollup.
+func (p PR) CIFailed() bool { return p.CheckState == "FAILURE" || p.CheckState == "ERROR" }
+
+// Detail is everything the PR view shows.
+type Detail struct {
+	PR
+	Body         string     `json:"body"`
+	Additions    int        `json:"additions"`
+	Deletions    int        `json:"deletions"`
+	ChangedFiles int        `json:"changedFiles"`
+	Commits      int        `json:"commits"`
+	Labels       []string   `json:"labels"`
+	Reviewers    []Reviewer `json:"reviewers"`
+	Checks       []Check    `json:"checks"`
+	Timeline     []Event    `json:"timeline"`
+}
+
+type Reviewer struct {
+	Login string `json:"login"`
+	State string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING (requested, not yet reviewed)
+}
+
+type Check struct {
+	Name  string `json:"name"`
+	State string `json:"state"` // SUCCESS, FAILURE, PENDING, NEUTRAL, SKIPPED, CANCELLED…
+}
+
+// Event is one entry in the conversation: a comment, a review, or a code thread.
+type Event struct {
+	Kind     string    `json:"kind"` // comment, review, thread
+	Author   string    `json:"author"`
+	State    string    `json:"state"` // reviews: APPROVED, CHANGES_REQUESTED, COMMENTED
+	Body     string    `json:"body"`
+	At       time.Time `json:"at"`
+	Path     string    `json:"path"`
+	Line     int       `json:"line"`
+	DiffHunk string    `json:"diffHunk"`
+	Resolved bool      `json:"resolved"`
+	Outdated bool      `json:"outdated"`
+	Replies  []Reply   `json:"replies"`
+}
+
+type Reply struct {
+	Author string    `json:"author"`
+	Body   string    `json:"body"`
+	At     time.Time `json:"at"`
+}
+
+// CheckCounts returns passed, failed and pending check counts.
+func (d *Detail) CheckCounts() (pass, fail, pend int) {
+	for _, c := range d.Checks {
+		switch c.State {
+		case "SUCCESS", "NEUTRAL", "SKIPPED":
+			pass++
+		case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+			fail++
+		default:
+			pend++
+		}
+	}
+	return
+}
+
+func sortEvents(ev []Event) {
+	sort.SliceStable(ev, func(i, j int) bool { return ev[i].At.Before(ev[j].At) })
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
+}

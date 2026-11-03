@@ -1,0 +1,783 @@
+// Package tui is the terminal front-end: three panes, a filter palette and a command bar.
+package tui
+
+import (
+	"context"
+	"errors"
+	"os/exec"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/patelchaitany/prdeck/internal/cache"
+	"github.com/patelchaitany/prdeck/internal/config"
+	"github.com/patelchaitany/prdeck/internal/core"
+	"github.com/patelchaitany/prdeck/internal/github"
+)
+
+// Backend is what the UI needs from the core. *core.Service implements it.
+type Backend interface {
+	Config() *config.Config
+	Viewer() string
+	CachedSearch(query string) (cache.SearchEntry, bool)
+	Search(ctx context.Context, query string) ([]github.PR, error)
+	CachedDetail(pr github.PR) (*github.Detail, bool)
+	Detail(ctx context.Context, pr github.PR) (*github.Detail, error)
+	ResolveFolder(pr github.PR) (core.Folder, error)
+	Prepare(c config.Command, pr github.PR, input string) (core.Plan, error)
+	ClonePlan(pr github.PR) core.Plan
+	Execute(ctx context.Context, p core.Plan) core.Result
+	EnsureFolder(ctx context.Context, pr github.PR, f core.Folder) (string, error)
+	TerminalCmd(p core.Plan) *exec.Cmd
+}
+
+type pane int
+
+const (
+	paneRepos pane = iota
+	panePRs
+	paneDetail
+)
+
+type output struct {
+	title string
+	ok    bool
+	lines []string
+	dir   string
+}
+
+type Model struct {
+	be  Backend
+	cfg *config.Config
+	w   int
+	h   int
+
+	filters []config.Filter
+	active  int
+	custom  string
+
+	prs     []github.PR
+	loading bool
+	synced  time.Time
+	err     string
+	seq     int
+
+	repoSel    string
+	repoCursor int
+	cursor     int
+	listTop    int
+	focus      pane
+
+	details  map[string]*github.Detail
+	fetching map[string]bool
+	detErr   map[string]string
+	folders  map[string]string
+	vp       viewport.Model
+	vpKey    string
+
+	palette bool
+	pin     textinput.Model
+	pcur    int
+
+	prompt   *config.Command
+	promptIn textinput.Model
+
+	plan    *core.Plan
+	running string
+	cancel  context.CancelFunc
+	out     *output
+	flash   string
+
+	help bool
+	spin spinner.Model
+	md   *markdown
+}
+
+// New builds the UI model.
+func New(be Backend) Model {
+	cfg := be.Config()
+	var filters []config.Filter
+	for _, f := range cfg.Filters {
+		if !f.Hidden {
+			filters = append(filters, f)
+		}
+	}
+	pin := textinput.New()
+	pin.Prompt = "❯ "
+	pin.Placeholder = "filter name, or any GitHub qualifier like involves:@me label:bug"
+	pi := textinput.New()
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	sp.Style = sYellow
+	m := Model{
+		be: be, cfg: cfg, filters: filters, focus: panePRs,
+		details: map[string]*github.Detail{}, fetching: map[string]bool{},
+		detErr: map[string]string{}, folders: map[string]string{},
+		pin: pin, promptIn: pi, spin: sp, md: newMarkdown(cfg.Theme.Markdown),
+		vp:  viewport.New(80, 20),
+		seq: 1, loading: true,
+	}
+	m.loadCached()
+	return m
+}
+
+type (
+	searchMsg struct {
+		seq int
+		prs []github.PR
+		err error
+	}
+	detailMsg struct {
+		key string
+		d   *github.Detail
+		err error
+	}
+	folderMsg     struct{ key, text string }
+	wantDetailMsg struct{ key string }
+	tickMsg       time.Time
+	resultMsg     core.Result
+	preparedMsg   struct {
+		plan core.Plan
+		out  string
+		err  error
+	}
+	termDoneMsg struct {
+		plan core.Plan
+		err  error
+	}
+	clearFlashMsg struct{ text string }
+)
+
+// Init starts the first search (New already counted it as m.seq).
+//
+// Throughout this file, a method that changes the model is called on its own line before
+// `return m, cmd`: Go does not fix the order between reading m and calling the method.
+func (m Model) Init() tea.Cmd {
+	sel := m.selectionCmds()
+	return tea.Batch(m.fetchSearch(m.seq), m.tick(), m.spin.Tick, sel)
+}
+
+func (m Model) tick() tea.Cmd {
+	return tea.Tick(time.Duration(m.cfg.GitHub.Refresh), func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func (m Model) query() string {
+	if m.custom != "" {
+		return m.custom
+	}
+	if len(m.filters) == 0 {
+		return "involves:@me"
+	}
+	return m.filters[m.active].Query
+}
+
+func (m *Model) loadCached() {
+	if e, ok := m.be.CachedSearch(m.query()); ok {
+		m.prs, m.synced = e.PRs, e.At
+	} else {
+		m.prs = nil
+	}
+	m.clampCursor()
+}
+
+func (m *Model) searchCmd() tea.Cmd {
+	m.seq++
+	m.loading = true
+	return m.fetchSearch(m.seq)
+}
+
+func (m Model) fetchSearch(seq int) tea.Cmd {
+	q, be := m.query(), m.be
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		prs, err := be.Search(ctx, q)
+		return searchMsg{seq: seq, prs: prs, err: err}
+	}
+}
+
+// visible is the PR list after the repo filter.
+func (m Model) visible() []github.PR {
+	if m.repoSel == "" {
+		return m.prs
+	}
+	var out []github.PR
+	for _, p := range m.prs {
+		if strings.EqualFold(p.Repo, m.repoSel) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+type repoRow struct {
+	name  string
+	count int
+}
+
+func (m Model) repoRows() []repoRow {
+	counts := map[string]int{}
+	for _, p := range m.prs {
+		counts[p.Repo]++
+	}
+	rows := make([]repoRow, 0, len(counts)+1)
+	for r, c := range counts {
+		rows = append(rows, repoRow{r, c})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].count != rows[j].count {
+			return rows[i].count > rows[j].count
+		}
+		return rows[i].name < rows[j].name
+	})
+	return append([]repoRow{{"", len(m.prs)}}, rows...)
+}
+
+func (m Model) selected() (github.PR, bool) {
+	v := m.visible()
+	if m.cursor < 0 || m.cursor >= len(v) {
+		return github.PR{}, false
+	}
+	return v[m.cursor], true
+}
+
+func (m *Model) clampCursor() {
+	v := m.visible()
+	if m.cursor >= len(v) {
+		m.cursor = len(v) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	rows := m.repoRows()
+	if m.repoCursor >= len(rows) {
+		m.repoCursor = 0
+		m.repoSel = ""
+	}
+}
+
+// selectionCmds loads what the selected PR needs: its detail (debounced) and its folder.
+func (m *Model) selectionCmds() tea.Cmd {
+	pr, ok := m.selected()
+	if !ok {
+		return nil
+	}
+	key := pr.Key()
+	if d, fresh := m.be.CachedDetail(pr); d != nil {
+		if cur, ok := m.details[key]; !ok || cur.UpdatedAt.Before(d.UpdatedAt) {
+			m.details[key] = d
+		}
+		if fresh {
+			return m.folderCmd(pr)
+		}
+	}
+	return tea.Batch(
+		tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return wantDetailMsg{key} }),
+		m.folderCmd(pr),
+	)
+}
+
+func (m Model) detailCmd(pr github.PR) tea.Cmd {
+	be := m.be
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		d, err := be.Detail(ctx, pr)
+		return detailMsg{key: pr.Key(), d: d, err: err}
+	}
+}
+
+func (m Model) folderCmd(pr github.PR) tea.Cmd {
+	be := m.be
+	return func() tea.Msg {
+		f, err := be.ResolveFolder(pr)
+		switch {
+		case errors.Is(err, core.ErrNoClone):
+			return folderMsg{pr.Key(), "no local clone (any command offers to clone it)"}
+		case err != nil:
+			return folderMsg{pr.Key(), err.Error()}
+		case f.Exists:
+			return folderMsg{pr.Key(), config.ShortenHome(f.Path)}
+		default:
+			return folderMsg{pr.Key(), config.ShortenHome(f.Path) + " (created on first command)"}
+		}
+	}
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.w, m.h = msg.Width, msg.Height
+		m.vpKey = ""
+		return m, nil
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		return m, cmd
+
+	case tickMsg:
+		cmd := m.searchCmd()
+		return m, tea.Batch(cmd, m.tick())
+
+	case filterMsg:
+		m.active, m.custom = msg.i, msg.custom
+		m.cursor, m.listTop, m.repoSel, m.repoCursor = 0, 0, "", 0
+		m.loadCached()
+		search := m.searchCmd()
+		sel := m.selectionCmds()
+		return m, tea.Batch(search, sel)
+
+	case searchMsg:
+		if msg.seq != m.seq {
+			return m, nil
+		}
+		m.loading = false
+		if msg.err != nil {
+			m.err = firstLine(msg.err.Error())
+			return m, nil
+		}
+		m.err = ""
+		key := ""
+		if pr, ok := m.selected(); ok {
+			key = pr.Key()
+		}
+		m.prs, m.synced = msg.prs, time.Now()
+		m.restoreSelection(key)
+		sel := m.selectionCmds()
+		return m, sel
+
+	case wantDetailMsg:
+		pr, ok := m.selected()
+		if !ok || pr.Key() != msg.key || m.fetching[msg.key] {
+			return m, nil
+		}
+		if d, ok := m.details[msg.key]; ok && !d.UpdatedAt.Before(pr.UpdatedAt) && !pr.UpdatedAt.IsZero() {
+			return m, nil
+		}
+		m.fetching[msg.key] = true
+		return m, m.detailCmd(pr)
+
+	case detailMsg:
+		delete(m.fetching, msg.key)
+		if msg.err != nil {
+			m.detErr[msg.key] = firstLine(msg.err.Error())
+		} else {
+			delete(m.detErr, msg.key)
+			m.details[msg.key] = msg.d
+		}
+		m.vpKey = ""
+		return m, nil
+
+	case folderMsg:
+		m.folders[msg.key] = msg.text
+		m.vpKey = ""
+		return m, nil
+
+	case resultMsg:
+		m.running, m.cancel = "", nil
+		r := core.Result(msg)
+		if r.Plan.Silent && r.Err == nil {
+			cmd := m.setFlash("✓ " + r.Plan.Title)
+			return m, cmd
+		}
+		m.out = &output{title: r.Plan.Title, ok: r.Err == nil, dir: r.Plan.Dir(), lines: outputLines(r.Output, r.Err)}
+		var cmds []tea.Cmd
+		if pr, ok := m.selected(); ok {
+			cmds = append(cmds, m.folderCmd(pr))
+		}
+		if r.Err == nil && r.Plan.Action != "open" && r.Plan.Action != "browse" {
+			cmds = append(cmds, m.searchCmd())
+		}
+		return m, tea.Batch(cmds...)
+
+	case preparedMsg:
+		if msg.err != nil {
+			m.running = ""
+			m.out = &output{title: msg.plan.Title, ok: false, lines: outputLines(msg.out, msg.err)}
+			return m, nil
+		}
+		m.running = ""
+		p := msg.plan
+		return m, tea.ExecProcess(m.be.TerminalCmd(p), func(err error) tea.Msg { return termDoneMsg{plan: p, err: err} })
+
+	case termDoneMsg:
+		if msg.err != nil {
+			m.out = &output{title: msg.plan.Title, ok: false, lines: outputLines("", msg.err)}
+		} else {
+			m.out = &output{title: msg.plan.Title, ok: true, dir: msg.plan.Dir(), lines: []string{"finished"}}
+		}
+		cmd := m.searchCmd()
+		return m, cmd
+
+	case clearFlashMsg:
+		if m.flash == msg.text {
+			m.flash = ""
+		}
+		return m, nil
+
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+	}
+	return m, nil
+}
+
+func (m *Model) restoreSelection(key string) {
+	m.clampCursor()
+	if key == "" {
+		return
+	}
+	for i, p := range m.visible() {
+		if p.Key() == key {
+			m.cursor = i
+			return
+		}
+	}
+}
+
+func (m *Model) setFlash(s string) tea.Cmd {
+	m.flash = s
+	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return clearFlashMsg{s} })
+}
+
+func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := k.String()
+	if key == "ctrl+c" {
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return m, tea.Quit
+	}
+
+	switch {
+	case m.prompt != nil:
+		return m.promptKey(k)
+	case m.palette:
+		return m.paletteKey(k)
+	case m.plan != nil:
+		return m.planKey(key)
+	case m.help:
+		if key == "esc" || key == "?" || key == "q" {
+			m.help = false
+			m.vpKey = ""
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "q":
+		return m, tea.Quit
+	case "?":
+		m.help = true
+		m.vpKey = ""
+		return m, nil
+	case "/":
+		m.palette = true
+		m.pcur = 0
+		m.pin.SetValue("")
+		return m, m.pin.Focus()
+	case "R", "ctrl+r":
+		cmd := m.searchCmd()
+		return m, cmd
+	case "tab":
+		m.focus = (m.focus + 1) % 3
+		return m, nil
+	case "shift+tab":
+		m.focus = (m.focus + 2) % 3
+		return m, nil
+	case "esc":
+		switch {
+		case m.running != "" && m.cancel != nil:
+			m.cancel()
+		case m.out != nil:
+			m.out = nil
+		case m.focus == paneDetail:
+			m.focus = panePRs
+		}
+		return m, nil
+	}
+
+	if n, err := strconv.Atoi(key); err == nil && n >= 1 && n <= len(m.filters) {
+		return m, m.switchFilter(n-1, "")
+	}
+
+	switch key {
+	case "j", "down", "k", "up", "pgdown", "pgup", "ctrl+d", "ctrl+u", "g", "home", "G", "end", "enter", "h", "left", "l", "right":
+		return m.navKey(key)
+	}
+
+	for _, c := range m.cfg.Commands {
+		if c.Key != "" && c.Key == key {
+			cmd := c
+			return m.startCommand(&cmd, "")
+		}
+	}
+	return m, nil
+}
+
+func (m Model) switchFilter(i int, custom string) tea.Cmd {
+	return func() tea.Msg { return filterMsg{i, custom} }
+}
+
+type filterMsg struct {
+	i      int
+	custom string
+}
+
+func (m Model) navKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "h", "left":
+		if m.focus > paneRepos {
+			m.focus--
+		}
+		return m, nil
+	case "l", "right":
+		if m.focus < paneDetail {
+			m.focus++
+		}
+		return m, nil
+	}
+
+	switch m.focus {
+	case paneDetail:
+		switch key {
+		case "j", "down":
+			m.vp.ScrollDown(1)
+		case "k", "up":
+			m.vp.ScrollUp(1)
+		case "pgdown", "ctrl+d":
+			m.vp.HalfPageDown()
+		case "pgup", "ctrl+u":
+			m.vp.HalfPageUp()
+		case "g", "home":
+			m.vp.GotoTop()
+		case "G", "end":
+			m.vp.GotoBottom()
+		}
+		return m, nil
+
+	case paneRepos:
+		rows := m.repoRows()
+		switch key {
+		case "j", "down":
+			m.repoCursor = min(m.repoCursor+1, len(rows)-1)
+		case "k", "up":
+			m.repoCursor = max(m.repoCursor-1, 0)
+		case "g", "home":
+			m.repoCursor = 0
+		case "G", "end":
+			m.repoCursor = len(rows) - 1
+		case "enter":
+			m.focus = panePRs
+			return m, nil
+		}
+		m.repoSel = rows[m.repoCursor].name
+		m.cursor, m.listTop = 0, 0
+		sel := m.selectionCmds()
+		return m, sel
+
+	default:
+		n := len(m.visible())
+		prev := m.cursor
+		switch key {
+		case "j", "down":
+			m.cursor = min(m.cursor+1, n-1)
+		case "k", "up":
+			m.cursor = max(m.cursor-1, 0)
+		case "pgdown", "ctrl+d":
+			m.cursor = min(m.cursor+10, n-1)
+		case "pgup", "ctrl+u":
+			m.cursor = max(m.cursor-10, 0)
+		case "g", "home":
+			m.cursor = 0
+		case "G", "end":
+			m.cursor = n - 1
+		case "enter":
+			m.focus = paneDetail
+			return m, nil
+		}
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		if m.cursor != prev {
+			m.vp.GotoTop()
+			sel := m.selectionCmds()
+			return m, sel
+		}
+		return m, nil
+	}
+}
+
+// startCommand asks for input if needed, then shows or runs the plan.
+func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd) {
+	pr, ok := m.selected()
+	if !ok {
+		cmd := m.setFlash("Select a pull request first")
+		return m, cmd
+	}
+	if c.Prompt != "" && input == "" {
+		m.prompt = c
+		m.promptIn.Prompt = c.Prompt + ": "
+		m.promptIn.SetValue("")
+		return m, m.promptIn.Focus()
+	}
+	plan, err := m.be.Prepare(*c, pr, input)
+	if errors.Is(err, core.ErrNoClone) {
+		p := m.be.ClonePlan(pr)
+		p.Warn = "No local clone of " + pr.Repo + " was found under repos.scan."
+		m.plan = &p
+		return m, nil
+	}
+	if err != nil {
+		cmd := m.setFlash("! " + err.Error())
+		return m, cmd
+	}
+	if plan.Confirm {
+		m.plan = &plan
+		return m, nil
+	}
+	return m.run(plan)
+}
+
+func (m Model) run(p core.Plan) (tea.Model, tea.Cmd) {
+	m.plan = nil
+	m.out = nil
+	m.running = p.Title
+	be := m.be
+	if p.Terminal {
+		return m, func() tea.Msg {
+			out, err := be.EnsureFolder(context.Background(), p.PR, p.Folder)
+			return preparedMsg{plan: p, out: out, err: err}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	return m, func() tea.Msg { return resultMsg(be.Execute(ctx, p)) }
+}
+
+func (m Model) planKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "enter":
+		return m.run(*m.plan)
+	case "y":
+		cmd := m.setFlash(copyToClipboard(m.plan.Script))
+		m.plan = nil
+		return m, cmd
+	case "esc", "n", "q":
+		m.plan = nil
+	}
+	return m, nil
+}
+
+func (m Model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		m.prompt = nil
+		m.promptIn.Blur()
+		return m, nil
+	case "enter":
+		c, in := m.prompt, strings.TrimSpace(m.promptIn.Value())
+		m.prompt = nil
+		m.promptIn.Blur()
+		if in == "" {
+			cmd := m.setFlash("Nothing entered; command not run")
+			return m, cmd
+		}
+		return m.startCommand(c, in)
+	}
+	var cmd tea.Cmd
+	m.promptIn, cmd = m.promptIn.Update(k)
+	return m, cmd
+}
+
+// paletteItem is a filter suggestion; idx -1 means "use the typed text as a query".
+type paletteItem struct {
+	label, query string
+	idx          int
+}
+
+func (m Model) paletteItems() []paletteItem {
+	in := strings.TrimSpace(m.pin.Value())
+	needle := strings.ToLower(in)
+	var items []paletteItem
+	for i, f := range m.filters {
+		if needle == "" || strings.Contains(strings.ToLower(f.Name), needle) || strings.Contains(strings.ToLower(f.Query), needle) {
+			items = append(items, paletteItem{f.Name, f.Query, i})
+		}
+	}
+	if in != "" {
+		items = append(items, paletteItem{"Search GitHub for", in, -1})
+	}
+	return items
+}
+
+func (m Model) paletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	items := m.paletteItems()
+	switch k.String() {
+	case "esc":
+		m.palette = false
+		m.pin.Blur()
+		return m, nil
+	case "up", "ctrl+p":
+		m.pcur = max(m.pcur-1, 0)
+		return m, nil
+	case "down", "ctrl+n", "tab":
+		m.pcur = min(m.pcur+1, len(items)-1)
+		return m, nil
+	case "enter":
+		m.palette = false
+		m.pin.Blur()
+		if len(items) == 0 {
+			return m, nil
+		}
+		it := items[min(m.pcur, len(items)-1)]
+		if it.idx >= 0 {
+			return m, m.switchFilter(it.idx, "")
+		}
+		return m, m.switchFilter(m.active, it.query)
+	}
+	var cmd tea.Cmd
+	m.pin, cmd = m.pin.Update(k)
+	m.pcur = 0
+	return m, cmd
+}
+
+func firstLine(s string) string {
+	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
+	return s
+}
+
+func outputLines(out string, err error) []string {
+	var lines []string
+	if strings.TrimSpace(out) != "" {
+		lines = strings.Split(strings.TrimRight(out, "\n"), "\n")
+	}
+	if err != nil {
+		lines = append(lines, "error: "+err.Error())
+	}
+	if len(lines) == 0 {
+		lines = []string{"done, no output"}
+	}
+	return lines
+}
+
+func copyToClipboard(s string) string {
+	var c *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		c = exec.Command("pbcopy")
+	default:
+		c = exec.Command("sh", "-c", "wl-copy 2>/dev/null || xclip -selection clipboard")
+	}
+	c.Stdin = strings.NewReader(s)
+	if err := c.Run(); err != nil {
+		return "! could not copy: " + err.Error()
+	}
+	return "Copied command"
+}
