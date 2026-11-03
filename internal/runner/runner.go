@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -41,7 +42,14 @@ func Quote(s string) string {
 // Command builds the process for a script run in dir. When captured is true the
 // process gets no terminal: prompts are turned off so it can never hang waiting for input.
 func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
-	c := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	sh, err := Shell()
+	c := exec.CommandContext(ctx, sh, "-c", script)
+	if err != nil {
+		c.Err = err // Start says what is missing
+	}
+	if runtime.GOOS == "windows" {
+		c.Cancel = func() error { return killTree(c) }
+	}
 	c.Dir = dir
 	c.Env = os.Environ()
 	if captured {
@@ -56,5 +64,9 @@ func Run(ctx context.Context, script, dir string) (string, error) {
 	var buf bytes.Buffer
 	c.Stdout, c.Stderr = &buf, &buf
 	err := c.Run()
-	return strings.TrimRight(buf.String(), "\n"), err
+	out := buf.String()
+	if runtime.GOOS == "windows" {
+		out = strings.ReplaceAll(out, "\r\n", "\n") // what Windows programs end lines with
+	}
+	return strings.TrimRight(out, "\n"), err
 }
