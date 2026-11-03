@@ -134,8 +134,8 @@ func (b *Backend) Comment(_ context.Context, prID, body string) error {
 	return nil
 }
 
-func (b *Backend) Review(_ context.Context, prID, event, body string) error {
-	if err := github.CheckReview(event, body); err != nil {
+func (b *Backend) Review(_ context.Context, prID, event, body string, threads []github.DraftThread) error {
+	if err := github.CheckReview(event, body, threads); err != nil {
 		return err
 	}
 	b.mu.Lock()
@@ -148,7 +148,22 @@ func (b *Backend) Review(_ context.Context, prID, event, body string) error {
 		return fmt.Errorf("you can't approve or request changes on your own pull request")
 	}
 	state := map[string]string{github.Approve: "APPROVED", github.RequestChanges: "CHANGES_REQUESTED", github.CommentReview: "COMMENTED"}[event]
-	d.Timeline = append(d.Timeline, github.Event{Kind: "review", Author: "you", State: state, Body: body, At: time.Now()})
+	if strings.TrimSpace(body) != "" || event != github.CommentReview {
+		d.Timeline = append(d.Timeline, github.Event{Kind: "review", Author: "you", State: state, Body: body, At: time.Now()})
+	}
+	files := b.prFiles(d.Number)
+	for i, t := range threads {
+		hunk := ""
+		for _, f := range files {
+			if f.Path == t.Path {
+				hunk = hunkUpTo(f.Patch, t.Side, t.Line)
+			}
+		}
+		d.Timeline = append(d.Timeline, github.Event{
+			Kind: "thread", Author: "you", Body: t.Body, At: time.Now(), Path: t.Path, Line: t.Line, Side: t.Side,
+			DiffHunk: hunk, ThreadID: fmt.Sprintf("demo-thread-%d-new-%d-%d", d.Number, len(d.Timeline), i),
+		})
+	}
 	for i, r := range d.Reviewers {
 		if r.Login == "you" {
 			d.Reviewers = append(d.Reviewers[:i], d.Reviewers[i+1:]...)

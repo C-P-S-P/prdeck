@@ -147,13 +147,14 @@ func (s *Service) Comment(ctx context.Context, prID, body string) error {
 	return gh.Comment(ctx, prID, body)
 }
 
-// Review approves the PR, requests changes, or leaves a review comment.
-func (s *Service) Review(ctx context.Context, prID, event, body string) error {
+// Review approves the PR, requests changes, or leaves a review comment, with any
+// comments on lines of the diff.
+func (s *Service) Review(ctx context.Context, prID, event, body string, threads []github.DraftThread) error {
 	gh := s.client()
 	if gh == nil {
 		return ErrSignedOut
 	}
-	return gh.Review(ctx, prID, event, body)
+	return gh.Review(ctx, prID, event, body, threads)
 }
 
 // ReplyThread answers a review thread.

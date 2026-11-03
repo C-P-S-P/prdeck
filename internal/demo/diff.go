@@ -129,6 +129,44 @@ func samplePatch(file string, add, del int) string {
 	return b.String()
 }
 
+// hunkUpTo is the patch's hunk header and its lines up to the given line, the way
+// GitHub shows a review thread's context.
+func hunkUpTo(patch, side string, line int) string {
+	var out []string
+	oldN, newN := 0, 0
+	for _, l := range strings.Split(patch, "\n") {
+		if strings.HasPrefix(l, "@@") {
+			out = []string{l}
+			fmt.Sscanf(l, "@@ -%d", &oldN)
+			if i := strings.Index(l, "+"); i >= 0 {
+				fmt.Sscanf(l[i:], "+%d", &newN)
+			}
+			oldN, newN = oldN-1, newN-1
+			if oldN < 0 {
+				oldN = 0
+			}
+			if newN < 0 {
+				newN = 0
+			}
+			continue
+		}
+		switch {
+		case strings.HasPrefix(l, "+"):
+			newN++
+		case strings.HasPrefix(l, "-"):
+			oldN++
+		default:
+			oldN++
+			newN++
+		}
+		out = append(out, l)
+		if (side == "LEFT" && oldN == line && !strings.HasPrefix(l, "+")) || (side != "LEFT" && newN == line && !strings.HasPrefix(l, "-")) {
+			return strings.Join(out, "\n")
+		}
+	}
+	return ""
+}
+
 func counts(patch string) (add, del int) {
 	for _, l := range strings.Split(patch, "\n") {
 		switch {

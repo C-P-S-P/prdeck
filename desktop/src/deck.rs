@@ -19,9 +19,11 @@ use crate::rpc::Rpc;
 use crate::theme::*;
 
 mod diffs;
+mod inline;
 mod review;
 mod setup;
 use diffs::*;
+use inline::*;
 use review::*;
 use setup::*;
 
@@ -132,6 +134,10 @@ pub struct Deck {
     diffs: HashMap<String, DiffState>,
     commit: Option<String>,
     file_open: HashMap<String, bool>,
+    /// Line comments waiting to be sent with a review, by PR key, and the comment box
+    /// open on a line.
+    pending: HashMap<String, Vec<DraftThread>>,
+    line_editor: Option<LineEditor>,
     /// Reply boxes, by PR key, and the code thread being replied to.
     drafts: HashMap<String, Draft>,
     thread_reply: Option<ThreadReply>,
@@ -178,6 +184,8 @@ impl Deck {
             diffs: HashMap::new(),
             commit: None,
             file_open: HashMap::new(),
+            pending: HashMap::new(),
+            line_editor: None,
             drafts: HashMap::new(),
             thread_reply: None,
             notice: None,
@@ -955,7 +963,11 @@ impl Deck {
         }
         if self.typing(window, cx) {
             if ks.key == "escape" {
-                self.close_run(window, cx);
+                if self.line_editor.is_some() {
+                    self.close_line_editor(window, cx);
+                } else {
+                    self.close_run(window, cx);
+                }
             }
             return;
         }
@@ -1578,7 +1590,10 @@ impl Deck {
                                 button_look("review")
                                     .on_click(cx.listener(|this, _, window, cx| this.focus_composer(window, cx)))
                                     .child(icon("message-square", 13., SOFT))
-                                    .child("Review"),
+                                    .child(match self.pending_count(&pr.key()) {
+                                        0 => "Review".to_string(),
+                                        n => format!("Review ({n})"),
+                                    }),
                             )
                             .when_some(self.find_cmd(|c| c.branch && c.run.is_empty() && c.action.is_empty()), |d, c| {
                                 d.child(
@@ -2586,9 +2601,10 @@ impl Deck {
             None => "closed",
         };
         format!(
-            "selected {sel}, tabs [{}], palette {palette}, sidebar {}",
+            "selected {sel}, tabs [{}], palette {palette}, sidebar {}, line box {}",
             tabs.join(" "),
-            if self.layout.sidebar_hidden { "hidden" } else { "shown" }
+            if self.layout.sidebar_hidden { "hidden" } else { "shown" },
+            if self.line_editor.is_some() { "open" } else { "closed" }
         )
     }
 
@@ -2615,6 +2631,32 @@ impl Deck {
                 self.detail_scroll.set_offset(point(px(0.), px(-y)));
             }
             "compose" => self.focus_composer(window, cx),
+            s if s.starts_with("line:") => {
+                // line:<file index>:<LEFT|RIGHT>:<line>, or line:add / line:single
+                match &s[5..] {
+                    "add" => self.submit_line(false, window, cx),
+                    "single" => self.submit_line(true, window, cx),
+                    spec => {
+                        let parts: Vec<&str> = spec.split(':').collect();
+                        if let (Some(pr), [f, side, n]) = (self.selected_pr(), parts.as_slice()) {
+                            let path = match self.diffs.get(&format!("pr:{}", pr.key())) {
+                                Some(DiffState::Files(files)) => f.parse::<usize>().ok().and_then(|i| files.get(i)).map(|p| p.file.path.clone()),
+                                _ => None,
+                            };
+                            if let (Some(path), Ok(n)) = (path, n.parse::<u32>()) {
+                                let side = if *side == "LEFT" { "LEFT" } else { "RIGHT" };
+                                self.open_line_editor(pr.key(), path, n, side, window, cx);
+                            }
+                        }
+                    }
+                }
+            }
+            s if s.starts_with("linedraft:") => {
+                if let Some(ed) = self.line_editor.as_ref() {
+                    let text = s[10..].to_string();
+                    ed.input.update(cx, |st, cx| st.set_value(text, window, cx));
+                }
+            }
             s if s.starts_with("draft:") => {
                 if let Some(d) = self.selected.as_ref().and_then(|k| self.drafts.get(k)) {
                     let text = s[6..].replace("\\n", "\n");

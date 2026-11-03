@@ -51,7 +51,7 @@ type Backend interface {
 // writer is a backend that can comment on and review PRs.
 type writer interface {
 	Comment(ctx context.Context, prID, body string) error
-	Review(ctx context.Context, prID, event, body string) error
+	Review(ctx context.Context, prID, event, body string, threads []github.DraftThread) error
 	ReplyThread(ctx context.Context, threadID, body string) error
 }
 
@@ -288,7 +288,10 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 		return map[string]any{"data": base64.StdEncoding.EncodeToString(data), "type": kind}, nil
 
 	case "comment", "review", "replyThread":
-		p, err := decode[struct{ PRID, ThreadID, Event, Body string }](raw)
+		p, err := decode[struct {
+			PRID, ThreadID, Event, Body string
+			Threads                     []github.DraftThread
+		}](raw)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +305,7 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 		case "comment":
 			err = w.Comment(ctx, p.PRID, p.Body)
 		case "review":
-			err = w.Review(ctx, p.PRID, p.Event, p.Body)
+			err = w.Review(ctx, p.PRID, p.Event, p.Body, p.Threads)
 		default:
 			err = w.ReplyThread(ctx, p.ThreadID, p.Body)
 		}

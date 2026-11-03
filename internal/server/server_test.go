@@ -258,3 +258,45 @@ func TestDiffs(t *testing.T) {
 		t.Error("an unknown commit should be an error")
 	}
 }
+
+func TestReviewWithLineComments(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	var pr github.PR
+	for _, p := range res.PRs {
+		if p.Number == 4807 {
+			pr = p
+		}
+	}
+	var d github.Detail
+	_ = json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d)
+	var files []github.FileDiff
+	_ = json.Unmarshal(c.call("prDiff", map[string]any{"pr": pr}).Result, &files)
+	path := files[0].Path
+
+	bad := []map[string]any{{"path": path, "line": 0, "side": "RIGHT", "body": "x"}}
+	if r := c.call("review", map[string]any{"prId": d.NodeID, "event": "COMMENT", "threads": bad}); r.Error == nil {
+		t.Error("a comment on line 0 should be refused")
+	}
+	threads := []map[string]any{
+		{"path": path, "line": 14, "side": "RIGHT", "body": "Why load this twice?"},
+		{"path": path, "line": 13, "side": "LEFT", "body": "This was the only caller."},
+	}
+	if r := c.call("review", map[string]any{"prId": d.NodeID, "event": "COMMENT", "threads": threads}); r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	_ = json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d)
+	var got []github.Event
+	for _, e := range d.Timeline {
+		if e.Kind == "thread" && e.Author == "you" {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 2 || got[0].Path != path || got[0].Line != 14 || got[0].Side != "RIGHT" || got[1].Side != "LEFT" || got[0].ThreadID == "" {
+		t.Fatalf("threads: %+v", got)
+	}
+	if !strings.HasPrefix(got[0].DiffHunk, "@@") {
+		t.Errorf("thread should carry its diff context: %q", got[0].DiffHunk)
+	}
+}

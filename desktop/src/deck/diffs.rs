@@ -9,7 +9,7 @@ use crate::diff::{self, Kind, Line};
 
 /// A file's change, parsed.
 pub(super) struct ParsedFile {
-    file: FileDiff,
+    pub(super) file: FileDiff,
     lines: Vec<Line>,
 }
 
@@ -305,7 +305,7 @@ impl Deck {
             );
 
         let diffs = match self.diffs.get(&key) {
-            Some(DiffState::Commit(_, files)) => self.file_diffs(&key, files, cx),
+            Some(DiffState::Commit(_, files)) => self.file_diffs(&key, files, None, cx),
             Some(DiffState::Failed(e)) => div().text_color(rgb(RED)).child(e.clone()).into_any_element(),
             _ => div().text_color(rgb(DIM)).child("Loading the changes…").into_any_element(),
         };
@@ -328,7 +328,7 @@ impl Deck {
                 (
                     head.child(small_button("expand-all", "Expand all", cx.listener(move |this, _, _, cx| this.set_all_files(&k1, paths.clone(), true, cx))))
                         .child(small_button("collapse-all", "Collapse all", cx.listener(move |this, _, _, cx| this.set_all_files(&k2, p2.clone(), false, cx)))),
-                    self.file_diffs(&key, files, cx),
+                    self.file_diffs(&key, files, Some(d), cx),
                 )
             }
             Some(DiffState::Failed(e)) => (head, div().p(px(12.)).text_color(rgb(RED)).child(e.clone()).into_any_element()),
@@ -338,10 +338,28 @@ impl Deck {
             Some(DiffState::Files(f)) => f.len() as u64,
             _ => d.changed_files,
         });
+        let pending = self.pending_count(&d.pr.key());
         div()
             .flex()
             .flex_col()
             .gap(px(14.))
+            .when(pending > 0, |c| {
+                c.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(12.))
+                        .py(px(8.))
+                        .border_1()
+                        .border_color(rgb(0x5a4a26))
+                        .bg(rgb(0x2a2418))
+                        .text_color(rgb(YELLOW))
+                        .child(format!("Review in progress: {pending} pending comment{}", if pending == 1 { "" } else { "s" }))
+                        .child(div().flex_1())
+                        .child(small_button("finish-review", "Finish your review ↓", cx.listener(|this, _, window, cx| this.focus_review_box(window, cx)))),
+                )
+            })
             .child(
                 card().child(head.child(small_button(
                     "files-open",
@@ -353,13 +371,16 @@ impl Deck {
                     }),
                 ))),
             )
+            .child(div().text_size(px(12.)).text_color(rgb(DIM)).child("Click a line number to comment on that line."))
             .child(body)
             .when(more > 0, |c| c.child(div().text_color(rgb(DIM)).child(format!("{more} more files are not shown; open the branch in {editor} for all of them."))))
+            .child(self.composer(d, cx))
             .into_any_element()
     }
 
     /// Every file of a diff, each with a header that opens and closes it.
-    fn file_diffs(&self, key: &str, files: &Arc<Vec<ParsedFile>>, cx: &mut Context<Self>) -> AnyElement {
+    /// `review` makes line numbers clickable and shows comments inline (Files changed).
+    fn file_diffs(&self, key: &str, files: &Arc<Vec<ParsedFile>>, review: Option<&Detail>, cx: &mut Context<Self>) -> AnyElement {
         let mut budget = OPEN_BUDGET;
         let mut cards = Vec::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
@@ -369,12 +390,12 @@ impl Deck {
             if open {
                 budget = budget.saturating_sub(f.lines.len());
             }
-            cards.push(self.file_diff(i, id, f, open, cx));
+            cards.push(self.file_diff(i, id, f, open, review, cx));
         }
         div().flex().flex_col().gap(px(10.)).children(cards).into_any_element()
     }
 
-    fn file_diff(&self, i: usize, id: String, f: &ParsedFile, open: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn file_diff(&self, i: usize, id: String, f: &ParsedFile, open: bool, review: Option<&Detail>, cx: &mut Context<Self>) -> AnyElement {
         let (badge, color) = match f.file.status.as_str() {
             "added" => ("A", GREEN),
             "removed" => ("D", RED),
@@ -449,7 +470,9 @@ impl Deck {
             )
         } else {
             let shown = f.lines.len().min(FILE_LIMIT);
-            let mut rows: Vec<AnyElement> = diff_blocks(&f.lines[..shown]);
+            let mut cards = review.map(|d| self.inline_cards(d, &f.file.path, &f.lines[..shown], cx)).unwrap_or_default();
+            let click = review.map(|d| Click { deck: cx.entity().downgrade(), pr: d.pr.key(), path: f.file.path.clone(), file: i });
+            let mut rows: Vec<AnyElement> = diff_blocks(&f.lines[..shown], &mut cards, click.as_ref());
             if f.lines.len() > shown {
                 rows.push(
                     div()
@@ -474,24 +497,37 @@ impl Deck {
     }
 }
 
+/// Clicking a line number opens a comment box on that line.
+#[derive(Clone)]
+struct Click {
+    deck: WeakEntity<Deck>,
+    pr: String,
+    path: String,
+    file: usize,
+}
+
 /// Lines in blocks: each run of lines of one kind is a single text element with its
 /// line numbers inside it, so a long diff costs a few dozen elements, not thousands.
-fn diff_blocks(lines: &[Line]) -> Vec<AnyElement> {
+/// A run ends at a line with comments under it, and the comment cards follow it.
+fn diff_blocks(lines: &[Line], cards: &mut std::collections::HashMap<usize, Vec<AnyElement>>, click: Option<&Click>) -> Vec<AnyElement> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let kind = lines[i].kind;
-        let mut j = i;
-        while j < lines.len() && lines[j].kind == kind && (kind != Kind::Hunk || j == i) {
+        let mut j = i + 1;
+        while j < lines.len() && lines[j].kind == kind && kind != Kind::Hunk && !cards.contains_key(&(j - 1)) {
             j += 1;
         }
-        out.push(diff_block(kind, &lines[i..j]));
+        out.push(diff_block(kind, i, &lines[i..j], click));
+        if let Some(c) = cards.remove(&(j - 1)) {
+            out.extend(c);
+        }
         i = j;
     }
     out
 }
 
-fn diff_block(kind: Kind, lines: &[Line]) -> AnyElement {
+fn diff_block(kind: Kind, start: usize, lines: &[Line], click: Option<&Click>) -> AnyElement {
     let (bg, fg, mark) = match kind {
         Kind::Hunk => (0x1f2633, BLUE, ""),
         Kind::Add => (0x1d2f22, 0xb5dca8, "+"),
@@ -502,21 +538,41 @@ fn diff_block(kind: Kind, lines: &[Line]) -> AnyElement {
     let num = |n: Option<u32>| n.map(|n| format!("{n:>5}")).unwrap_or_else(|| "     ".to_string());
     let mut text = String::new();
     let mut dim: Vec<(std::ops::Range<usize>, HighlightStyle)> = Vec::new();
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut targets: Vec<(u32, &'static str)> = Vec::new();
     let number_style = HighlightStyle { color: Some(rgb(0x5d636e).into()), ..Default::default() };
     for (k, l) in lines.iter().enumerate() {
         if k > 0 {
             text.push('\n');
         }
-        let start = text.len();
+        let begin = text.len();
         match kind {
             Kind::Hunk | Kind::Note => text.push_str(&format!("{:12}{}", "", l.text)),
             _ => text.push_str(&format!("{} {}", num(l.old), num(l.new))),
         }
         if !matches!(kind, Kind::Hunk | Kind::Note) {
-            dim.push((start..text.len(), number_style));
+            dim.push((begin..text.len(), number_style));
+            if let Some((side, n)) = inline::anchor(l) {
+                ranges.push(begin..text.len());
+                targets.push((n, side));
+            }
             text.push_str(&format!(" {mark} {}", l.text));
         }
     }
+    let styled = StyledText::new(text).with_highlights(dim);
+    let content = match click {
+        Some(c) if !ranges.is_empty() => {
+            let c = c.clone();
+            InteractiveText::new(ElementId::Name(format!("dl-{}-{start}", c.file).into()), styled)
+                .on_click(ranges, move |ix, window, cx| {
+                    let (line, side) = targets[ix];
+                    let (pr, path) = (c.pr.clone(), c.path.clone());
+                    let _ = c.deck.update(cx, |this, cx| this.open_line_editor(pr, path, line, side, window, cx));
+                })
+                .into_any_element()
+        }
+        _ => styled.into_any_element(),
+    };
     div()
         .w_full()
         .bg(rgb(bg))
@@ -526,7 +582,7 @@ fn diff_block(kind: Kind, lines: &[Line]) -> AnyElement {
         .line_height(px(19.))
         .whitespace_nowrap()
         .when(kind == Kind::Hunk, |d| d.py(px(2.)))
-        .child(StyledText::new(text).with_highlights(dim))
+        .child(content)
         .into_any_element()
 }
 

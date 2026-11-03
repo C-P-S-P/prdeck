@@ -26,18 +26,33 @@ func (c *Client) Comment(ctx context.Context, prID, body string) error {
 	return c.gql.DoWithContext(ctx, q, map[string]any{"id": prID, "body": body}, &resp)
 }
 
-// Review submits a review: Approve (the body is optional), RequestChanges or
-// CommentReview (both need a body).
-func (c *Client) Review(ctx context.Context, prID, event, body string) error {
-	if err := CheckReview(event, body); err != nil {
+// DraftThread is a comment on one line of the diff, sent with a review.
+type DraftThread struct {
+	Path string `json:"path"`
+	Line int    `json:"line"` // in the new file (RIGHT) or the old one (LEFT)
+	Side string `json:"side"` // RIGHT: added or unchanged lines; LEFT: removed lines
+	Body string `json:"body"`
+}
+
+// Review submits a review with any line comments: Approve, RequestChanges (needs a
+// body) or CommentReview (needs a body or a line comment).
+func (c *Client) Review(ctx context.Context, prID, event, body string, threads []DraftThread) error {
+	if err := CheckReview(event, body, threads); err != nil {
 		return err
 	}
-	const q = `mutation PRDeckReview($id: ID!, $event: PullRequestReviewEvent!, $body: String) {
-  addPullRequestReview(input: {pullRequestId: $id, event: $event, body: $body}) { pullRequestReview { state } }
+	const q = `mutation PRDeckReview($id: ID!, $event: PullRequestReviewEvent!, $body: String, $threads: [DraftPullRequestReviewThread]) {
+  addPullRequestReview(input: {pullRequestId: $id, event: $event, body: $body, threads: $threads}) { pullRequestReview { state } }
 }`
-	vars := map[string]any{"id": prID, "event": event, "body": nil}
+	vars := map[string]any{"id": prID, "event": event, "body": nil, "threads": nil}
 	if strings.TrimSpace(body) != "" {
 		vars["body"] = body
+	}
+	if len(threads) > 0 {
+		var ts []map[string]any
+		for _, t := range threads {
+			ts = append(ts, map[string]any{"path": t.Path, "line": t.Line, "side": t.Side, "body": t.Body})
+		}
+		vars["threads"] = ts
 	}
 	var resp map[string]any
 	return c.gql.DoWithContext(ctx, q, vars, &resp)
@@ -56,13 +71,27 @@ func (c *Client) ReplyThread(ctx context.Context, threadID, body string) error {
 }
 
 // CheckReview reports what is wrong with a review before it is sent.
-func CheckReview(event, body string) error {
+func CheckReview(event, body string, threads []DraftThread) error {
+	for _, t := range threads {
+		if t.Path == "" || t.Line < 1 || (t.Side != "LEFT" && t.Side != "RIGHT") {
+			return fmt.Errorf("a line comment needs a file, a line and a side (got %q line %d %q)", t.Path, t.Line, t.Side)
+		}
+		if strings.TrimSpace(t.Body) == "" {
+			return fmt.Errorf("the comment on %s:%d is empty", t.Path, t.Line)
+		}
+	}
+	empty := strings.TrimSpace(body) == ""
 	switch event {
 	case Approve:
 		return nil
-	case RequestChanges, CommentReview:
-		if strings.TrimSpace(body) == "" {
+	case RequestChanges:
+		if empty {
 			return errors.New("say what should change before requesting changes")
+		}
+		return nil
+	case CommentReview:
+		if empty && len(threads) == 0 {
+			return errors.New("write a comment first")
 		}
 		return nil
 	}

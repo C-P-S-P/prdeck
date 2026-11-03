@@ -207,6 +207,8 @@ pub struct Event {
     pub diff_hunk: String,
     /// Review threads: GitHub's ID, for replies.
     pub thread_id: String,
+    /// Review threads: RIGHT (new and unchanged lines) or LEFT (removed lines).
+    pub side: String,
     pub resolved: bool,
     pub outdated: bool,
     #[serde(deserialize_with = "null_vec")]
@@ -401,4 +403,14 @@ pub struct CommitDiff {
     pub at: String,
     #[serde(deserialize_with = "null_vec")]
     pub files: Vec<FileDiff>,
+}
+
+/// A comment on one line of the diff, waiting to be sent with a review.
+#[derive(Clone, Debug, Serialize)]
+pub struct DraftThread {
+    pub path: String,
+    pub line: u32,
+    /// RIGHT: added or unchanged lines (new numbers); LEFT: removed lines (old numbers).
+    pub side: &'static str,
+    pub body: String,
 }

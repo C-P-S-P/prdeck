@@ -51,9 +51,16 @@ impl Deck {
         !self.hello.viewer.is_empty() && self.hello.viewer.eq_ignore_ascii_case(&pr.author)
     }
 
-    /// Jumps to the reply box of the selected PR (⌘⇧C, or the Review button).
+    /// Jumps to the reply box of the selected PR (⌘⇧C, or the Review button). It is
+    /// at the end of Conversation and of Files changed; elsewhere, Conversation opens.
     pub(super) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.section = Section::Conversation;
+        if self.section != Section::Files {
+            self.section = Section::Conversation;
+        }
+        self.focus_review_box(window, cx);
+    }
+
+    pub(super) fn focus_review_box(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ensure_draft(window, cx);
         let max = self.detail_scroll.max_offset().y;
         self.detail_scroll.set_offset(point(px(0.), -max - px(2000.)));
@@ -77,7 +84,13 @@ impl Deck {
             return;
         }
         let body = draft.input.read(cx).value().trim().to_string();
+        let threads = self.pending.get(key).cloned().unwrap_or_default();
         let (call, posting, done) = match what {
+            Post::Comment if !threads.is_empty() => (
+                rpc.call::<serde_json::Value>("review", json!({ "prId": d.node_id, "event": "COMMENT", "body": body, "threads": threads })),
+                "Submitting…",
+                "Review submitted",
+            ),
             Post::Comment => {
                 if body.is_empty() {
                     draft.error = Some("Write a comment first.".into());
@@ -87,7 +100,7 @@ impl Deck {
                 (rpc.call::<serde_json::Value>("comment", json!({ "prId": d.node_id, "body": body })), "Commenting…", "Comment posted")
             }
             Post::Approve => (
-                rpc.call::<serde_json::Value>("review", json!({ "prId": d.node_id, "event": "APPROVE", "body": body })),
+                rpc.call::<serde_json::Value>("review", json!({ "prId": d.node_id, "event": "APPROVE", "body": body, "threads": threads })),
                 "Approving…",
                 "Approved",
             ),
@@ -98,7 +111,7 @@ impl Deck {
                     return;
                 }
                 (
-                    rpc.call::<serde_json::Value>("review", json!({ "prId": d.node_id, "event": "REQUEST_CHANGES", "body": body })),
+                    rpc.call::<serde_json::Value>("review", json!({ "prId": d.node_id, "event": "REQUEST_CHANGES", "body": body, "threads": threads })),
                     "Requesting changes…",
                     "Changes requested",
                 )
@@ -118,6 +131,7 @@ impl Deck {
                     Ok(_) => {
                         draft.input.update(cx, |s, cx| s.set_value("", window, cx));
                         draft.preview = false;
+                        this.pending.remove(&key);
                         this.say_done(done, cx);
                         this.refresh_detail(pr, cx);
                     }
@@ -198,7 +212,7 @@ impl Deck {
     }
 
     /// A green note under the header that goes away after a few seconds.
-    fn say_done(&mut self, msg: &str, cx: &mut Context<Self>) {
+    pub(super) fn say_done(&mut self, msg: &str, cx: &mut Context<Self>) {
         self.notice = Some(msg.to_string());
         let msg = msg.to_string();
         cx.spawn(async move |this, cx| {
@@ -216,6 +230,7 @@ impl Deck {
     pub(super) fn typing_review(&self, window: &Window, cx: &App) -> bool {
         let draft = self.selected.as_ref().and_then(|k| self.drafts.get(k));
         draft.is_some_and(|d| d.input.read(cx).focus_handle(cx).is_focused(window))
+            || self.line_editor.as_ref().is_some_and(|e| e.input.read(cx).focus_handle(cx).is_focused(window))
             || self.thread_reply.as_ref().is_some_and(|r| r.input.read(cx).focus_handle(cx).is_focused(window))
     }
 
@@ -269,9 +284,10 @@ impl Deck {
                 })
                 .child(label)
         };
+        let pending = self.pending_count(&key);
         let label = |what: Post, idle: &str| -> String {
             match draft.posting {
-                Some(p) if busy && matches!((what, p), (Post::Comment, "Commenting…") | (Post::Approve, "Approving…") | (Post::RequestChanges, "Requesting changes…")) => p.to_string(),
+                Some(p) if busy && matches!((what, p), (Post::Comment, "Commenting…" | "Submitting…") | (Post::Approve, "Approving…") | (Post::RequestChanges, "Requesting changes…")) => p.to_string(),
                 _ => idle.to_string(),
             }
         };
@@ -282,7 +298,11 @@ impl Deck {
             .child(
                 card_head()
                     .child(self.images.face(&self.hello.viewer, 20.))
-                    .child(div().text_color(rgb(SOFT)).child(format!("Reply as {viewer}")))
+                    .child(div().text_color(rgb(if pending > 0 { YELLOW } else { SOFT })).child(if pending > 0 {
+                        format!("Finish your review · {pending} pending line comment{}", if pending == 1 { "" } else { "s" })
+                    } else {
+                        format!("Reply as {viewer}")
+                    }))
                     .child(div().flex_1())
                     .child(tab("tab-write", "Write", !draft.preview, false, cx))
                     .child(tab("tab-preview", "Preview", draft.preview, true, cx)),
@@ -313,10 +333,11 @@ impl Deck {
                     .py(px(8.))
                     .border_t_1()
                     .border_color(rgb(BORDER))
-                    .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(if mine {
-                        "Markdown works · ⌘↵ comments · you can't approve your own pull request"
-                    } else {
-                        "Markdown works · ⌘↵ comments"
+                    .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(match (pending > 0, mine) {
+                        (true, true) => "Your line comments go with Submit review · you can't approve your own pull request",
+                        (true, false) => "Your line comments go with whichever you choose",
+                        (false, true) => "Markdown works · ⌘↵ comments · you can't approve your own pull request",
+                        (false, false) => "Markdown works · ⌘↵ comments",
                     }))
                     .when_some(draft.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(rgb(RED)).child(e)))
                     .child(
@@ -343,7 +364,7 @@ impl Deck {
                                     this.post(&comment_key, Post::Comment, window, cx)
                                 }))
                             })
-                            .child(label(Post::Comment, "Comment")),
+                            .child(label(Post::Comment, if pending > 0 { "Submit review" } else { "Comment" })),
                     ),
                     ),
             )

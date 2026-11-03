@@ -98,12 +98,13 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 | **Uncommitted changes**: `s` stash or `d` drop, then the command runs | **No clone yet**: use one found on disk, type a path, or clone |
 | ![Comment and review](docs/screenshots/desktop-review.png) | ![A commit with its diff](docs/screenshots/desktop-commit.png) |
 | **Comment, approve or request changes**, and reply on code threads | **Click a commit** to see what it changed |
-| ![Files changed](docs/screenshots/desktop-files.png) | |
-| **Files changed**: every file's diff, each one collapsible | |
+| ![Files changed](docs/screenshots/desktop-files.png) | ![Inline review](docs/screenshots/desktop-inline.png) |
+| **Files changed**: every file's diff, each one collapsible | **Inline review**: click a line number to comment; send them all as one review |
 
 - **PR text like github.com**: images (your GitHub login is used for GitHub-hosted ones), `<img width>`, `<details>`, tables of screenshots side by side, syntax-highlighted code, `[!NOTE]`/`[!WARNING]` boxes, emoji and linked @mentions. Text is selectable.
 - **Comment and review**: a reply box at the end of every conversation (Write / Preview) with Comment, Approve and Request changes, and Reply on each code thread. Drafts are kept per PR. `⌘⇧C` or the Review button jumps there; `⌘↵` comments.
 - **Diffs**: click a commit to see what it changed (Previous / Next steps through them), or open Files changed for every file's diff with line numbers. Big PRs open the first ~1,500 lines and keep the rest one click away.
+- **Inline review**: click a line number in Files changed to comment on that line. Add a single comment, or start a review: comments stay pending under their lines until you Submit review, Approve or Request changes, and go to GitHub together. Existing review threads show at their lines with Reply.
 - **Profile photos** from GitHub next to every author and reviewer.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
 - **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
