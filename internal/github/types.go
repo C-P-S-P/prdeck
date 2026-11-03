@@ -26,7 +26,7 @@ type PR struct {
 	Comments       int       `json:"comments"`
 	CheckState     string    `json:"checkState"` // SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, ""
 	// Unread: updated since you last opened it in PR Deck. The core sets it, not GitHub.
-	Unread bool `json:"unread,omitempty"`
+	Unread bool `json:"unread"`
 }
 
 // Key identifies a PR across repos.
@@ -157,14 +157,14 @@ type Event struct {
 	Resolved  bool    `json:"resolved"`
 	Outdated  bool    `json:"outdated"`
 	Replies   []Reply `json:"replies"`
-	New       bool    `json:"new,omitempty"` // after your last visit, and not yours
+	New       bool    `json:"new"` // after your last visit, and not yours
 }
 
 type Reply struct {
 	Author string    `json:"author"`
 	Body   string    `json:"body"`
 	At     time.Time `json:"at"`
-	New    bool      `json:"new,omitempty"`
+	New    bool      `json:"new"`
 }
 
 // SinceSeen is d as viewer sees it, who last opened the PR at seen: comments, reviews

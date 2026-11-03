@@ -125,12 +125,15 @@ fn sent<T: DeserializeOwned>(reply: &Value, what: &str) {
     }
 }
 
-/// `sent` for each item of a list in the reply.
+/// `sent` for the items of a list in the reply: each field T reads must be in at least
+/// one item, since Go leaves out empty `omitempty` fields (a check without a run id).
 fn each_sent<T: DeserializeOwned>(list: &Value, what: &str) {
     let items = list.as_array().unwrap_or_else(|| panic!("{what} is not a list"));
     assert!(!items.is_empty(), "{what} is empty");
-    for v in items {
-        sent::<T>(v, what);
+    let names = fields::<T>();
+    assert!(!names.is_empty(), "{what}: no field names to check");
+    for n in names {
+        assert!(items.iter().any(|v| v.get(n).is_some()), "{what}.{n} is in no item of the reply: renamed on one side?");
     }
 }
 

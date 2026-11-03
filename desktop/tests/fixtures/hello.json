@@ -141,6 +141,84 @@
       "worktree": false
     },
     {
+      "action": "approve",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": true,
+      "key": "a",
+      "name": "Approve",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [
+        "others"
+      ],
+      "worktree": false
+    },
+    {
+      "action": "request_changes",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "x",
+      "name": "Request changes",
+      "output": "",
+      "prompt": "What should change",
+      "run": "",
+      "when": [
+        "others"
+      ],
+      "worktree": false
+    },
+    {
+      "action": "comment",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "i",
+      "name": "Comment",
+      "output": "",
+      "prompt": "Comment",
+      "run": "",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "automerge",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": true,
+      "key": "M",
+      "name": "Merge when ready",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [
+        "ready"
+      ],
+      "worktree": false
+    },
+    {
+      "action": "rerun",
+      "bar": false,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "F",
+      "name": "Re-run failed",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [
+        "ci_failed"
+      ],
+      "worktree": false
+    },
+    {
       "action": "setpath",
       "bar": false,
       "branch": false,

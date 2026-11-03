@@ -17,6 +17,7 @@
       "reviewDecision": "CHANGES_REQUESTED",
       "state": "OPEN",
       "title": "Add streaming push source to the registry",
+      "unread": true,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/registry/pull/4821"
     },
@@ -35,6 +36,7 @@
       "reviewDecision": "REVIEW_REQUIRED",
       "state": "OPEN",
       "title": "Cache project metadata between materialization runs",
+      "unread": false,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/registry/pull/4807"
     },
@@ -53,6 +55,7 @@
       "reviewDecision": "",
       "state": "OPEN",
       "title": "Fix TTL handling for on-demand feature views",
+      "unread": false,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/registry/pull/4790"
     },
@@ -71,6 +74,7 @@
       "reviewDecision": "APPROVED",
       "state": "OPEN",
       "title": "Reconcile registry secrets on rotation",
+      "unread": true,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/operator/pull/312"
     },
@@ -89,6 +93,7 @@
       "reviewDecision": "",
       "state": "OPEN",
       "title": "Bump controller-runtime to v0.19.1",
+      "unread": false,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/operator/pull/305"
     },
@@ -107,6 +112,7 @@
       "reviewDecision": "REVIEW_REQUIRED",
       "state": "OPEN",
       "title": "Paginate the feature view table",
+      "unread": true,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/console/pull/1188"
     },
@@ -125,6 +131,7 @@
       "reviewDecision": "",
       "state": "OPEN",
       "title": "Dark mode tokens for charts",
+      "unread": false,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/console/pull/1179"
     },
@@ -143,6 +150,7 @@
       "reviewDecision": "",
       "state": "OPEN",
       "title": "Typed client for online features",
+      "unread": true,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/northwind/sdk-python/pull/77"
     },
@@ -161,6 +169,7 @@
       "reviewDecision": "REVIEW_REQUIRED",
       "state": "OPEN",
       "title": "Support Arrow Flight transport",
+      "unread": false,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/upstream/datakit/pull/2410"
     },
@@ -179,6 +188,7 @@
       "reviewDecision": "APPROVED",
       "state": "OPEN",
       "title": "Deprecate legacy CLI flags",
+      "unread": false,
       "updatedAt": "2026-01-02T03:04:05Z",
       "url": "https://github.com/upstream/datakit/pull/2398"
     }

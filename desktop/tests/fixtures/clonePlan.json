@@ -12,6 +12,7 @@
     "remote": "",
     "worktree": false
   },
+  "input": "",
   "pr": {
     "author": "jfoster",
     "baseRefName": "main",
@@ -27,6 +28,7 @@
     "reviewDecision": "APPROVED",
     "state": "OPEN",
     "title": "Deprecate legacy CLI flags",
+    "unread": false,
     "updatedAt": "2026-01-02T03:04:05Z",
     "url": "https://github.com/upstream/datakit/pull/2398"
   },

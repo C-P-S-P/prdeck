@@ -1,6 +1,7 @@
 {
   "additions": 412,
   "author": "you",
+  "autoMergeAllowed": true,
   "baseRefName": "main",
   "body": "## Summary\nAdds a `StreamPushSource` that accepts streaming writes and lands them in the online store without waiting for the next materialization run.\n\n> [!NOTE]\n> Needs registry migration `0042` to run first. cc [@rdavis](https://github.com/rdavis)\n\n## Changes\n- New `StreamPushSource` type registered in the registry proto\n- `push()` validates the payload against the feature view schema\n- Online writes are batched every 200 ms (set with `push_batch_ms`)\n\n```python\nsource = StreamPushSource(name=\"clicks\", schema=click_schema)\nstore.push(\"clicks\", df, allow_registry_cache=False)  # lands in ~200 ms\n```\n\n## Results\n<img width=\"560\" alt=\"p99 write latency before and after\" src=\"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1NjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgNTYwIDE4MCI+PHJlY3Qgd2lkdGg9IjU2MCIgaGVpZ2h0PSIxODAiIGZpbGw9IiMxNjE4MWMiLz48dGV4dCB4PSIxNiIgeT0iMjYiIGZpbGw9IiNjOWNkZDQiIGZvbnQtZmFtaWx5PSJIZWx2ZXRpY2EiIGZvbnQtc2l6ZT0iMTMiPnA5OSBvbmxpbmUgd3JpdGUgbGF0ZW5jeSAobXMpPC90ZXh0Pjx0ZXh0IHg9IjE2IiB5PSI3MCIgZmlsbD0iIzlhYTFhZCIgZm9udC1mYW1pbHk9IkhlbHZldGljYSIgZm9udC1zaXplPSIxMiI+UmVkaXM8L3RleHQ+PHJlY3QgeD0iOTYiIHk9IjUyIiB3aWR0aD0iNDIwIiBoZWlnaHQ9IjE0IiBmaWxsPSIjZTU3YjdiIi8+PHRleHQgeD0iOTYiIHk9IjgyIiBmaWxsPSIjOGE5MTlkIiBmb250LWZhbWlseT0iSGVsdmV0aWNhIiBmb250LXNpemU9IjExIj5iZWZvcmUgMTgwMDwvdGV4dD48cmVjdCB4PSI5NiIgeT0iODgiIHdpZHRoPSI0OSIgaGVpZ2h0PSIxNCIgZmlsbD0iIzhjYzQ3YSIvPjx0ZXh0IHg9IjE1MiIgeT0iMTAwIiBmaWxsPSIjOGE5MTlkIiBmb250LWZhbWlseT0iSGVsdmV0aWNhIiBmb250LXNpemU9IjExIj5hZnRlciAyMTA8L3RleHQ+PHRleHQgeD0iMTYiIHk9IjEzNiIgZmlsbD0iIzlhYTFhZCIgZm9udC1mYW1pbHk9IkhlbHZldGljYSIgZm9udC1zaXplPSIxMiI+RHluYW1vREI8L3RleHQ+PHJlY3QgeD0iOTYiIHk9IjExOCIgd2lkdGg9IjQ0MCIgaGVpZ2h0PSIxNCIgZmlsbD0iI2U1N2I3YiIvPjxyZWN0IHg9Ijk2IiB5PSIxNDAiIHdpZHRoPSI3MSIgaGVpZ2h0PSIxNCIgZmlsbD0iIzhjYzQ3YSIvPjx0ZXh0IHg9IjE3NCIgeT0iMTUyIiBmaWxsPSIjOGE5MTlkIiBmb250LWZhbWlseT0iSGVsdmV0aWNhIiBmb250LXNpemU9IjExIj5hZnRlciAzNDA8L3RleHQ+PC9zdmc+\">\n\n| Online store | p99 before | p99 after |\n| --- | --- | --- |\n| Redis | 1.8 s | 210 ms |\n| DynamoDB | 2.1 s | 340 ms |\n\n## Test plan\n- [x] Unit tests for schema validation\n- [x] Integration test against the Redis online store\n- [ ] Load test at 5k events/s",
   "changedFiles": 14,
@@ -8,19 +9,32 @@
   "checks": [
     {
       "name": "lint",
-      "state": "SUCCESS"
+      "runId": 11873404821,
+      "state": "SUCCESS",
+      "url": "https://github.com/northwind/registry/actions/runs/11873404821/job/33093448210"
     },
     {
       "name": "unit",
-      "state": "SUCCESS"
+      "runId": 11873404821,
+      "state": "SUCCESS",
+      "url": "https://github.com/northwind/registry/actions/runs/11873404821/job/33093448211"
     },
     {
       "name": "type-check",
-      "state": "SUCCESS"
+      "runId": 11873404821,
+      "state": "SUCCESS",
+      "url": "https://github.com/northwind/registry/actions/runs/11873404821/job/33093448212"
     },
     {
       "name": "integration-redis",
-      "state": "FAILURE"
+      "runId": 11873404821,
+      "state": "FAILURE",
+      "url": "https://github.com/northwind/registry/actions/runs/11873404821/job/33093448213"
+    },
+    {
+      "name": "codecov/patch",
+      "state": "FAILURE",
+      "url": "https://app.codecov.io/gh/northwind/registry/pull/4821"
     }
   ],
   "comments": 12,
@@ -140,6 +154,12 @@
     "feature",
     "registry"
   ],
+  "lastSeen": "2026-01-02T03:04:05Z",
+  "mergeMethods": [
+    "SQUASH",
+    "MERGE"
+  ],
+  "mergeStatus": "DIRTY",
   "mergeable": "CONFLICTING",
   "nodeId": "demo-pr-4821",
   "number": 4821,
@@ -168,11 +188,14 @@
       "diffHunk": "",
       "kind": "review",
       "line": 0,
+      "new": false,
       "outdated": false,
       "path": "",
       "replies": [],
       "resolved": false,
       "side": "",
+      "startLine": 0,
+      "startSide": "",
       "state": "CHANGES_REQUESTED",
       "threadId": ""
     },
@@ -183,17 +206,27 @@
       "diffHunk": "@@ -41,6 +41,9 @@ class StreamPushSource:\n+    def push(self, name, df, *, allow_registry_cache=True):\n+        fv = self._get_feature_view(name, allow_registry_cache)\n+        self._validate(fv, df)",
       "kind": "thread",
       "line": 44,
+      "new": false,
       "outdated": false,
       "path": "sdk/python/registry/push_source.py",
       "replies": [
         {
           "at": "2026-01-02T03:04:05Z",
           "author": "you",
-          "body": "Good catch. Switched the default and added a test for the stale-registry case."
+          "body": "Good catch. Switched the default and added a test for the stale-registry case.",
+          "new": false
+        },
+        {
+          "at": "2026-01-02T03:04:05Z",
+          "author": "mlin",
+          "body": "That test is what I wanted. Resolving once CI is green.",
+          "new": false
         }
       ],
       "resolved": false,
       "side": "RIGHT",
+      "startLine": 0,
+      "startSide": "",
       "state": "",
       "threadId": "demo-thread-4821-1"
     },
@@ -204,16 +237,20 @@
       "diffHunk": "",
       "kind": "comment",
       "line": 0,
+      "new": false,
       "outdated": false,
       "path": "",
       "replies": [],
       "resolved": false,
       "side": "",
+      "startLine": 0,
+      "startSide": "",
       "state": "",
       "threadId": ""
     }
   ],
   "title": "Add streaming push source to the registry",
+  "unread": false,
   "updatedAt": "2026-01-02T03:04:05Z",
   "url": "https://github.com/northwind/registry/pull/4821"
 }

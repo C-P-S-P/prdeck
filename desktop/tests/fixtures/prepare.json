@@ -18,6 +18,7 @@
     "remote": "origin",
     "worktree": false
   },
+  "input": "",
   "pr": {
     "author": "you",
     "baseRefName": "main",
@@ -33,6 +34,7 @@
     "reviewDecision": "CHANGES_REQUESTED",
     "state": "OPEN",
     "title": "Add streaming push source to the registry",
+    "unread": true,
     "updatedAt": "2026-01-02T03:04:05Z",
     "url": "https://github.com/northwind/registry/pull/4821"
   },
