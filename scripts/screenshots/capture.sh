@@ -20,9 +20,11 @@ go build -o "$WORK/prdeck" "$ROOT/cmd/prdeck"
 cleanup() { tmux kill-session -t "$SESSION" 2>/dev/null || true; rm -rf "$WORK"; }
 trap cleanup EXIT
 
-# Default config only, true color, so every machine renders the same.
+# Default config only (in an empty home, so help shows the usual path), true color,
+# so every machine renders the same.
+mkdir -p "$WORK/home"
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
-  "env PRDECK_CONFIG=/nonexistent COLORTERM=truecolor TERM=xterm-256color '$WORK/prdeck' demo"
+  "env HOME='$WORK/home' PRDECK_CONFIG='$WORK/home/.config/prdeck/config.yaml' COLORTERM=truecolor TERM=xterm-256color '$WORK/prdeck' demo"
 sleep 2
 
 shot() { # name, window title
