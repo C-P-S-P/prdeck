@@ -8,8 +8,10 @@ A terminal dashboard for the pull requests you're involved in. Pick a PR, read i
 | --- | --- |
 | ![Filter palette](docs/screenshots/palette.png) | ![Review requested filter](docs/screenshots/review.png) |
 | **`/` filter palette**: pick a filter or type any GitHub qualifier | **`3` Review requested**: who is waiting on you |
-| ![Rebase preview](docs/screenshots/rebase.png) | ![Rebase output](docs/screenshots/conflict.png) |
-| **`r` rebase**: the exact command, run only on `enter` | **Output**: conflicts show right away; fix them, then `C` |
+| ![Uncommitted changes](docs/screenshots/changes.png) | ![Rebase preview](docs/screenshots/rebase.png) |
+| **Uncommitted changes**: stash or drop them first, your choice | **`r` rebase**: the exact commands, run only on `enter` |
+| ![Rebase output](docs/screenshots/conflict.png) | ![Help](docs/screenshots/help.png) |
+| **Output**: conflicts show right away; fix them, then `C` | **`?` help**: every key and the command it runs |
 
 Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/screenshots/capture.sh`.
 
@@ -39,22 +41,31 @@ prdeck config init         # write a starter config
 | `1`–`9` | Switch filter (Involves me, Authored, Review requested, Assigned, Mentions) |
 | `/` | Filter palette: pick a filter or type any qualifier (`label:bug repo:org/x`) |
 | `R` | Refresh now (it also refreshes every 2 minutes) |
-| `f` `c` `u` | Fetch, checkout, pull |
+| `f` `c` `u` | Fetch, check out the PR's branch, pull |
 | `r` `C` `A` | Rebase on the base branch, continue, abort |
 | `p` | Push with `--force-with-lease` |
-| `o` | Open the PR's folder in your editor (Zed by default) |
+| `o` | Check out the PR's branch and open your clone in your editor (Zed by default) |
+| `w` | Open the PR in a separate git worktree instead |
 | `b` | Open the PR on GitHub |
+| `L` | Set where your clone of this repo is (saved to the config) |
 | `?` | Help: every key and the exact command it runs |
+| Mouse | Click a repo, PR, filter tab or a key in the bottom bar; click the selected PR again to open it; the wheel scrolls the pane under it |
+
+PR descriptions and comments render like on GitHub: headings, tables, task lists, code, alerts (`> [!NOTE]`), `<details>` sections, `@mentions`, suggestion blocks, and images as `[image: …]` links.
+
+With mouse support on, hold Option (or Shift, depending on your terminal) to select text. Set `ui.mouse: false` to turn it off.
 
 Commands that rewrite history (rebase, abort, push) show the exact command first and run on `enter`; `y` copies it, `esc` cancels.
 
 ### Where commands run
 
-Each PR gets its own git worktree, `~/prdeck/<repo>-<number>`, created the first time you run a command on it. Your normal checkout is never touched, and several PRs can be open at once. If the PR's branch is already checked out somewhere, prdeck uses that folder instead.
+Commands run in **your existing clone** of the PR's repo. The PR view's `folder` line shows which clone, what it has checked out, and whether it has uncommitted changes.
 
-prdeck finds your clones by scanning `~/projects`, `~/code` and `~/src` (two levels deep) for GitHub remotes. A PR from a repo you haven't cloned offers `gh repo clone` instead.
+- **Branch:** checkout, pull, rebase, push and open first check out the PR's branch (`gh pr checkout`, which also handles PRs from forks). Fetch, continue and abort run as they are.
+- **Uncommitted changes:** when a command would switch branches or needs a clean tree (pull, rebase), prdeck lists the changes and asks: `s` stash them (`git stash push --include-untracked`, so nothing is lost), `d` drop them (asks a second time, then `git reset --hard` and `git clean -fd`), or `esc` to cancel.
+- **Worktrees** are made only when you ask: `w` opens the PR in `~/prdeck/<repo>-<number>`, leaving your clone alone. Set `editor.worktree: true` to use a worktree for every command. If the PR's branch is already checked out in a worktree, prdeck uses that one.
 
-Set `editor.worktree: false` to run commands in your existing clone; prdeck then warns when that clone is on a different branch.
+**Finding your clone.** prdeck scans `~/projects`, `~/code` and `~/src` (two levels deep) for GitHub remotes. If a repo isn't there, the first command on it searches your home folder and lists the clones it finds; pick one with `1`–`9`, type a path with `p`, or clone it with `c`. Press `L` any time to point a repo at a different clone. Your choice is saved under `repos.paths` in the config, so you only do it once.
 
 ## Configuration
 
@@ -74,10 +85,13 @@ commands:
   - name: Run tests
     key: t
     run: make test
+    branch: true               # check out the PR's branch first
     output: terminal           # panel (default) | terminal | silent
   - name: Squash into one commit
     key: S
     run: git reset --soft $(git merge-base HEAD {remote}/{base}) && git commit -m {title}
+    branch: true
+    clean: true                # asks to stash or drop changes first
     when: authored             # only on your own PRs
     confirm: true
   - name: Push
@@ -86,7 +100,7 @@ commands:
     hidden: true               # removes a built-in
 ```
 
-**Command fields:** `name`, `key`, `run`, `bar` (show in the bottom bar), `confirm`, `prompt` (asks for text, fills `{input}`), `output`, `when` (`authored`, `others`, `draft`, `ready`, `ci_failed`, `conflict`), `hidden`.
+**Command fields:** `name`, `key`, `run`, `bar` (show in the bottom bar), `confirm`, `prompt` (asks for text, fills `{input}`), `output`, `branch` (check out the PR's branch first), `clean` (needs no uncommitted changes), `worktree` (run in a worktree for the PR), `when` (`authored`, `others`, `draft`, `ready`, `ci_failed`, `conflict`), `hidden`.
 
 **Placeholders:** `{number}` `{branch}` `{base}` `{repo}` `{owner}` `{name}` `{title}` `{author}` `{url}` `{remote}` (the remote that points at the PR's repo) `{path}` (the PR folder) `{input}`. Values are shell-quoted, so a PR title can never run as a command.
 

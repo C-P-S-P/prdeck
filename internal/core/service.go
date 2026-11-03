@@ -9,10 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/patelchaitany/prdeck/internal/cache"
 	"github.com/patelchaitany/prdeck/internal/config"
@@ -22,16 +21,18 @@ import (
 )
 
 type Service struct {
-	cfg   *config.Config
-	gh    *github.Client
-	cache *cache.Cache
+	cfg     *config.Config
+	cfgPath string
+	gh      *github.Client
+	cache   *cache.Cache
 
 	mu    sync.RWMutex
 	index *repos.Index
 }
 
-func New(cfg *config.Config, gh *github.Client, c *cache.Cache) *Service {
-	s := &Service{cfg: cfg, gh: gh, cache: c}
+// New wires the service. cfgPath is where SetClonePath saves repo paths.
+func New(cfg *config.Config, cfgPath string, gh *github.Client, c *cache.Cache) *Service {
+	s := &Service{cfg: cfg, cfgPath: cfgPath, gh: gh, cache: c}
 	s.Rescan()
 	return s
 }
@@ -84,42 +85,68 @@ func (s *Service) Detail(ctx context.Context, pr github.PR) (*github.Detail, err
 // ErrNoClone means no local clone of the PR's repo was found.
 var ErrNoClone = errors.New("no local clone")
 
-// Folder is where a PR's commands run.
+// Folder is where a PR's commands run and what state it is in.
 type Folder struct {
-	Path   string
-	Clone  string
-	Remote string
-	Exists bool   // false: a worktree will be created first
-	Branch string // what is checked out there now (non-worktree mode)
+	Path     string
+	Clone    string
+	Remote   string
+	Worktree bool     // Path is a worktree for this PR
+	Exists   bool     // false: the worktree is created first
+	Branch   string   // checked out now ("HEAD" when detached)
+	Changes  []string // uncommitted changes, `git status --porcelain` lines
+	Rebasing bool
 }
 
-// ResolveFolder finds the PR's folder without changing anything on disk.
-func (s *Service) ResolveFolder(pr github.PR) (Folder, error) {
+// ResolveFolder finds where commands for pr run, without changing anything. Commands run
+// in the user's clone, or in a worktree that already has the PR's branch. A new worktree
+// is planned only when asked for (wantWorktree) or turned on in config.
+func (s *Service) ResolveFolder(pr github.PR, wantWorktree bool) (Folder, error) {
 	c, ok := s.clone(pr.Repo)
 	if !ok {
 		return Folder{}, fmt.Errorf("%w of %s", ErrNoClone, pr.Repo)
 	}
-	f := Folder{Clone: c.Path, Remote: c.Remote}
-	if !s.cfg.Editor.UseWorktree() {
-		f.Path, f.Exists, f.Branch = c.Path, true, repos.CurrentBranch(c.Path)
-		return f, nil
-	}
+	f := Folder{Path: c.Path, Clone: c.Path, Remote: c.Remote, Exists: true}
 	if p := repos.BranchWorktree(c.Path, pr.HeadRefName); p != "" {
-		f.Path, f.Exists = p, true
-		return f, nil
+		f.Path, f.Worktree = p, p != c.Path
+	} else if wantWorktree || s.cfg.Editor.UseWorktree() {
+		f.Path, f.Worktree = repos.WorktreePath(s.cfg.Editor.WorktreeDir, pr.Repo, pr.Number), true
+		st, err := os.Stat(f.Path)
+		f.Exists = err == nil && st.IsDir()
 	}
-	f.Path = repos.WorktreePath(s.cfg.Editor.WorktreeDir, pr.Repo, pr.Number)
-	if st, err := os.Stat(f.Path); err == nil && st.IsDir() {
-		f.Exists = true
+	if f.Exists {
+		f.Branch = repos.CurrentBranch(f.Path)
+		f.Changes = repos.Changes(f.Path)
+		f.Rebasing = repos.Rebasing(f.Path)
 	}
 	return f, nil
 }
 
-// EnsureFolder creates the PR's worktree when it does not exist yet.
-func (s *Service) EnsureFolder(ctx context.Context, pr github.PR, f Folder) (string, error) {
-	if f.Exists {
-		return "", nil
+// Setup does what must happen before a plan's main command: create its worktree if
+// needed, then run its Pre commands (stash or drop changes, check out the branch).
+func (s *Service) Setup(ctx context.Context, p Plan) (string, error) {
+	var log []string
+	if p.Folder.Worktree && !p.Folder.Exists && p.Action != "browse" && p.Action != "clone" {
+		out, err := s.createWorktree(ctx, p.PR, p.Folder)
+		if out != "" {
+			log = append(log, out)
+		}
+		if err != nil {
+			return strings.Join(log, "\n"), err
+		}
 	}
+	if p.Pre != "" {
+		out, err := runner.Run(ctx, p.Pre, p.Dir())
+		if out != "" {
+			log = append(log, out)
+		}
+		if err != nil {
+			return strings.Join(log, "\n"), err
+		}
+	}
+	return strings.Join(log, "\n"), nil
+}
+
+func (s *Service) createWorktree(ctx context.Context, pr github.PR, f Folder) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(f.Path), 0o755); err != nil {
 		return "", err
 	}
@@ -135,147 +162,16 @@ func (s *Service) EnsureFolder(ctx context.Context, pr github.PR, f Folder) (str
 	return "Created worktree " + config.ShortenHome(f.Path) + "\n" + out, nil
 }
 
-// Plan is a command ready to show and run.
-type Plan struct {
-	Title    string
-	Script   string // the exact shell line
-	Action   string // "", "open", "browse", "clone"
-	Folder   Folder
-	Confirm  bool
-	Terminal bool   // hand the terminal to the process
-	Silent   bool   // don't show output unless it fails
-	Warn     string // shown in the preview, forces Confirm
-	PR       github.PR
-}
-
-// Dir is where the plan runs.
-func (p Plan) Dir() string {
-	if p.Action == "clone" || p.Action == "browse" {
-		home, _ := os.UserHomeDir()
-		return home
-	}
-	return p.Folder.Path
-}
-
-// Allowed reports whether a command's `when:` conditions match the PR.
-func (s *Service) Allowed(c config.Command, pr github.PR) (bool, string) {
-	viewer := s.Viewer()
-	for _, w := range c.When {
-		ok := true
-		switch w {
-		case "authored":
-			ok = viewer != "" && strings.EqualFold(pr.Author, viewer)
-		case "others":
-			ok = viewer == "" || !strings.EqualFold(pr.Author, viewer)
-		case "draft":
-			ok = pr.IsDraft
-		case "ready":
-			ok = !pr.IsDraft
-		case "ci_failed":
-			ok = pr.CIFailed()
-		case "conflict":
-			ok = pr.Mergeable == "CONFLICTING"
-		}
-		if !ok {
-			return false, fmt.Sprintf("%s only runs on PRs that are %s", c.Name, strings.ReplaceAll(w, "_", " "))
-		}
-	}
-	return true, ""
-}
-
-// Prepare turns a command into a Plan for pr. input fills {input} for commands with a prompt.
-func (s *Service) Prepare(c config.Command, pr github.PR, input string) (Plan, error) {
-	if ok, why := s.Allowed(c, pr); !ok {
-		return Plan{}, errors.New(why)
-	}
-	p := Plan{Title: c.Name, Action: c.Action, Confirm: c.Confirm, Terminal: c.Output == "terminal", Silent: c.Output == "silent", PR: pr}
-
-	if c.Action == "browse" {
-		p.Script = openURLCommand() + " " + runner.Quote(pr.URL)
-		return p, nil
-	}
-
-	f, err := s.ResolveFolder(pr)
-	if err != nil {
-		return Plan{}, err
-	}
-	p.Folder = f
-	vals := s.values(pr, f, input)
-
-	switch c.Action {
-	case "open":
-		ed, ok := s.cfg.Editor.Editors[s.cfg.Editor.Default]
-		if !ok {
-			return Plan{}, fmt.Errorf("editor %q is not set up in config", s.cfg.Editor.Default)
-		}
-		p.Title = "Open in " + s.cfg.Editor.Default
-		p.Script = runner.Fill(ed.Run, vals)
-		p.Terminal = ed.Terminal
-	case "":
-		p.Script = runner.Fill(c.Run, vals)
-	default:
-		return Plan{}, fmt.Errorf("unknown action %q", c.Action)
-	}
-
-	if !s.cfg.Editor.UseWorktree() && f.Branch != "" && f.Branch != pr.HeadRefName && f.Branch != "HEAD" && c.Action != "open" && !strings.Contains(c.Run, "gh pr checkout") {
-		p.Warn = fmt.Sprintf("%s is on %q, not this PR's branch %q", config.ShortenHome(f.Path), f.Branch, pr.HeadRefName)
-		p.Confirm = true
-	}
-	return p, nil
-}
-
-// ClonePlan offers to clone a repo that has no local clone yet.
-func (s *Service) ClonePlan(pr github.PR) Plan {
-	dir := "~"
-	if len(s.cfg.Repos.Scan) > 0 {
-		dir = s.cfg.Repos.Scan[0]
-	}
-	target := filepath.Join(config.ExpandHome(dir), pr.Name())
-	return Plan{
-		Title:   "Clone " + pr.Repo,
-		Action:  "clone",
-		Script:  "gh repo clone " + runner.Quote(pr.Repo) + " " + runner.Quote(target),
-		Confirm: true,
-		PR:      pr,
-	}
-}
-
-func (s *Service) values(pr github.PR, f Folder, input string) map[string]string {
-	return map[string]string{
-		"number": strconv.Itoa(pr.Number),
-		"branch": pr.HeadRefName,
-		"base":   pr.BaseRefName,
-		"repo":   pr.Repo,
-		"owner":  pr.Owner(),
-		"name":   pr.Name(),
-		"title":  pr.Title,
-		"author": pr.Author,
-		"url":    pr.URL,
-		"remote": f.Remote,
-		"path":   f.Path,
-		"input":  input,
-	}
-}
-
-// Result is what running a Plan produced.
-type Result struct {
-	Plan   Plan
-	Output string
-	Err    error
-}
-
-// Execute runs a captured plan: creates the worktree if needed, then runs the script.
-// GUI editors are started and left running.
+// Execute runs a plan: Setup, then the main command. GUI editors are started and left
+// running.
 func (s *Service) Execute(ctx context.Context, p Plan) Result {
 	var log []string
-	if p.Action != "browse" && p.Action != "clone" {
-		out, err := s.EnsureFolder(ctx, p.PR, p.Folder)
-		if out != "" {
-			log = append(log, out)
-		}
-		if err != nil {
-			return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
-		}
+	out, err := s.Setup(ctx, p)
+	if out != "" {
+		log = append(log, out)
+	}
+	if err != nil {
+		return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
 	}
 	if p.Action == "open" {
 		c := runner.Command(context.Background(), p.Script, p.Dir(), true)
@@ -286,9 +182,11 @@ func (s *Service) Execute(ctx context.Context, p Plan) Result {
 		log = append(log, "Opened "+config.ShortenHome(p.Folder.Path))
 		return Result{Plan: p, Output: strings.Join(log, "\n")}
 	}
-	out, err := runner.Run(ctx, p.Script, p.Dir())
-	if out != "" {
-		log = append(log, out)
+	if p.Script != "" {
+		out, err = runner.Run(ctx, p.Script, p.Dir())
+		if out != "" {
+			log = append(log, out)
+		}
 	}
 	if p.Action == "clone" && err == nil {
 		s.Rescan()
@@ -296,14 +194,71 @@ func (s *Service) Execute(ctx context.Context, p Plan) Result {
 	return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
 }
 
-// TerminalCmd is the process for plans that take over the terminal. Call EnsureFolder first.
+// TerminalCmd is the process for plans that take over the terminal. Call Setup first.
 func (s *Service) TerminalCmd(p Plan) *exec.Cmd {
 	return runner.Command(context.Background(), p.Script, p.Dir(), false)
 }
 
-func openURLCommand() string {
-	if runtime.GOOS == "darwin" {
-		return "open"
+// FindClones searches the home folder for clones of repo, beyond the scan folders.
+func (s *Service) FindClones(ctx context.Context, repo string) []string {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
 	}
-	return "xdg-open"
+	_, name, _ := strings.Cut(repo, "/")
+	owner, _, _ := strings.Cut(repo, "/")
+	// The usual GOPATH layout is deeper than the general search goes.
+	found := repos.FindClones(ctx, repo, []string{filepath.Join(home, "go", "src", "github.com", owner, name)}, 0)
+	for _, p := range repos.FindClones(ctx, repo, []string{home}, 4) {
+		if !contains(found, p) {
+			found = append(found, p)
+		}
+	}
+	return found
+}
+
+// SetClonePath points repo at a clone on disk and saves it under repos.paths in the
+// config file. The returned note is non-empty when the clone has no remote for repo.
+func (s *Service) SetClonePath(repo, path string) (string, error) {
+	path = config.ExpandHome(strings.TrimSpace(path))
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if st, err := os.Stat(path); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("%s is not a folder", config.ShortenHome(path))
+	}
+	top, remote, err := repos.Inspect(path, repo)
+	if err != nil {
+		return "", fmt.Errorf("%s is not a git clone", config.ShortenHome(path))
+	}
+	if err := config.SaveRepoPath(s.cfgPath, repo, top); err != nil {
+		return "", fmt.Errorf("saving to config: %w", err)
+	}
+	if s.cfg.Repos.Paths == nil {
+		s.cfg.Repos.Paths = map[string]string{}
+	}
+	s.cfg.Repos.Paths[repo] = top
+	s.Rescan()
+	note := ""
+	if remote == "" {
+		note = "no remote in it points at " + repo + "; commands will use origin"
+	}
+	return note, nil
+}
+
+// ClonePath is the clone currently used for repo, if any.
+func (s *Service) ClonePath(repo string) string {
+	c, _ := s.clone(repo)
+	return c.Path
+}
+
+func contains(l []string, s string) bool {
+	for _, x := range l {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

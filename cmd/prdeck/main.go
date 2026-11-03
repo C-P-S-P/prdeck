@@ -63,7 +63,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		_, err = tea.NewProgram(tui.New(demo.New(cfg)), tea.WithAltScreen()).Run()
+		_, err = tea.NewProgram(tui.New(demo.New(cfg)), programOptions(cfg)...).Run()
 		return err
 	}
 
@@ -75,18 +75,25 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	svc := core.New(cfg, gh, cache.Open(cache.DefaultPath()))
+	svc := core.New(cfg, config.DefaultPath(), gh, cache.Open(cache.DefaultPath()))
 
 	switch cmd {
 	case "":
-		p := tea.NewProgram(tui.New(svc), tea.WithAltScreen())
-		_, err := p.Run()
+		_, err := tea.NewProgram(tui.New(svc), programOptions(cfg)...).Run()
 		return err
 	case "list":
 		return list(svc, cfg, strings.Join(args[1:], " "))
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
+}
+
+func programOptions(cfg *config.Config) []tea.ProgramOption {
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if cfg.UI.MouseOn() {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	return opts
 }
 
 func list(svc *core.Service, cfg *config.Config, query string) error {

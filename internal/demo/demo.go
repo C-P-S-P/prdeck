@@ -1,13 +1,15 @@
 // Package demo is a stand-in backend with sample PRs. `prdeck demo` uses it to show the
 // app without a GitHub login, and the README screenshots are taken from it. Commands
-// print what they would do; nothing runs.
+// print what they would do; nothing runs and nothing is saved.
 package demo
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/patelchaitany/prdeck/internal/cache"
@@ -23,10 +25,29 @@ type Backend struct {
 	flags   map[int][]string
 	details map[int]*github.Detail
 	start   time.Time
+
+	mu        sync.Mutex
+	clones    map[string]*clone // by repo; a missing repo has no clone yet
+	worktrees map[string]bool
+}
+
+// clone is the pretend state of a local checkout.
+type clone struct {
+	path    string
+	branch  string
+	changes []string
 }
 
 func New(cfg *config.Config) *Backend {
-	b := &Backend{cfg: cfg, start: time.Now(), flags: map[int][]string{}, details: map[int]*github.Detail{}}
+	b := &Backend{cfg: cfg, start: time.Now(), flags: map[int][]string{}, details: map[int]*github.Detail{}, worktrees: map[string]bool{}}
+	b.clones = map[string]*clone{
+		// Uncommitted work in the registry clone, so rebasing #4821 asks to stash or drop.
+		"northwind/registry":   {path: "~/code/registry", branch: "main", changes: []string{" M sdk/python/registry/online_writer.py", "?? notes/push-source.md"}},
+		"northwind/operator":   {path: "~/code/operator", branch: "fix/secret-rotation"},
+		"northwind/console":    {path: "~/code/console", branch: "main"},
+		"northwind/sdk-python": {path: "~/code/sdk-python", branch: "main"},
+		// upstream/datakit has no clone: commands offer to find it, set a path or clone it.
+	}
 	b.load()
 	return b
 }
@@ -79,79 +100,137 @@ func (b *Backend) Detail(_ context.Context, pr github.PR) (*github.Detail, error
 	return &github.Detail{PR: pr}, nil
 }
 
-func (b *Backend) ResolveFolder(pr github.PR) (core.Folder, error) {
-	return core.Folder{
-		Path:   "~/prdeck/" + pr.Name() + "-" + strconv.Itoa(pr.Number),
-		Clone:  "~/code/" + pr.Name(),
-		Remote: "origin",
-		Exists: pr.Author == "you",
-	}, nil
+func (b *Backend) ResolveFolder(pr github.PR, wantWorktree bool) (core.Folder, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, ok := b.clones[pr.Repo]
+	if !ok {
+		return core.Folder{}, fmt.Errorf("%w of %s", core.ErrNoClone, pr.Repo)
+	}
+	if wantWorktree || b.cfg.Editor.UseWorktree() {
+		p := "~/prdeck/" + pr.Name() + "-" + strconv.Itoa(pr.Number)
+		f := core.Folder{Path: p, Clone: c.path, Remote: "origin", Worktree: true, Exists: b.worktrees[p]}
+		if f.Exists {
+			f.Branch = pr.HeadRefName
+		}
+		return f, nil
+	}
+	return core.Folder{Path: c.path, Clone: c.path, Remote: "origin", Exists: true, Branch: c.branch, Changes: append([]string(nil), c.changes...)}, nil
 }
 
 func (b *Backend) Prepare(c config.Command, pr github.PR, input string) (core.Plan, error) {
-	f, _ := b.ResolveFolder(pr)
-	p := core.Plan{Title: c.Name, Action: c.Action, Confirm: c.Confirm, Folder: f, PR: pr, Silent: c.Output == "silent"}
-	vals := map[string]string{
-		"number": strconv.Itoa(pr.Number), "branch": pr.HeadRefName, "base": pr.BaseRefName,
-		"repo": pr.Repo, "owner": pr.Owner(), "name": pr.Name(), "title": pr.Title,
-		"author": pr.Author, "url": pr.URL, "remote": f.Remote, "path": f.Path, "input": input,
+	if ok, why := core.Allowed(c, pr, "you"); !ok {
+		return core.Plan{}, fmt.Errorf("%s", why)
 	}
-	switch c.Action {
-	case "open":
-		p.Title = "Open in " + b.cfg.Editor.Default
-		p.Script = runner.Fill(b.cfg.Editor.Editors[b.cfg.Editor.Default].Run, vals)
-	case "browse":
-		p.Script = "open " + pr.URL
-	default:
-		p.Script = runner.Fill(c.Run, vals)
+	if c.Action == "browse" {
+		return core.Plan{Title: c.Name, Action: "browse", Script: "open " + pr.URL, PR: pr}, nil
 	}
-	return p, nil
+	f, err := b.ResolveFolder(pr, c.Worktree)
+	if err != nil {
+		return core.Plan{}, err
+	}
+	return core.BuildPlan(b.cfg, c, pr, f, input)
 }
 
 func (b *Backend) ClonePlan(pr github.PR) core.Plan {
-	return core.Plan{Title: "Clone " + pr.Repo, Action: "clone", Script: "gh repo clone " + pr.Repo, Confirm: true, PR: pr}
+	return core.Plan{Title: "Clone " + pr.Repo, Action: "clone", Script: "gh repo clone " + pr.Repo + " ~/code/" + pr.Name(), Confirm: true, PR: pr}
 }
 
-func (b *Backend) Execute(_ context.Context, p core.Plan) core.Result {
-	time.Sleep(300 * time.Millisecond)
-	pr := p.PR
-	var out string
-	if !p.Folder.Exists && p.Action != "browse" && p.Action != "clone" {
-		out = "Created worktree " + p.Folder.Path + "\nSwitched to a new branch '" + pr.HeadRefName + "'\n"
+func (b *Backend) FindClones(_ context.Context, repo string) []string {
+	time.Sleep(900 * time.Millisecond)
+	if repo == "upstream/datakit" {
+		return []string{"/Users/you/work/datakit", "/Users/you/old/datakit-fork"}
 	}
+	return nil
+}
+
+func (b *Backend) SetClonePath(repo, path string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.clones[repo] = &clone{path: config.ShortenHome(config.ExpandHome(path)), branch: "main"}
+	return "", nil
+}
+
+func (b *Backend) ClonePath(repo string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c, ok := b.clones[repo]; ok {
+		return c.path
+	}
+	return ""
+}
+
+// Setup pretends to create the worktree and run the Pre commands, updating the
+// pretend clone so the next command sees the new state.
+func (b *Backend) Setup(_ context.Context, p core.Plan) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	pr := p.PR
+	var out []string
+	if p.Folder.Worktree && !p.Folder.Exists {
+		b.worktrees[p.Folder.Path] = true
+		out = append(out, "Created worktree "+p.Folder.Path, "Switched to a new branch '"+pr.HeadRefName+"'")
+	}
+	c := b.clones[pr.Repo]
+	if strings.Contains(p.Pre, "git stash") {
+		out = append(out, "Saved working directory and index state On "+c.branch+": prdeck: before "+strings.ToLower(p.Title)+" on #"+strconv.Itoa(pr.Number))
+		c.changes = nil
+	}
+	if strings.Contains(p.Pre, "git reset --hard") {
+		out = append(out, "HEAD is now at 2c41a9e Merge pull request #4799 from northwind/fix-ci")
+		c.changes = nil
+	}
+	if strings.Contains(p.Pre, "gh pr checkout") {
+		out = append(out, "Switched to branch '"+pr.HeadRefName+"'", "Your branch is up to date with 'origin/"+pr.HeadRefName+"'.")
+		c.branch = pr.HeadRefName
+	}
+	return strings.Join(out, "\n"), nil
+}
+
+func (b *Backend) Execute(ctx context.Context, p core.Plan) core.Result {
+	time.Sleep(300 * time.Millisecond)
+	pre, _ := b.Setup(ctx, p)
+	out := []string{}
+	if pre != "" {
+		out = append(out, pre)
+	}
+	pr := p.PR
 	switch {
 	case p.Action == "open":
-		out += "Opened " + p.Folder.Path
+		out = append(out, "Opened "+p.Folder.Path)
 	case p.Action == "browse":
-		out += "Opened " + pr.URL
+		out = append(out, "Opened "+pr.URL)
+	case p.Action == "clone":
+		b.mu.Lock()
+		b.clones[pr.Repo] = &clone{path: "~/code/" + pr.Name(), branch: "main"}
+		b.mu.Unlock()
+		out = append(out, "Cloning into '~/code/"+pr.Name()+"'...")
+	case p.Script == "":
 	case strings.Contains(p.Script, "rebase --continue"):
-		out += "Successfully rebased and updated refs/heads/" + pr.HeadRefName + "."
+		out = append(out, "Successfully rebased and updated refs/heads/"+pr.HeadRefName+".")
 	case strings.Contains(p.Script, "rebase --abort"):
-		out += "Rebase aborted."
+		out = append(out, "Rebase aborted.")
 	case strings.Contains(p.Script, "git rebase"):
+		out = append(out, "From github.com:"+pr.Repo, " * branch            "+pr.BaseRefName+" -> FETCH_HEAD")
 		if pr.Mergeable == "CONFLICTING" {
-			out += "From github.com:" + pr.Repo + "\n * branch            " + pr.BaseRefName + " -> FETCH_HEAD\n" +
-				"Auto-merging sdk/python/registry/online_writer.py\n" +
-				"CONFLICT (content): Merge conflict in sdk/python/registry/online_writer.py\n" +
-				"error: could not apply 3f9c2e1... Batch online writes every 200 ms\n" +
-				"hint: Resolve all conflicts manually, mark them as resolved with \"git add\", then press C to continue."
-			return core.Result{Plan: p, Output: out, Err: errExit(1)}
+			out = append(out,
+				"Auto-merging sdk/python/registry/online_writer.py",
+				"CONFLICT (content): Merge conflict in sdk/python/registry/online_writer.py",
+				"error: could not apply 3f9c2e1... Batch online writes every 200 ms",
+				"hint: Resolve all conflicts manually, mark them as resolved with \"git add\", then press C to continue.")
+			return core.Result{Plan: p, Output: strings.Join(out, "\n"), Err: errExit(1)}
 		}
-		out += "Successfully rebased and updated refs/heads/" + pr.HeadRefName + "."
+		out = append(out, "Successfully rebased and updated refs/heads/"+pr.HeadRefName+".")
 	case strings.Contains(p.Script, "git push"):
-		out += "To github.com:" + pr.Repo + ".git\n + 3f9c2e1...a81d0b4 " + pr.HeadRefName + " -> " + pr.HeadRefName + " (forced update)"
+		out = append(out, "To github.com:"+pr.Repo+".git", " + 3f9c2e1...a81d0b4 "+pr.HeadRefName+" -> "+pr.HeadRefName+" (forced update)")
 	case strings.Contains(p.Script, "git fetch"):
-		out += "From github.com:" + pr.Repo + "\n   2c41a9e..8be07f3  " + pr.BaseRefName + "       -> origin/" + pr.BaseRefName
+		out = append(out, "From github.com:"+pr.Repo, "   2c41a9e..8be07f3  "+pr.BaseRefName+"       -> origin/"+pr.BaseRefName)
 	case strings.Contains(p.Script, "gh pr checkout"):
-		out += "Already on '" + pr.HeadRefName + "'"
+		out = append(out, "Already on '"+pr.HeadRefName+"'", "Your branch is up to date with 'origin/"+pr.HeadRefName+"'.")
 	default:
-		out += "(demo) would run: " + p.Script
+		out = append(out, "(demo) would run: "+p.Script)
 	}
-	return core.Result{Plan: p, Output: out}
-}
-
-func (b *Backend) EnsureFolder(context.Context, github.PR, core.Folder) (string, error) {
-	return "", nil
+	return core.Result{Plan: p, Output: strings.Join(out, "\n")}
 }
 
 func (b *Backend) TerminalCmd(p core.Plan) *exec.Cmd {

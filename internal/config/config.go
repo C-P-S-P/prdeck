@@ -21,6 +21,7 @@ type Config struct {
 	Filters  []Filter  `yaml:"filters"`
 	Commands []Command `yaml:"commands"`
 	Theme    Theme     `yaml:"theme"`
+	UI       UI        `yaml:"ui"`
 
 	// Path is the file the user config was read from ("" when only defaults are in use).
 	Path string `yaml:"-"`
@@ -47,8 +48,9 @@ type Editor struct {
 	Editors     map[string]EditorSpec `yaml:"editors"`
 }
 
-// UseWorktree reports whether each PR is opened in its own git worktree.
-func (e Editor) UseWorktree() bool { return e.Worktree == nil || *e.Worktree }
+// UseWorktree reports whether every command runs in a per-PR git worktree. Off by
+// default: commands run in the user's clone, and worktrees are made only on request.
+func (e Editor) UseWorktree() bool { return e.Worktree != nil && *e.Worktree }
 
 type EditorSpec struct {
 	Run      string `yaml:"run"`
@@ -72,16 +74,19 @@ type Filter struct {
 }
 
 type Command struct {
-	Name    string     `yaml:"name"`
-	Key     string     `yaml:"key"`
-	Run     string     `yaml:"run"`
-	Action  string     `yaml:"action"` // built-in actions: open, browse
-	Bar     *bool      `yaml:"bar"`
-	Confirm bool       `yaml:"confirm"`
-	Prompt  string     `yaml:"prompt"`
-	Output  string     `yaml:"output"` // panel (default) | terminal | silent
-	When    StringList `yaml:"when"`
-	Hidden  bool       `yaml:"hidden"`
+	Name     string     `yaml:"name"`
+	Key      string     `yaml:"key"`
+	Run      string     `yaml:"run"`
+	Action   string     `yaml:"action"` // built-in actions: open, browse, setpath
+	Bar      *bool      `yaml:"bar"`
+	Confirm  bool       `yaml:"confirm"`
+	Prompt   string     `yaml:"prompt"`
+	Output   string     `yaml:"output"` // panel (default) | terminal | silent
+	When     StringList `yaml:"when"`
+	Hidden   bool       `yaml:"hidden"`
+	Branch   bool       `yaml:"branch"`   // check out the PR's branch first (an empty run just checks out)
+	Clean    bool       `yaml:"clean"`    // needs no uncommitted changes
+	Worktree bool       `yaml:"worktree"` // run in a worktree made for this PR
 }
 
 // OnBar reports whether the command is pinned to the bottom bar.
@@ -90,6 +95,13 @@ func (c Command) OnBar() bool { return c.Bar != nil && *c.Bar }
 type Theme struct {
 	Markdown string `yaml:"markdown"` // glamour style: dark, light, dracula, notty…
 }
+
+type UI struct {
+	Mouse *bool `yaml:"mouse"` // click and scroll; on by default
+}
+
+// MouseOn reports whether mouse support is enabled.
+func (u UI) MouseOn() bool { return u.Mouse == nil || *u.Mouse }
 
 // Duration reads "2m", "90s" and similar.
 type Duration time.Duration
@@ -193,6 +205,9 @@ func (c *Config) merge(u *Config) {
 	if u.Theme.Markdown != "" {
 		c.Theme.Markdown = u.Theme.Markdown
 	}
+	if u.UI.Mouse != nil {
+		c.UI.Mouse = u.UI.Mouse
+	}
 	c.Filters = mergeFilters(c.Filters, u.Filters)
 	c.Commands = mergeCommands(c.Commands, u.Commands)
 }
@@ -227,10 +242,22 @@ func mergeCommands(base, user []Command) []Command {
 			continue
 		}
 		if i >= 0 {
-			// Unset fields keep the built-in's value, so `{name: Push, key: P}` only moves the key.
+			// Without a run line the override keeps the built-in's behavior, so
+			// `{name: Push, key: P}` only moves the key and Push still asks first.
 			old := out[i]
-			if c.Run == "" && c.Action == "" {
+			if c.Run == "" && c.Action == "" && !c.Branch {
 				c.Run, c.Action = old.Run, old.Action
+				c.Confirm = c.Confirm || old.Confirm
+				c.Branch, c.Clean, c.Worktree = old.Branch, c.Clean || old.Clean, c.Worktree || old.Worktree
+				if c.Output == "" {
+					c.Output = old.Output
+				}
+				if c.Prompt == "" {
+					c.Prompt = old.Prompt
+				}
+				if len(c.When) == 0 {
+					c.When = old.When
+				}
 			}
 			if c.Key == "" {
 				c.Key = old.Key
@@ -263,7 +290,7 @@ func indexOf(n int, match func(int) bool) int {
 func (c *Config) validate() {
 	seen := map[string]string{}
 	for i, cmd := range c.Commands {
-		if cmd.Run == "" && cmd.Action == "" {
+		if cmd.Run == "" && cmd.Action == "" && !cmd.Branch {
 			c.Warnings = append(c.Warnings, fmt.Sprintf("command %q has no run line", cmd.Name))
 		}
 		if cmd.Key == "" {

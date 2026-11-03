@@ -53,6 +53,8 @@ shot palette "prdeck — filter palette"
 keys Escape
 
 keys "r"
+shot changes "prdeck — uncommitted changes"
+keys "s"
 shot rebase "prdeck — rebase preview"
 keys Enter
 shot conflict "prdeck — rebase output" 1.5

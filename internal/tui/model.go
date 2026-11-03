@@ -30,12 +30,25 @@ type Backend interface {
 	Search(ctx context.Context, query string) ([]github.PR, error)
 	CachedDetail(pr github.PR) (*github.Detail, bool)
 	Detail(ctx context.Context, pr github.PR) (*github.Detail, error)
-	ResolveFolder(pr github.PR) (core.Folder, error)
+	ResolveFolder(pr github.PR, wantWorktree bool) (core.Folder, error)
 	Prepare(c config.Command, pr github.PR, input string) (core.Plan, error)
 	ClonePlan(pr github.PR) core.Plan
 	Execute(ctx context.Context, p core.Plan) core.Result
-	EnsureFolder(ctx context.Context, pr github.PR, f core.Folder) (string, error)
+	Setup(ctx context.Context, p core.Plan) (string, error)
 	TerminalCmd(p core.Plan) *exec.Cmd
+	FindClones(ctx context.Context, repo string) []string
+	SetClonePath(repo, path string) (string, error)
+	ClonePath(repo string) string
+}
+
+// missingClone is shown when a command needs a clone that was not found: prdeck
+// searches the disk for it and offers to set a path or clone it.
+type missingClone struct {
+	pr        github.PR
+	cmd       config.Command
+	input     string
+	searching bool
+	found     []string
 }
 
 type pane int
@@ -87,7 +100,11 @@ type Model struct {
 	pcur    int
 
 	prompt   *config.Command
+	pathRepo string // the path prompt is open for this repo
 	promptIn textinput.Model
+
+	missing     *missingClone
+	dropConfirm bool
 
 	plan    *core.Plan
 	running string
@@ -138,7 +155,11 @@ type (
 		d   *github.Detail
 		err error
 	}
-	folderMsg     struct{ key, text string }
+	folderMsg struct{ key, text string }
+	findMsg   struct {
+		repo  string
+		paths []string
+	}
 	wantDetailMsg struct{ key string }
 	tickMsg       time.Time
 	resultMsg     core.Result
@@ -296,18 +317,38 @@ func (m Model) detailCmd(pr github.PR) tea.Cmd {
 func (m Model) folderCmd(pr github.PR) tea.Cmd {
 	be := m.be
 	return func() tea.Msg {
-		f, err := be.ResolveFolder(pr)
-		switch {
-		case errors.Is(err, core.ErrNoClone):
-			return folderMsg{pr.Key(), "no local clone (any command offers to clone it)"}
-		case err != nil:
-			return folderMsg{pr.Key(), err.Error()}
-		case f.Exists:
-			return folderMsg{pr.Key(), config.ShortenHome(f.Path)}
-		default:
-			return folderMsg{pr.Key(), config.ShortenHome(f.Path) + " (created on first command)"}
-		}
+		return folderMsg{pr.Key(), describeFolder(be, pr)}
 	}
+}
+
+// describeFolder is the "folder" line in the PR view: where commands run and its state.
+func describeFolder(be Backend, pr github.PR) string {
+	f, err := be.ResolveFolder(pr, false)
+	switch {
+	case errors.Is(err, core.ErrNoClone):
+		return "no local clone found · press L to set its path"
+	case err != nil:
+		return err.Error()
+	case !f.Exists:
+		return config.ShortenHome(f.Path) + " (worktree, created on first command)"
+	}
+	s := config.ShortenHome(f.Path)
+	var notes []string
+	switch {
+	case f.Rebasing:
+		notes = append(notes, "rebase in progress")
+	case f.Branch == pr.HeadRefName:
+		notes = append(notes, "on this PR's branch")
+	case f.Branch != "":
+		notes = append(notes, "on "+f.Branch)
+	}
+	if n := len(f.Changes); n > 0 {
+		notes = append(notes, plural(n, "uncommitted change"))
+	}
+	if len(notes) > 0 {
+		s += " (" + strings.Join(notes, ", ") + ")"
+	}
+	return s
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -397,6 +438,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case findMsg:
+		if m.missing == nil || m.missing.pr.Repo != msg.repo {
+			return m, nil
+		}
+		m.missing.searching, m.missing.found = false, msg.paths
+		return m, nil
+
 	case preparedMsg:
 		if msg.err != nil {
 			m.running = ""
@@ -424,6 +472,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	}
 	return m, nil
 }
@@ -456,8 +507,10 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch {
-	case m.prompt != nil:
+	case m.prompt != nil || m.pathRepo != "":
 		return m.promptKey(k)
+	case m.missing != nil:
+		return m.missingKey(key)
 	case m.palette:
 		return m.paletteKey(k)
 	case m.plan != nil:
@@ -621,6 +674,9 @@ func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd
 		cmd := m.setFlash("Select a pull request first")
 		return m, cmd
 	}
+	if c.Action == "setpath" {
+		return m.askPath(pr.Repo)
+	}
 	if c.Prompt != "" && input == "" {
 		m.prompt = c
 		m.promptIn.Prompt = c.Prompt + ": "
@@ -629,20 +685,86 @@ func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd
 	}
 	plan, err := m.be.Prepare(*c, pr, input)
 	if errors.Is(err, core.ErrNoClone) {
-		p := m.be.ClonePlan(pr)
-		p.Warn = "No local clone of " + pr.Repo + " was found under repos.scan."
-		m.plan = &p
-		return m, nil
+		m.missing = &missingClone{pr: pr, cmd: *c, input: input, searching: true}
+		be, repo := m.be, pr.Repo
+		return m, func() tea.Msg { return findMsg{repo, be.FindClones(context.Background(), repo)} }
 	}
 	if err != nil {
 		cmd := m.setFlash("! " + err.Error())
 		return m, cmd
 	}
-	if plan.Confirm {
+	if plan.Confirm || len(plan.Changes) > 0 {
 		m.plan = &plan
 		return m, nil
 	}
 	return m.run(plan)
+}
+
+func (m Model) askPath(repo string) (tea.Model, tea.Cmd) {
+	m.pathRepo = repo
+	m.promptIn.Prompt = "Path to your clone of " + repo + ": "
+	cur := m.be.ClonePath(repo)
+	if cur == "" {
+		cur = "~/"
+	}
+	m.promptIn.SetValue(config.ShortenHome(cur))
+	m.promptIn.CursorEnd()
+	return m, m.promptIn.Focus()
+}
+
+// useClone saves path as repo's clone and, when a command was waiting for it, runs it.
+func (m Model) useClone(repo, path string) (tea.Model, tea.Cmd) {
+	note, err := m.be.SetClonePath(repo, path)
+	if err != nil {
+		cmd := m.setFlash("! " + err.Error())
+		return m, cmd
+	}
+	msg := "Saved " + config.ShortenHome(config.ExpandHome(path)) + " as the clone of " + repo
+	if note != "" {
+		msg += " (" + note + ")"
+	}
+	pending := m.missing
+	m.missing = nil
+	flash := m.setFlash(msg)
+	var folder tea.Cmd
+	if pr, ok := m.selected(); ok {
+		folder = m.folderCmd(pr)
+	}
+	if pending != nil {
+		nm, cmd := m.startCommand(&pending.cmd, pending.input)
+		return nm, tea.Batch(flash, folder, cmd)
+	}
+	return m, tea.Batch(flash, folder)
+}
+
+func (m Model) missingKey(key string) (tea.Model, tea.Cmd) {
+	mc := *m.missing
+	switch key {
+	case "esc", "q":
+		m.missing = nil
+	case "f":
+		if !mc.searching {
+			mc.searching, mc.found = true, nil
+			m.missing = &mc
+			be, repo := m.be, mc.pr.Repo
+			return m, func() tea.Msg { return findMsg{repo, be.FindClones(context.Background(), repo)} }
+		}
+	case "p":
+		return m.askPath(mc.pr.Repo)
+	case "c":
+		p := m.be.ClonePlan(mc.pr)
+		m.missing = nil
+		m.plan = &p
+	case "enter":
+		if len(mc.found) > 0 {
+			return m.useClone(mc.pr.Repo, mc.found[0])
+		}
+	default:
+		if n, err := strconv.Atoi(key); err == nil && n >= 1 && n <= len(mc.found) {
+			return m.useClone(mc.pr.Repo, mc.found[n-1])
+		}
+	}
+	return m, nil
 }
 
 func (m Model) run(p core.Plan) (tea.Model, tea.Cmd) {
@@ -652,7 +774,7 @@ func (m Model) run(p core.Plan) (tea.Model, tea.Cmd) {
 	be := m.be
 	if p.Terminal {
 		return m, func() tea.Msg {
-			out, err := be.EnsureFolder(context.Background(), p.PR, p.Folder)
+			out, err := be.Setup(context.Background(), p)
 			return preparedMsg{plan: p, out: out, err: err}
 		}
 	}
@@ -662,11 +784,30 @@ func (m Model) run(p core.Plan) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) planKey(key string) (tea.Model, tea.Cmd) {
+	p := *m.plan
+	if m.dropConfirm {
+		m.dropConfirm = false
+		if key == "y" {
+			return m.continuePlan(p.WithDrop())
+		}
+		return m, nil // back to the stash / drop choice
+	}
+	if len(p.Changes) > 0 {
+		switch key {
+		case "s":
+			return m.continuePlan(p.WithStash())
+		case "d":
+			m.dropConfirm = true
+		case "esc", "n", "q":
+			m.plan = nil
+		}
+		return m, nil
+	}
 	switch key {
 	case "enter":
-		return m.run(*m.plan)
+		return m.run(p)
 	case "y":
-		cmd := m.setFlash(copyToClipboard(m.plan.Script))
+		cmd := m.setFlash(copyToClipboard(p.FullScript()))
 		m.plan = nil
 		return m, cmd
 	case "esc", "n", "q":
@@ -675,13 +816,32 @@ func (m Model) planKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// continuePlan goes on once changes are dealt with: ask first if the command
+// confirms, otherwise run it.
+func (m Model) continuePlan(p core.Plan) (tea.Model, tea.Cmd) {
+	if p.Confirm {
+		m.plan = &p
+		return m, nil
+	}
+	return m.run(p)
+}
+
 func (m Model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "esc":
-		m.prompt = nil
+		m.prompt, m.pathRepo = nil, ""
 		m.promptIn.Blur()
 		return m, nil
 	case "enter":
+		if repo := m.pathRepo; repo != "" {
+			path := strings.TrimSpace(m.promptIn.Value())
+			m.pathRepo = ""
+			m.promptIn.Blur()
+			if path == "" || path == "~/" {
+				return m, nil
+			}
+			return m.useClone(repo, path)
+		}
 		c, in := m.prompt, strings.TrimSpace(m.promptIn.Value())
 		m.prompt = nil
 		m.promptIn.Blur()

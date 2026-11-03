@@ -124,10 +124,7 @@ func (m Model) topBar() string {
 func (m Model) reposBox(w, h int) string {
 	rows := m.repoRows()
 	inner, listH := w-2, h-2
-	top := 0
-	if m.repoCursor >= listH {
-		top = m.repoCursor - listH + 1
-	}
+	top := m.reposTop(listH)
 	var body []string
 	for i := top; i < len(rows) && len(body) < listH; i++ {
 		r := rows[i]
@@ -150,21 +147,47 @@ func (m Model) reposBox(w, h int) string {
 	return box("Repositories", body, w, h, m.focus == paneRepos)
 }
 
-func (m Model) prsBox(w, h int) string {
-	inner := w - 2
+func (m Model) reposTop(listH int) int {
+	if m.repoCursor >= listH {
+		return m.repoCursor - listH + 1
+	}
+	return 0
+}
+
+// filterTabs renders the filter tabs and returns each tab's [start, end) column, so
+// clicks can be matched to tabs. Index len(m.filters) is the custom query tab.
+func (m Model) filterTabs() (string, [][2]int) {
+	on := lipgloss.NewStyle().Background(cGreen).Foreground(cInk)
 	var tabs []string
+	var spans [][2]int
+	x := 0
+	add := func(s string) {
+		if len(tabs) > 0 {
+			x++
+		}
+		w := ansi.StringWidth(s)
+		spans = append(spans, [2]int{x, x + w})
+		tabs = append(tabs, s)
+		x += w
+	}
 	for i, f := range m.filters {
 		label := strconv.Itoa(i+1) + " " + f.Name
 		if i == m.active && m.custom == "" {
-			tabs = append(tabs, lipgloss.NewStyle().Background(cGreen).Foreground(cInk).Render(" "+label+" "))
+			add(on.Render(" " + label + " "))
 		} else {
-			tabs = append(tabs, sDim.Render(label))
+			add(sDim.Render(label))
 		}
 	}
 	if m.custom != "" {
-		tabs = append(tabs, lipgloss.NewStyle().Background(cGreen).Foreground(cInk).Render(" / custom "))
+		add(on.Render(" / custom "))
 	}
-	body := []string{strings.Join(tabs, " ")}
+	return strings.Join(tabs, " "), spans
+}
+
+func (m Model) prsBox(w, h int) string {
+	inner := w - 2
+	tabs, _ := m.filterTabs()
+	body := []string{tabs}
 
 	v := m.visible()
 	listH := h - 3
@@ -405,6 +428,10 @@ func (m Model) helpContent(w int) string {
 	}, w) {
 		line(l)
 	}
+	if m.cfg.UI.MouseOn() {
+		line(sSoft.Render("Mouse: click a repo, PR, filter tab or key below to use it; click a selected PR again to open it;"))
+		line(sSoft.Render("the wheel scrolls the pane under it. Hold Option (or Shift) to select text."))
+	}
 	line("")
 	line(sBold.Render("Commands") + sDim.Render("  (run in the PR's folder)"))
 	for _, c := range m.cfg.Commands {
@@ -413,13 +440,29 @@ func (m Model) helpContent(w int) string {
 			k = "·"
 		}
 		what := c.Run
-		switch c.Action {
-		case "open":
-			what = "opens the PR folder in " + m.cfg.Editor.Default
-		case "browse":
+		switch {
+		case c.Action == "open" && c.Worktree:
+			what = "opens a worktree made for this PR in " + m.cfg.Editor.Default
+		case c.Action == "open":
+			what = "opens your clone in " + m.cfg.Editor.Default
+		case c.Action == "browse":
 			what = "opens the PR in your browser"
+		case c.Action == "setpath":
+			what = "points this repo at a clone on disk (saved to config)"
+		case c.Run == "" && c.Branch:
+			what = "checks out the PR's branch"
 		}
-		row := sKey.Render(fmt.Sprintf("%-2s", k)) + " " + sText.Render(fmt.Sprintf("%-16s", c.Name)) + " " + sDim.Render(what)
+		var marks []string
+		if c.Branch && c.Run != "" || c.Branch && c.Action == "open" {
+			marks = append(marks, "on PR branch")
+		}
+		if c.Clean {
+			marks = append(marks, "needs clean tree")
+		}
+		if len(marks) > 0 {
+			what += "  [" + strings.Join(marks, ", ") + "]"
+		}
+		row := sKey.Render(fmt.Sprintf("%-2s", k)) + " " + sText.Render(fmt.Sprintf("%-17s", c.Name)) + " " + sDim.Render(what)
 		line(fit(row, w))
 	}
 	line("")
@@ -430,11 +473,12 @@ func (m Model) helpContent(w int) string {
 		path = config.ShortenHome(path)
 	}
 	line(sSoft.Render("config  ") + sText.Render(path))
-	mode := "one worktree per PR under " + m.cfg.Editor.WorktreeDir
-	if !m.cfg.Editor.UseWorktree() {
-		mode = "in your existing clone"
+	mode := "your clone of each repo; w makes a worktree under " + m.cfg.Editor.WorktreeDir
+	if m.cfg.Editor.UseWorktree() {
+		mode = "one worktree per PR under " + m.cfg.Editor.WorktreeDir
 	}
 	line(sSoft.Render("folders ") + sText.Render(mode))
+	line(sSoft.Render("        ") + sDim.Render("Uncommitted changes in the way? You choose: stash them, or drop them (asks twice)."))
 	if len(m.cfg.Warnings) > 0 {
 		line("")
 		line(sYellow.Render("Config warnings"))
@@ -464,23 +508,48 @@ func (m Model) bottomLines() []string {
 			lines = append(lines, fit(row, w))
 		}
 		lines = append(lines, sDim.Render("↑↓ choose · enter apply · esc close"))
+	case m.pathRepo != "":
+		lines = append(lines, fit(m.promptIn.View(), w), hints(w, "enter", "save to config", "esc", "cancel"))
 	case m.prompt != nil:
-		lines = append(lines, fit(m.promptIn.View(), w), sDim.Render("enter run · esc cancel"))
+		lines = append(lines, fit(m.promptIn.View(), w), hints(w, "enter", "run", "esc", "cancel"))
+	case m.missing != nil:
+		lines = append(lines, m.missingLines(w)...)
+	case m.plan != nil && m.dropConfirm:
+		p := m.plan
+		lines = append(lines,
+			fit(sRed.Render(fmt.Sprintf("Drop %s in %s for good?", plural(len(p.Changes), "change"), config.ShortenHome(p.Folder.Path))), w),
+			fit(sSoft.Render("Edited files go back to the last commit and untracked files are deleted. This cannot be undone."), w),
+			hints(w, "y", "drop them", "any other key", "go back"))
+	case m.plan != nil && len(m.plan.Changes) > 0:
+		p := m.plan
+		lines = append(lines, fit(sYellow.Render(p.Title+" needs a clean working tree: ")+sText.Render(config.ShortenHome(p.Folder.Path))+sYellow.Render(" has "+plural(len(p.Changes), "uncommitted change")), w))
+		shown := p.Changes
+		if len(shown) > 5 {
+			shown = shown[:5]
+		}
+		for _, c := range shown {
+			lines = append(lines, fit(sSoft.Render("  "+c), w))
+		}
+		if extra := len(p.Changes) - len(shown); extra > 0 {
+			lines = append(lines, sDim.Render(fmt.Sprintf("  … and %d more", extra)))
+		}
+		lines = append(lines, hints(w, "s", "stash them", "d", "drop them", "esc", "cancel"))
 	case m.plan != nil:
 		p := m.plan
-		cmd := lipgloss.NewStyle().Width(w).Render(sYellow.Render(p.Title) + "  " + sGreen.Render("$ ") + sText.Render(p.Script))
+		cmd := lipgloss.NewStyle().Width(w).Render(sYellow.Render(p.Title) + "  " + sGreen.Render("$ ") + sText.Render(p.FullScript()))
 		lines = append(lines, strings.Split(cmd, "\n")...)
-		if p.Warn != "" {
-			lines = append(lines, fit(sYellow.Render("! "+p.Warn), w))
-		}
-		if !p.Folder.Exists && p.Folder.Path != "" {
+		if p.Folder.Worktree && !p.Folder.Exists && p.Folder.Path != "" {
 			lines = append(lines, fit(sSoft.Render("first creates the worktree "+config.ShortenHome(p.Folder.Path)), w))
 		}
 		where := ""
 		if p.Dir() != "" {
-			where = "in " + config.ShortenHome(p.Dir()) + "  ·  "
+			where = "in " + config.ShortenHome(p.Dir())
+			if p.Folder.Branch != "" && p.Folder.Branch != "HEAD" {
+				where += " (on " + p.Folder.Branch + ")"
+			}
+			where += "  ·  "
 		}
-		lines = append(lines, fit(sDim.Render(where)+sText.Render("enter")+sDim.Render(" run · ")+sText.Render("y")+sDim.Render(" copy · ")+sText.Render("esc")+sDim.Render(" cancel"), w))
+		lines = append(lines, fit(sDim.Render(where)+hints(w, "enter", "run", "y", "copy", "esc", "cancel"), w))
 	case m.running != "":
 		lines = append(lines, m.spin.View()+" "+sYellow.Render("Running "+m.running+"…")+sDim.Render("  esc cancels"))
 	case m.out != nil:
@@ -510,6 +579,42 @@ func (m Model) bottomLines() []string {
 	return append(lines, m.keybar()...)
 }
 
+// hints renders "key what · key what" pairs.
+func hints(w int, pairs ...string) string {
+	var parts []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		parts = append(parts, sText.Render(pairs[i])+sDim.Render(" "+pairs[i+1]))
+	}
+	return fit(strings.Join(parts, sDim.Render(" · ")), w)
+}
+
+func (m Model) missingLines(w int) []string {
+	mc := m.missing
+	where := strings.Join(m.cfg.Repos.Scan, ", ")
+	lines := []string{fit(sYellow.Render("No local clone of "+mc.pr.Repo)+sSoft.Render(" in "+where+" or repos.paths."), w)}
+	switch {
+	case mc.searching:
+		lines = append(lines, m.spin.View()+sSoft.Render(" Searching your home folder…"))
+	case len(mc.found) == 0:
+		lines = append(lines, sSoft.Render("  Not found on this Mac."))
+	default:
+		for i, p := range mc.found {
+			if i == 9 {
+				break
+			}
+			lines = append(lines, fit(sKey.Render(strconv.Itoa(i+1))+" "+sText.Render(config.ShortenHome(p)), w))
+		}
+	}
+	clone := m.be.ClonePlan(mc.pr)
+	target := clone.Script[strings.LastIndex(clone.Script, " ")+1:]
+	var keys []string
+	if len(mc.found) > 0 {
+		keys = append(keys, "1-"+strconv.Itoa(min(len(mc.found), 9)), "use it")
+	}
+	keys = append(keys, "f", "search again", "p", "type a path", "c", "clone into "+config.ShortenHome(strings.Trim(target, "'")), "esc", "cancel")
+	return append(lines, hints(w, keys...))
+}
+
 func cleanOutput(l string) string {
 	if i := strings.LastIndex(l, "\r"); i >= 0 {
 		l = l[i+1:]
@@ -517,8 +622,14 @@ func cleanOutput(l string) string {
 	return strings.ReplaceAll(ansi.Strip(l), "\t", "    ")
 }
 
-func (m Model) keybar() []string {
-	var items []string
+// barItem is one entry in the bottom key bar; key is what pressing it would send.
+type barItem struct {
+	text string
+	key  string
+}
+
+func (m Model) barItems() []barItem {
+	var items []barItem
 	for _, c := range m.cfg.Commands {
 		if !c.OnBar() || c.Key == "" {
 			continue
@@ -527,13 +638,18 @@ func (m Model) keybar() []string {
 		if m.plan != nil && m.plan.Title == c.Name {
 			st = sKeyHot
 		}
-		items = append(items, st.Render(c.Key)+" "+sSoft.Render(strings.ToLower(c.Name)))
+		items = append(items, barItem{st.Render(c.Key) + " " + sSoft.Render(strings.ToLower(c.Name)), c.Key})
 	}
-	items = append(items,
-		sKey.Render("/")+" "+sSoft.Render("filter"),
-		sKey.Render("tab")+" "+sSoft.Render("pane"),
-		sKey.Render("?")+" "+sSoft.Render("help"),
-		sKey.Render("q")+" "+sSoft.Render("quit"),
-	)
-	return wrapItems(items, max(m.w, 20))
+	for _, it := range [][2]string{{"/", "filter"}, {"tab", "pane"}, {"?", "help"}, {"q", "quit"}} {
+		items = append(items, barItem{sKey.Render(it[0]) + " " + sSoft.Render(it[1]), it[0]})
+	}
+	return items
+}
+
+func (m Model) keybar() []string {
+	var texts []string
+	for _, it := range m.barItems() {
+		texts = append(texts, it.text)
+	}
+	return wrapItems(texts, max(m.w, 20))
 }
