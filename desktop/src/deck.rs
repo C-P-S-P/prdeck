@@ -132,6 +132,9 @@ pub struct Deck {
     /// Set by n or Jump to first new: the first new item in the conversation scrolls
     /// itself to the top the next time it is laid out.
     jump_new: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The selected PR once its detail has come in: loading it again while it stays
+    /// selected keeps what was new when you opened it.
+    looked: Option<String>,
     /// Diffs loaded from GitHub (by "pr:…" or "commit:…"), the commit open in
     /// Commits, and files opened or closed by hand in a diff.
     diffs: HashMap<String, DiffState>,
@@ -185,6 +188,7 @@ impl Deck {
             want: None,
             detail_scroll: ScrollHandle::new(),
             jump_new: Default::default(),
+            looked: None,
             setup: None,
             diffs: HashMap::new(),
             commit: None,
@@ -411,6 +415,7 @@ impl Deck {
             self.detail_scroll.set_offset(point(px(0.), px(0.)));
             self.commit = None;
             self.jump_new.set(false);
+            self.looked = None;
         }
         self.selected = Some(key.clone());
         match self.tabs.iter_mut().find(|t| t.key() == key) {
@@ -497,12 +502,19 @@ impl Deck {
     }
 
     /// Shows a PR's detail. The core counts that as opening the PR, so its dot goes.
-    fn put_detail(&mut self, d: Detail) {
+    /// A refresh or your own comment loads the selected PR again; the New tags stay.
+    fn put_detail(&mut self, mut d: Detail) {
         let key = d.pr.key();
         for p in self.prs.iter_mut().chain(self.tabs.iter_mut()) {
             if p.key() == key {
                 p.unread = false;
             }
+        }
+        if self.selected.as_ref() == Some(&key) {
+            if let Some(shown) = self.details.get(&key).filter(|_| self.looked.as_ref() == Some(&key)) {
+                d.keep_new(shown);
+            }
+            self.looked = Some(key.clone());
         }
         self.details.insert(key, d);
     }
@@ -1882,7 +1894,8 @@ impl Deck {
                     .h(px(26.))
                     .on_click(cx.listener(|this, _, _, cx| this.jump_to_new(cx)))
                     .child("Jump to first new")
-                    .child(kbd("n")),
+                    // A command of yours on n runs instead.
+                    .when(self.find_cmd(|c| c.key == "n").is_none(), |b| b.child(kbd("n"))),
             )
             .into_any_element()
     }

@@ -201,6 +201,21 @@ impl Detail {
     pub fn new_count(&self) -> usize {
         self.timeline.iter().map(|e| e.new as usize + e.replies.iter().filter(|r| r.new).count()).sum()
     }
+
+    /// Takes the New tags of `shown`, the copy on screen before this one was loaded:
+    /// the core counts each load as a visit, but what was new when you opened the PR
+    /// stays new until you leave it.
+    pub fn keep_new(&mut self, shown: &Detail) {
+        for e in self.timeline.iter_mut() {
+            let Some(o) = shown.timeline.iter().find(|o| o.kind == e.kind && o.author == e.author && o.at == e.at) else {
+                continue;
+            };
+            e.new |= o.new;
+            for r in e.replies.iter_mut() {
+                r.new |= o.replies.iter().any(|x| x.new && x.author == r.author && x.at == r.at);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -537,5 +552,24 @@ mod tests {
         let old: Detail = serde_json::from_str(r#"{"timeline": [{"kind": "comment"}]}"#).unwrap();
         assert_eq!((old.new_count(), old.last_seen.as_str()), (0, ""));
         assert!(!serde_json::from_str::<Pr>("{}").unwrap().unread);
+
+        // Loaded again while on screen: the core has marked it seen, the tags stay,
+        // and what came in since is tagged too.
+        let mut again: Detail = serde_json::from_str(
+            r#"{"timeline": [
+                {"kind": "thread", "at": "1", "replies": [{"author": "you"}, {"author": "mlin", "at": "2"}]},
+                {"kind": "comment", "at": "3"},
+                {"kind": "review"},
+                {"kind": "comment", "author": "rdavis", "at": "4", "new": true}
+            ]}"#,
+        )
+        .unwrap();
+        let mut shown = d.clone();
+        shown.timeline[0].at = "1".into();
+        shown.timeline[0].replies[1].at = "2".into();
+        shown.timeline[1].at = "3".into();
+        again.keep_new(&shown);
+        assert_eq!(again.new_count(), 3);
+        assert!(!again.timeline[0].replies[0].new && !again.timeline[2].new);
     }
 }
