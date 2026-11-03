@@ -289,15 +289,15 @@ func (m Model) detailContent(w int) string {
 		if fail > 0 {
 			var names []string
 			for _, c := range d.Checks {
-				switch c.State {
-				case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE":
-					name := sRed.Render(c.Name)
-					if c.URL != "" {
-						// A link to the check's log, like links in PR text.
-						name = mdrender.Link(c.URL, sRed.Underline(true).Render(c.Name))
-					}
-					names = append(names, name)
+				if !c.Failed() {
+					continue
 				}
+				name := sRed.Render(c.Name)
+				if c.URL != "" {
+					// A link to the check's log, like links in PR text.
+					name = mdrender.Link(c.URL, sRed.Underline(true).Render(c.Name))
+				}
+				names = append(names, name)
 			}
 			line(wrap.Render(sRed.Render("failing: ") + strings.Join(names, sRed.Render(", ")) + m.rerunHint(pr)))
 		}
@@ -468,7 +468,7 @@ func (m Model) helpContent(w int) string {
 		case c.Action == "browse":
 			what = "opens the PR in your browser"
 		case c.Action == "rerun":
-			what = "re-runs the failed GitHub Actions jobs (when CI failed)"
+			what = "re-runs failed GitHub Actions jobs"
 		case c.Action == "setpath":
 			what = "points this repo at a clone on disk (saved to config)"
 		case c.Run == "" && c.Branch:

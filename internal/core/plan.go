@@ -184,7 +184,7 @@ func RerunFailed(p Plan, d *github.Detail, rerun func(runID int64) error) Result
 	runs, other := d.FailedRuns()
 	var log, failed []string
 	for _, r := range runs {
-		what := fmt.Sprintf("run %d: %s", r.ID, strings.Join(r.Checks, ", "))
+		what := fmt.Sprintf("run %d: %s", r.ID, someOf(r.Checks))
 		if err := rerun(r.ID); err != nil {
 			failed = append(failed, what+" ("+err.Error()+")")
 			continue
@@ -196,7 +196,7 @@ func RerunFailed(p Plan, d *github.Detail, rerun func(runID int64) error) Result
 	case 1:
 		log = append(log, "Skipped "+other[0]+": not a GitHub Actions job; re-run it from its own page")
 	default:
-		log = append(log, "Skipped "+strings.Join(other, ", ")+": not GitHub Actions jobs; re-run them from their own pages")
+		log = append(log, "Skipped "+someOf(other)+": not GitHub Actions jobs; re-run them from their own pages")
 	}
 	var err error
 	switch {
@@ -206,6 +206,14 @@ func RerunFailed(p Plan, d *github.Detail, rerun func(runID int64) error) Result
 		err = errors.New("could not re-run " + strings.Join(failed, "; "))
 	}
 	return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
+}
+
+// someOf names the first few checks: a matrix can fail dozens of jobs in one run.
+func someOf(names []string) string {
+	if len(names) > 3 {
+		return strings.Join(names[:3], ", ") + fmt.Sprintf(" and %d more", len(names)-3)
+	}
+	return strings.Join(names, ", ")
 }
 
 // ClonePlan offers to clone a repo that has no local clone yet.

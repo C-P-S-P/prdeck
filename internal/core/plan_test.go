@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -120,6 +121,16 @@ func TestRerunFailed(t *testing.T) {
 	})
 	if r.Err == nil || !strings.Contains(r.Output, "Skipped codecov/patch") {
 		t.Errorf("only other CI: output = %q, err = %v", r.Output, r.Err)
+	}
+
+	// A big matrix failing names a few jobs, not a wall of them.
+	matrix := &github.Detail{}
+	for i := range 40 {
+		matrix.Checks = append(matrix.Checks, github.Check{Name: fmt.Sprintf("test (%d)", i), State: "FAILURE", RunID: 11})
+	}
+	r = RerunFailed(p, matrix, func(int64) error { return nil })
+	if r.Output != "Re-running the failed jobs of run 11: test (0), test (1), test (2) and 37 more" || r.Err != nil {
+		t.Errorf("matrix: output = %q, err = %v", r.Output, r.Err)
 	}
 }
 

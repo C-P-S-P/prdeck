@@ -203,11 +203,16 @@ func TestFailingChecksLinkAndRerun(t *testing.T) {
 	m = search(t, m)
 	pr, _ := m.selected()
 	d, _ := m.be.Detail(context.Background(), pr)
+	d.Checks = append(d.Checks, github.Check{Name: "deploy", State: "ACTION_REQUIRED"})
 	nm, _ := m.Update(detailMsg{key: pr.Key(), d: d})
 	m = nm.(Model)
 	link := "\x1b]8;;https://github.com/northwind/registry/actions/runs/5/job/9\x1b\\"
 	if !strings.Contains(m.View(), link) {
 		t.Error("the failing check should link to its log")
+	}
+	// Every check counted in ✕ is named, the same rule as the count.
+	if !strings.Contains(ansi.Strip(m.View()), "failing: integration, deploy") {
+		t.Error("the failing line should name every failed check")
 	}
 	if !strings.Contains(ansi.Strip(m.View()), "F re-run failed") {
 		t.Error("the failing line should say which key re-runs the checks")
