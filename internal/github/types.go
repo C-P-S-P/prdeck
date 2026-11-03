@@ -25,6 +25,8 @@ type PR struct {
 	Repo           string    `json:"repo"` // owner/name
 	Comments       int       `json:"comments"`
 	CheckState     string    `json:"checkState"` // SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, ""
+	// Unread: updated since you last opened it in PR Deck. The core sets it, not GitHub.
+	Unread bool `json:"unread,omitempty"`
 }
 
 // Key identifies a PR across repos.
@@ -58,6 +60,9 @@ type Detail struct {
 	AutoMerge        *AutoMerge `json:"autoMerge,omitempty"`
 	AutoMergeAllowed bool       `json:"autoMergeAllowed,omitempty"`
 	MergeMethods     []string   `json:"mergeMethods,omitempty"` // allowed ones (MERGE, SQUASH, REBASE), the viewer's default first
+
+	// LastSeen is when you opened the PR before this; what came after it is marked New.
+	LastSeen time.Time `json:"lastSeen,omitzero"`
 }
 
 // AutoMerge is turned on for a PR: GitHub merges it once checks and reviews pass.
@@ -152,12 +157,35 @@ type Event struct {
 	Resolved  bool    `json:"resolved"`
 	Outdated  bool    `json:"outdated"`
 	Replies   []Reply `json:"replies"`
+	New       bool    `json:"new,omitempty"` // after your last visit, and not yours
 }
 
 type Reply struct {
 	Author string    `json:"author"`
 	Body   string    `json:"body"`
 	At     time.Time `json:"at"`
+	New    bool      `json:"new,omitempty"`
+}
+
+// SinceSeen is d as viewer sees it, who last opened the PR at seen: comments, reviews
+// and replies from others after that are marked New. It copies what it marks, so a
+// saved detail never changes.
+func (d *Detail) SinceSeen(seen time.Time, viewer string) *Detail {
+	isNew := func(at time.Time, author string) bool {
+		return !seen.IsZero() && at.After(seen) && !strings.EqualFold(author, viewer)
+	}
+	c := *d
+	c.LastSeen = seen
+	c.Timeline = make([]Event, len(d.Timeline))
+	for i, e := range d.Timeline {
+		e.New = isNew(e.At, e.Author)
+		e.Replies = append([]Reply(nil), e.Replies...)
+		for j, r := range e.Replies {
+			e.Replies[j].New = isNew(r.At, r.Author)
+		}
+		c.Timeline[i] = e
+	}
+	return &c
 }
 
 // CheckCounts returns passed, failed and pending check counts.

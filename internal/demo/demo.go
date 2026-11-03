@@ -30,6 +30,7 @@ type Backend struct {
 	start   time.Time
 
 	mu        sync.Mutex
+	seen      map[int]time.Time // when you last opened each sample PR, as in the cache
 	clones    map[string]*clone // by repo; a missing repo has no clone yet
 	worktrees map[string]bool
 }
@@ -42,7 +43,7 @@ type clone struct {
 }
 
 func New(cfg *config.Config) *Backend {
-	b := &Backend{cfg: cfg, start: time.Now(), flags: map[int][]string{}, details: map[int]*github.Detail{}, worktrees: map[string]bool{}}
+	b := &Backend{cfg: cfg, start: time.Now(), flags: map[int][]string{}, details: map[int]*github.Detail{}, worktrees: map[string]bool{}, seen: map[int]time.Time{}}
 	b.clones = map[string]*clone{
 		// Uncommitted work in the registry clone, so rebasing #4821 asks to stash or drop.
 		"northwind/registry":   {path: "~/code/registry", branch: "main", changes: []string{" M sdk/python/registry/online_writer.py", "?? notes/push-source.md"}},
@@ -70,12 +71,15 @@ func (b *Backend) match(query string) []github.PR {
 	case strings.Contains(query, "mentions:@me"):
 		want = "mentioned"
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	var out []github.PR
 	for _, p := range b.prs {
 		if want == "" || contains(b.flags[p.Number], want) {
 			if strings.Contains(query, "is:draft") && !p.IsDraft {
 				continue
 			}
+			p.Unread = p.UpdatedAt.After(b.seen[p.Number])
 			out = append(out, p)
 		}
 	}
@@ -91,13 +95,17 @@ func (b *Backend) Search(_ context.Context, q string) ([]github.PR, error) {
 	return b.match(q), nil
 }
 
+// CachedDetail shows a sample PR, which counts as opening it, the same as in the core.
 func (b *Backend) CachedDetail(pr github.PR) (*github.Detail, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	d, ok := b.details[pr.Number]
 	if ok {
-		c := *d
-		return &c, true
+		last := b.seen[pr.Number]
+		if d.UpdatedAt.After(last) {
+			b.seen[pr.Number] = d.UpdatedAt
+		}
+		return d.SinceSeen(last, "you"), true
 	}
 	return nil, false
 }

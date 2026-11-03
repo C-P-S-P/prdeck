@@ -70,7 +70,11 @@ func (s *Service) clone(repo string) (repos.Clone, bool) {
 }
 
 // CachedSearch returns the last saved results for a filter query.
-func (s *Service) CachedSearch(query string) (cache.SearchEntry, bool) { return s.cache.Search(query) }
+func (s *Service) CachedSearch(query string) (cache.SearchEntry, bool) {
+	e, ok := s.cache.Search(query)
+	e.PRs = s.withUnread(e.PRs)
+	return e, ok
+}
 
 // Search asks GitHub for open PRs matching a filter query and saves them.
 func (s *Service) Search(ctx context.Context, query string) ([]github.PR, error) {
@@ -82,14 +86,39 @@ func (s *Service) Search(ctx context.Context, query string) ([]github.PR, error)
 	if err != nil {
 		return nil, err
 	}
-	s.cache.PutSearch(query, viewer, prs)
-	return prs, nil
+	s.cache.PutSearch(query, viewer, prs) // also picks up the PRs the other app opened
+	return s.withUnread(prs), nil
 }
 
-// CachedDetail returns a saved detail and whether it is current for pr.
-func (s *Service) CachedDetail(pr github.PR) (*github.Detail, bool) { return s.cache.Detail(pr) }
+// withUnread is a copy of prs (which may be the cache's own) with the ones updated
+// since you last opened them marked.
+func (s *Service) withUnread(prs []github.PR) []github.PR {
+	out := make([]github.PR, len(prs))
+	for i, p := range prs {
+		p.Unread = s.cache.Unread(p)
+		out[i] = p
+	}
+	return out
+}
 
-// Detail loads a PR's description, conversation, reviewers and checks.
+// CachedDetail returns a saved detail and whether it is current for pr. Both apps
+// call it to show a PR, so it counts as opening it (see opened).
+func (s *Service) CachedDetail(pr github.PR) (*github.Detail, bool) {
+	d, fresh := s.cache.Detail(pr)
+	if d == nil {
+		return nil, false
+	}
+	return s.opened(d), fresh
+}
+
+// opened marks a PR seen as of the detail shown, and returns that detail with what
+// came after the visit before marked new.
+func (s *Service) opened(d *github.Detail) *github.Detail {
+	return d.SinceSeen(s.cache.MarkSeen(d.Key(), d.UpdatedAt), s.Viewer())
+}
+
+// Detail loads a PR's description, conversation, reviewers and checks. Like
+// CachedDetail, it counts as opening the PR.
 func (s *Service) Detail(ctx context.Context, pr github.PR) (*github.Detail, error) {
 	gh := s.client()
 	if gh == nil {
@@ -99,8 +128,9 @@ func (s *Service) Detail(ctx context.Context, pr github.PR) (*github.Detail, err
 	if err != nil {
 		return nil, err
 	}
-	s.cache.PutDetail(d)
-	return d, nil
+	shown := s.opened(d)
+	s.cache.PutDetail(d) // saves the seen mark too
+	return shown, nil
 }
 
 // FetchImage downloads an image from a PR body, with the gh login for GitHub's hosts.

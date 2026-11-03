@@ -87,7 +87,10 @@ func (b *Backend) load() {
 				{Kind: "thread", Author: "mlin", At: b.ago(2 * h), Path: "sdk/python/registry/push_source.py", Line: 44,
 					DiffHunk: "@@ -41,6 +41,9 @@ class StreamPushSource:\n+    def push(self, name, df, *, allow_registry_cache=True):\n+        fv = self._get_feature_view(name, allow_registry_cache)\n+        self._validate(fv, df)",
 					Body:     "Should `allow_registry_cache` default to `False` here? A stale registry would silently drop new columns.",
-					Replies:  []github.Reply{{Author: "you", At: b.ago(1 * h), Body: "Good catch. Switched the default and added a test for the stale-registry case."}}},
+					Replies: []github.Reply{
+						{Author: "you", At: b.ago(1 * h), Body: "Good catch. Switched the default and added a test for the stale-registry case."},
+						{Author: "mlin", At: b.ago(40 * m), Body: "That test is what I wanted. Resolving once CI is green."},
+					}},
 				{Kind: "comment", Author: "rdavis", At: b.ago(18 * m), Body: "Heads up @you: the Flight transport work on `main` changed the same writer, so expect a conflict in `online_writer.py` when you rebase."},
 			},
 		},
@@ -225,6 +228,13 @@ func (b *Backend) load() {
 	}
 	// The author turned on auto-merge; it waits for your review.
 	b.details[1188].AutoMerge = &github.AutoMerge{Method: "SQUASH", By: "tnguyen", At: b.ago(5 * time.Hour)}
+
+	// Every sample PR was opened as it is now, except four that changed since: rdavis
+	// commented on #4821 after your reply, #312 was approved, #1188 and #77 moved on.
+	for _, p := range b.prs {
+		b.seen[p.Number] = p.UpdatedAt
+	}
+	b.seen[4821], b.seen[312], b.seen[1188], b.seen[77] = b.ago(90*m), b.ago(4*h), b.ago(8*h), b.ago(2*day)
 }
 
 // sampleCommits makes up a commit history for a sample PR, oldest first.

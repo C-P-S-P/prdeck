@@ -455,3 +455,61 @@ func TestReviewOnSeveralLines(t *testing.T) {
 		t.Errorf("ranged thread: %+v", last)
 	}
 }
+
+func TestUnreadAndNew(t *testing.T) {
+	c := start(t)
+	list := func() map[int]github.PR {
+		var res struct{ PRs []github.PR }
+		_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+		by := map[int]github.PR{}
+		for _, p := range res.PRs {
+			by[p.Number] = p
+		}
+		return by
+	}
+	prs := list()
+	if !prs[4821].Unread || prs[4807].Unread {
+		t.Fatalf("demo data changed: #4821 should be unread and #4807 not")
+	}
+
+	// The field names the desktop reads.
+	var raw struct {
+		Detail struct {
+			LastSeen string `json:"lastSeen"`
+			Timeline []struct {
+				Author  string `json:"author"`
+				New     bool   `json:"new"`
+				Replies []struct {
+					Author string `json:"author"`
+					New    bool   `json:"new"`
+				} `json:"replies"`
+			} `json:"timeline"`
+		} `json:"detail"`
+	}
+	_ = json.Unmarshal(c.call("cachedDetail", map[string]any{"pr": prs[4821]}).Result, &raw)
+	var marked []string
+	for _, e := range raw.Detail.Timeline {
+		if e.New {
+			marked = append(marked, e.Author)
+		}
+		for _, r := range e.Replies {
+			if r.New {
+				marked = append(marked, "↳"+r.Author)
+			}
+		}
+	}
+	if raw.Detail.LastSeen == "" || strings.Join(marked, " ") != "↳mlin rdavis" {
+		t.Errorf("new since %q: %v; want mlin's reply and rdavis's comment, not your reply", raw.Detail.LastSeen, marked)
+	}
+
+	if list()[4821].Unread {
+		t.Error("opened: #4821 should be read on the next search")
+	}
+	var again struct{ Detail github.Detail }
+	_ = json.Unmarshal(c.call("cachedDetail", map[string]any{"pr": prs[4821]}).Result, &again)
+	for _, e := range again.Detail.Timeline {
+		if e.New {
+			t.Errorf("opened again: nothing should be new: %+v", e)
+		}
+	}
+}
