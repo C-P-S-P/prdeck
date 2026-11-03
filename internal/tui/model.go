@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"runtime"
@@ -129,9 +130,22 @@ type Model struct {
 	md   *markdown
 }
 
+// navKeys are taken by navigation here before commands are looked up, on top of
+// config.Reserved. The desktop app runs commands on them, so the config allows them.
+var navKeys = map[string]bool{
+	"g": true, "G": true, "h": true, "l": true, "enter": true, "tab": true, "shift+tab": true, "esc": true,
+	"up": true, "down": true, "left": true, "right": true, "home": true, "end": true,
+	"pgup": true, "pgdown": true, "ctrl+d": true, "ctrl+u": true, "ctrl+r": true, "ctrl+c": true,
+}
+
 // New builds the UI model.
 func New(be Backend) Model {
 	cfg := be.Config()
+	for _, c := range cfg.Commands {
+		if navKeys[c.Key] {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("command %q: key %q is used for navigation in the terminal app", c.Name, c.Key))
+		}
+	}
 	var filters []config.Filter
 	for _, f := range cfg.Filters {
 		if !f.Hidden {

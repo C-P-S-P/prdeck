@@ -705,7 +705,7 @@ type barItem struct {
 func (m Model) barItems() []barItem {
 	var items []barItem
 	for _, c := range m.cfg.Commands {
-		if !c.OnBar() || c.Key == "" {
+		if !c.OnBar() || c.Key == "" || navKeys[c.Key] {
 			continue
 		}
 		st := sKey

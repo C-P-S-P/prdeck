@@ -285,6 +285,20 @@ func TestFetchRunsAtOnce(t *testing.T) {
 	}
 }
 
+func TestNavigationKeyCommandWarns(t *testing.T) {
+	cfg := config.Default()
+	cfg.Commands = append(cfg.Commands, config.Command{Name: "Lint", Key: "l", Run: "make lint", Bar: cfg.Commands[0].Bar})
+	m := New(&fakeBackend{cfg: cfg})
+	if len(m.cfg.Warnings) != 1 || !strings.Contains(m.cfg.Warnings[0], `"Lint"`) {
+		t.Errorf("warnings = %v", m.cfg.Warnings)
+	}
+	for _, it := range m.barItems() {
+		if it.key == "l" {
+			t.Error("the key bar offers l, which only switches panes here")
+		}
+	}
+}
+
 func TestPromptFillsInput(t *testing.T) {
 	be, m := newTest(t)
 	m.cfg.Commands = append(m.cfg.Commands, config.Command{Name: "Commit", Key: "m", Prompt: "Message", Run: "git commit -m {input}"})
