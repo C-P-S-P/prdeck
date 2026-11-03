@@ -39,6 +39,7 @@ func (p PR) CIFailed() bool { return p.CheckState == "FAILURE" || p.CheckState =
 // Detail is everything the PR view shows.
 type Detail struct {
 	PR
+	NodeID       string     `json:"nodeId"` // GitHub's ID for the PR, for comments and reviews
 	Body         string     `json:"body"`
 	Additions    int        `json:"additions"`
 	Deletions    int        `json:"deletions"`
@@ -93,6 +94,7 @@ type Event struct {
 	Path     string    `json:"path"`
 	Line     int       `json:"line"`
 	DiffHunk string    `json:"diffHunk"`
+	ThreadID string    `json:"threadId"` // review threads: GitHub's ID, for replies
 	Resolved bool      `json:"resolved"`
 	Outdated bool      `json:"outdated"`
 	Replies  []Reply   `json:"replies"`

@@ -135,6 +135,33 @@ func (s *Service) Login(ctx context.Context) (string, error) {
 	return gh.Login(ctx)
 }
 
+// Comment adds a comment to the PR whose node ID is prID.
+func (s *Service) Comment(ctx context.Context, prID, body string) error {
+	gh := s.client()
+	if gh == nil {
+		return ErrSignedOut
+	}
+	return gh.Comment(ctx, prID, body)
+}
+
+// Review approves the PR, requests changes, or leaves a review comment.
+func (s *Service) Review(ctx context.Context, prID, event, body string) error {
+	gh := s.client()
+	if gh == nil {
+		return ErrSignedOut
+	}
+	return gh.Review(ctx, prID, event, body)
+}
+
+// ReplyThread answers a review thread.
+func (s *Service) ReplyThread(ctx context.Context, threadID, body string) error {
+	gh := s.client()
+	if gh == nil {
+		return ErrSignedOut
+	}
+	return gh.ReplyThread(ctx, threadID, body)
+}
+
 // ConfigPath is the config file the service reads and writes.
 func (s *Service) ConfigPath() string { return s.cfgPath }
 

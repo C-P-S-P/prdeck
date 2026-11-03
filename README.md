@@ -96,8 +96,12 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 | **First-run setup**: sign in with GitHub (through `gh`), pick your code folders and editor | **`⌘T` go to PR**: any open PR by number, title, repo or author |
 | ![Uncommitted changes](docs/screenshots/desktop-changes.png) | ![Missing clone](docs/screenshots/desktop-noclone.png) |
 | **Uncommitted changes**: `s` stash or `d` drop, then the command runs | **No clone yet**: use one found on disk, type a path, or clone |
+| ![Comment and review](docs/screenshots/desktop-review.png) | |
+| **Comment, approve or request changes**, and reply on code threads | |
 
 - **PR text like github.com**: images (your GitHub login is used for GitHub-hosted ones), `<img width>`, `<details>`, tables of screenshots side by side, syntax-highlighted code, `[!NOTE]`/`[!WARNING]` boxes, emoji and linked @mentions. Text is selectable.
+- **Comment and review**: a reply box at the end of every conversation (Write / Preview) with Comment, Approve and Request changes, and Reply on each code thread. Drafts are kept per PR. `⌘⇧C` or the Review button jumps there; `⌘↵` comments.
+- **Profile photos** from GitHub next to every author and reviewer.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
 - **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
 
@@ -120,6 +124,7 @@ cargo run --release             # your PRs (uses your gh login)
 | `⌘1`–`⌘9`, `⌘⇧[` `⌘⇧]`, `⌃Tab` | switch tabs |
 | `⌘R` | refresh |
 | `⌘O` / `⌘⇧O` | open in editor / on GitHub |
+| `⌘⇧C` / `⌘↵` | write a comment or review / post the comment |
 | `⌘B` | hide the sidebar |
 | `⌘,` | edit the config |
 | your command keys | run that command; `esc` closes the command bar |

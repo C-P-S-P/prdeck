@@ -48,6 +48,13 @@ type Backend interface {
 	ListClones(ctx context.Context) []repos.DiskClone
 }
 
+// writer is a backend that can comment on and review PRs.
+type writer interface {
+	Comment(ctx context.Context, prID, body string) error
+	Review(ctx context.Context, prID, event, body string) error
+	ReplyThread(ctx context.Context, threadID, body string) error
+}
+
 // imageFetcher is a backend that can download images with the user's GitHub login.
 type imageFetcher interface {
 	FetchImage(ctx context.Context, url string) ([]byte, string, error)
@@ -273,6 +280,30 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"data": base64.StdEncoding.EncodeToString(data), "type": kind}, nil
+
+	case "comment", "review", "replyThread":
+		p, err := decode[struct{ PRID, ThreadID, Event, Body string }](raw)
+		if err != nil {
+			return nil, err
+		}
+		w, ok := s.b.(writer)
+		if !ok {
+			return nil, errors.New("this backend cannot write to GitHub")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		switch method {
+		case "comment":
+			err = w.Comment(ctx, p.PRID, p.Body)
+		case "review":
+			err = w.Review(ctx, p.PRID, p.Event, p.Body)
+		default:
+			err = w.ReplyThread(ctx, p.ThreadID, p.Body)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true}, nil
 
 	case "setupStatus":
 		return s.setupStatus()

@@ -149,7 +149,7 @@ func (c *Client) Search(ctx context.Context, filter string, limit int) ([]PR, st
 const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      number title url body isDraft state updatedAt createdAt
+      id number title url body isDraft state updatedAt createdAt
       headRefName baseRefName isCrossRepository mergeable reviewDecision
       additions deletions changedFiles
       author { login }
@@ -172,7 +172,7 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
       latestReviews(first: 20) { nodes { author { login } state } }
       reviews(last: 50) { nodes { author { login } state body submittedAt } }
       reviewThreads(last: 50) { nodes {
-        isResolved isOutdated path line
+        id isResolved isOutdated path line
         comments(first: 30) { nodes { author { login } body createdAt diffHunk } }
       } }
     }
@@ -181,6 +181,7 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
 
 type detailNode struct {
 	prNode
+	ID           string `json:"id"`
 	Body         string `json:"body"`
 	Additions    int    `json:"additions"`
 	Deletions    int    `json:"deletions"`
@@ -269,6 +270,7 @@ type detailNode struct {
 	} `json:"reviews"`
 	ReviewThreads struct {
 		Nodes []struct {
+			ID         string `json:"id"`
 			IsResolved bool   `json:"isResolved"`
 			IsOutdated bool   `json:"isOutdated"`
 			Path       string `json:"path"`
@@ -309,7 +311,7 @@ func (c *Client) Detail(ctx context.Context, repo string, number int) (*Detail, 
 
 func (n *detailNode) toDetail() *Detail {
 	// prNode's comments/commits fields are shadowed by the richer ones above; fill them by hand.
-	d := &Detail{PR: n.prNode.toPR()}
+	d := &Detail{PR: n.prNode.toPR(), NodeID: n.ID}
 	d.Comments = n.Comments.TotalCount
 	d.Body, d.Additions, d.Deletions, d.ChangedFiles = n.Body, n.Additions, n.Deletions, n.ChangedFiles
 	d.Commits = n.CommitCount.TotalCount
@@ -387,7 +389,7 @@ func (n *detailNode) toDetail() *Detail {
 		first := t.Comments.Nodes[0]
 		ev := Event{
 			Kind: "thread", Author: loginOf(first.Author), Body: first.Body, At: first.CreatedAt,
-			Path: t.Path, Line: t.Line, DiffHunk: first.DiffHunk, Resolved: t.IsResolved, Outdated: t.IsOutdated,
+			Path: t.Path, Line: t.Line, DiffHunk: first.DiffHunk, Resolved: t.IsResolved, Outdated: t.IsOutdated, ThreadID: t.ID,
 		}
 		for _, c := range t.Comments.Nodes[1:] {
 			ev.Replies = append(ev.Replies, Reply{Author: loginOf(c.Author), Body: c.Body, At: c.CreatedAt})

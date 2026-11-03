@@ -18,12 +18,14 @@ use crate::model::*;
 use crate::rpc::Rpc;
 use crate::theme::*;
 
+mod review;
 mod setup;
+use review::*;
 use setup::*;
 
 gpui_kit::actions!(
     prdeck,
-    [GoToPr, Filters, CloseTab, ReopenTab, Refresh, NextTab, PrevTab, OpenConfig, OpenInEditor, OpenOnGitHub, ToggleSidebar, RunSetup]
+    [GoToPr, Filters, CloseTab, ReopenTab, Refresh, NextTab, PrevTab, OpenConfig, OpenInEditor, OpenOnGitHub, ToggleSidebar, RunSetup, CommentOnPr]
 );
 
 #[derive(Clone, Copy, PartialEq)]
@@ -123,6 +125,11 @@ pub struct Deck {
     want: Option<String>,
     /// Scroll position of the PR's conversation; back to the top on a new PR.
     detail_scroll: ScrollHandle,
+    /// Reply boxes, by PR key, and the code thread being replied to.
+    drafts: HashMap<String, Draft>,
+    thread_reply: Option<ThreadReply>,
+    /// A short green note after posting.
+    notice: Option<String>,
     /// First-run setup, while it shows.
     setup: Option<Setup>,
     force_setup: bool,
@@ -161,6 +168,9 @@ impl Deck {
             want: None,
             detail_scroll: ScrollHandle::new(),
             setup: None,
+            drafts: HashMap::new(),
+            thread_reply: None,
+            notice: None,
             force_setup: std::env::args().any(|a| a == "--setup"),
             _timer: None,
         };
@@ -217,6 +227,7 @@ impl Deck {
                             this.banner = Some(format!("Config: {}", h.warnings.join(" · ")));
                         }
                         let demo = h.demo;
+                        this.images.show_faces(!demo);
                         this.hello = h;
                         let signed_in = status.as_ref().is_none_or(|st| st.signed_in);
                         // Setup shows on the first launch and whenever nobody is signed
@@ -862,6 +873,10 @@ impl Deck {
         }
     }
 
+    fn on_comment(&mut self, _: &CommentOnPr, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_composer(window, cx);
+    }
+
     fn on_run_setup(&mut self, _: &RunSetup, window: &mut Window, cx: &mut Context<Self>) {
         self.open_setup(window, cx);
     }
@@ -898,7 +913,7 @@ impl Deck {
 
     fn typing(&self, window: &Window, cx: &App) -> bool {
         let focused = |s: &Entity<InputState>| s.read(cx).focus_handle(cx).is_focused(window);
-        if self.setup.as_ref().is_some_and(|s| focused(s.add_input())) {
+        if self.setup.as_ref().is_some_and(|s| focused(s.add_input())) || self.typing_review(window, cx) {
             return true;
         }
         match self.run.as_ref().map(|r| &r.stage) {
@@ -1121,7 +1136,7 @@ impl Deck {
                     .on_click(cx.listener(|this, _, _, cx| this.load(cx)))
                     .child(icon("refresh-cw", 14., SOFT)),
             )
-            .when(!self.hello.viewer.is_empty(), |d| d.child(avatar(&self.hello.viewer, 24.)))
+            .when(!self.hello.viewer.is_empty(), |d| d.child(self.images.face(&self.hello.viewer, 24.)))
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1542,6 +1557,12 @@ impl Deck {
                                         .child("Worktree"),
                                 )
                             })
+                            .child(
+                                button_look("review")
+                                    .on_click(cx.listener(|this, _, window, cx| this.focus_composer(window, cx)))
+                                    .child(icon("message-square", 13., SOFT))
+                                    .child("Review"),
+                            )
                             .when_some(self.find_cmd(|c| c.branch && c.run.is_empty() && c.action.is_empty()), |d, c| {
                                 d.child(
                                     button_look("checkout")
@@ -1655,7 +1676,7 @@ impl Deck {
 
     fn section_body(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
         match self.section {
-            Section::Conversation => self.conversation(d).into_any_element(),
+            Section::Conversation => self.conversation(d, cx).into_any_element(),
             Section::Checks => checks_view(d).into_any_element(),
             Section::Commits => self.commits_view(d, cx),
             Section::Files => self.files_view(d, cx),
@@ -1730,7 +1751,7 @@ impl Deck {
                                 .gap(px(6.))
                                 .text_size(px(12.))
                                 .text_color(rgb(SOFT))
-                                .child(avatar(&c.author, 16.))
+                                .child(self.images.face(&c.author, 16.))
                                 .child(div().text_color(rgb(TEXT_SOFT)).child(c.author.clone()))
                                 .child(format!("committed {} ago", ago(&c.at)))
                                 .when(c.additions + c.deletions > 0, |d| {
@@ -1872,13 +1893,13 @@ impl Deck {
             .into_any_element()
     }
 
-    fn conversation(&self, d: &Detail) -> impl IntoElement {
+    fn conversation(&self, d: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
         let key = d.pr.key();
         let mut items: Vec<AnyElement> = vec![
             card()
                 .child(
                     card_head()
-                        .child(avatar(&d.pr.author, 20.))
+                        .child(self.images.face(&d.pr.author, 20.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(d.pr.author.clone()))
                         .child(format!("opened this {} ago", ago(&d.pr.created_at)))
                         .child(div().px(px(6.)).border_1().border_color(rgb(BORDER_3)).text_size(px(11.)).child("Author")),
@@ -1895,8 +1916,10 @@ impl Deck {
                 .into_any_element(),
         ];
         for (i, e) in d.timeline.iter().enumerate() {
-            items.push(event_view(&key, i, e, &self.images));
+            let reply = self.thread_reply_view(&key, e, cx);
+            items.push(event_view(&key, i, e, &self.images, reply));
         }
+        items.push(self.composer(d, cx));
         div().flex().flex_col().gap(px(14.)).children(items)
     }
 
@@ -1988,7 +2011,7 @@ impl Deck {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(avatar(&r.login, 18.))
+                            .child(self.images.face(&r.login, 18.))
                             .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(r.login.clone()))
                             .child(div().text_color(rgb(color)).child(label))
                             .into_any_element()
@@ -2441,6 +2464,26 @@ impl Deck {
     }
 
     fn banner_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.banner.is_none() {
+            let note = self.notice.clone()?;
+            return Some(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(14.))
+                    .py(px(6.))
+                    .bg(rgb(0x1c2a1f))
+                    .border_b_1()
+                    .border_color(rgb(0x2f4a2c))
+                    .text_size(px(12.))
+                    .text_color(rgb(GREEN))
+                    .child("✓")
+                    .child(note)
+                    .into_any_element(),
+            );
+        }
         let msg = self.banner.clone()?;
         Some(
             div()
@@ -2533,7 +2576,7 @@ fn checks_view(d: &Detail) -> impl IntoElement {
         .when(d.checks.is_empty(), |c| c.child(div().p(px(12.)).text_color(rgb(DIM)).child("No checks reported.")))
 }
 
-fn event_view(key: &str, i: usize, e: &Event, images: &Images) -> AnyElement {
+fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<AnyElement>) -> AnyElement {
     let (verb, verb_color, border) = match (e.kind.as_str(), e.state.as_str()) {
         ("review", "APPROVED") => ("approved these changes".to_string(), GREEN, 0x2f4a2c),
         ("review", "CHANGES_REQUESTED") => ("requested changes".to_string(), RED, 0x5a3236),
@@ -2633,19 +2676,22 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images) -> AnyElement {
                         .gap(px(8.))
                         .text_size(px(12.))
                         .text_color(rgb(SOFT))
-                        .child(avatar(&r.author, 18.))
+                        .child(images.face(&r.author, 18.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(r.author.clone()))
                         .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&r.at)))),
                 )
                 .child(md_body(format!("ev-{key}-{i}-{j}"), &r.body, images)),
         );
     }
+    if let Some(reply) = reply {
+        body = body.child(reply);
+    }
     card()
         .border_color(rgb(border))
         .child(
             card_head()
                 .h(px(34.))
-                .child(avatar(&e.author, 20.))
+                .child(images.face(&e.author, 20.))
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
                 .child(div().min_w(px(0.)).truncate().text_color(rgb(verb_color)).child(verb))
                 .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at)))),
@@ -2655,7 +2701,8 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images) -> AnyElement {
 }
 
 impl Render for Deck {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_draft(window, cx);
         div()
             .id("deck")
             .key_context("Deck")
@@ -2673,6 +2720,7 @@ impl Render for Deck {
             .on_action(cx.listener(Self::on_open_on_github))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_run_setup))
+            .on_action(cx.listener(Self::on_comment))
             .size_full()
             .relative()
             .flex()
@@ -2729,6 +2777,38 @@ impl Deck {
                 let y: f32 = s[7..].parse().unwrap_or(0.);
                 self.detail_scroll.set_offset(point(px(0.), px(-y)));
             }
+            "compose" => self.focus_composer(window, cx),
+            s if s.starts_with("draft:") => {
+                if let Some(d) = self.selected.as_ref().and_then(|k| self.drafts.get(k)) {
+                    let text = s[6..].replace("\\n", "\n");
+                    d.input.update(cx, |st, cx| st.set_value(text, window, cx));
+                }
+            }
+            "post:comment" | "post:approve" | "post:changes" => {
+                if let Some(key) = self.selected.clone() {
+                    let what = match state {
+                        "post:comment" => Post::Comment,
+                        "post:approve" => Post::Approve,
+                        _ => Post::RequestChanges,
+                    };
+                    self.post(&key, what, window, cx);
+                }
+            }
+            "reply:first" => {
+                let found = self.selected.as_ref().and_then(|k| {
+                    self.details.get(k)?.timeline.iter().find(|e| !e.thread_id.is_empty()).map(|e| (k.clone(), e.thread_id.clone()))
+                });
+                if let Some((key, thread)) = found {
+                    self.start_reply(key, thread, window, cx);
+                }
+            }
+            s if s.starts_with("replydraft:") => {
+                if let Some(r) = self.thread_reply.as_ref() {
+                    let text = s[11..].to_string();
+                    r.input.update(cx, |st, cx| st.set_value(text, window, cx));
+                }
+            }
+            "post:reply" => self.send_reply(window, cx),
             "setup-signin" => self.sign_in(cx),
             "setup-folders" => self.setup_step(SetupStep::Folders, cx),
             "setup-editor" => self.setup_step(SetupStep::Editor, cx),

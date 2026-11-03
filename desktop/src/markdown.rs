@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use base64::Engine as _;
@@ -31,12 +31,14 @@ pub struct Images {
     /// Bumped whenever an image arrives, so views lay themselves out again (table
     /// columns are measured once, and a loading image measures as one pixel).
     generation: Arc<AtomicU64>,
+    /// Load GitHub profile photos (off for the sample data's made-up people).
+    faces: Arc<AtomicBool>,
 }
 
 impl Images {
     pub fn new() -> (Self, mpsc::UnboundedReceiver<String>) {
         let (tx, rx) = mpsc::unbounded();
-        (Images { map: Default::default(), queue: tx, generation: Default::default() }, rx)
+        (Images { map: Default::default(), queue: tx, generation: Default::default(), faces: Default::default() }, rx)
     }
 
     /// Stores a downloaded image (or the failure to get one).
@@ -47,6 +49,41 @@ impl Images {
         };
         self.map.lock().unwrap().insert(url, entry);
         self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn show_faces(&self, on: bool) {
+        self.faces.store(on, Ordering::Relaxed);
+    }
+
+    /// Someone's GitHub profile photo, or their initials until it loads (and when it
+    /// cannot, or for the sample data).
+    pub fn face(&self, login: &str, size: f32) -> AnyElement {
+        let login = login.trim();
+        if self.faces.load(Ordering::Relaxed) && !login.is_empty() && login != "ghost" {
+            let name = login.trim_end_matches("[bot]");
+            if let Some(photo) = self.ready(&format!("https://github.com/{name}.png?size=96")) {
+                return img(ImageSource::Image(photo))
+                    .size(px(size))
+                    .flex_none()
+                    .rounded(px(size / 2.))
+                    .into_any_element();
+            }
+        }
+        avatar(login, size).into_any_element()
+    }
+
+    /// The image when it has arrived; otherwise starts loading it.
+    fn ready(&self, url: &str) -> Option<Arc<Image>> {
+        let mut map = self.map.lock().unwrap();
+        match map.get(url) {
+            Some(Entry::Ready(img)) => Some(img.clone()),
+            Some(_) => None,
+            None => {
+                map.insert(url.to_string(), Entry::Loading);
+                let _ = self.queue.unbounded_send(url.to_string());
+                None
+            }
+        }
     }
 
     fn source(&self, url: &str) -> ImageSource {

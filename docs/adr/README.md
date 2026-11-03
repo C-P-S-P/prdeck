@@ -22,8 +22,8 @@ This folder holds the architecture decision records (ADRs): one short file per d
 | A command meets uncommitted work: stash or drop, your choice | No clone of the repo: pick one found on disk, or clone it |
 | ![Go to a pull request](../screenshots/desktop-goto.png) | ![First-run setup](../screenshots/desktop-setup.png) |
 | `⌘T` jumps to any PR | First-run setup: GitHub sign-in, folders, editor |
-| ![Files changed](../screenshots/desktop-files.png) | ![The filter palette in the terminal](../screenshots/palette.png) |
-| Changed files with their size of change | The terminal app's filter palette |
+| ![Files changed](../screenshots/desktop-files.png) | ![Comment and review](../screenshots/desktop-review.png) |
+| Changed files with their size of change | Comment, approve or request changes, reply on threads |
 
 All screenshots use the sample data from `prdeck demo` / `--demo`.
 
@@ -113,5 +113,6 @@ sequenceDiagram
 | [0009](0009-desktop-uses-the-core-over-prdeck-serve.md) | The desktop app uses the core over `prdeck serve` |
 | [0010](0010-pr-text-rendered-like-github.md) | PR text on the desktop is rendered like github.com |
 | [0011](0011-first-run-setup.md) | First-run setup signs in through gh |
+| [0012](0012-comment-and-review-from-the-app.md) | Comment and review from the app |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.

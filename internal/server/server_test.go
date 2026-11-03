@@ -162,3 +162,66 @@ func TestDetailForDesktop(t *testing.T) {
 		t.Error("empty lists should be [] in JSON")
 	}
 }
+
+func TestCommentReviewAndReply(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	var mine, theirs github.PR
+	for _, p := range res.PRs {
+		switch {
+		case p.Author == "you" && mine.Number == 0:
+			mine = p
+		case p.Author != "you" && theirs.Number == 0:
+			theirs = p
+		}
+	}
+	detail := func(pr github.PR) github.Detail {
+		var d github.Detail
+		if err := json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	d := detail(theirs)
+	if d.NodeID == "" {
+		t.Fatal("detail has no node ID to comment on")
+	}
+	before := len(d.Timeline)
+
+	if r := c.call("comment", map[string]any{"prId": d.NodeID, "body": "  "}); r.Error == nil {
+		t.Error("an empty comment should be refused")
+	}
+	if r := c.call("comment", map[string]any{"prId": d.NodeID, "body": "Looks good to me"}); r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	if r := c.call("review", map[string]any{"prId": d.NodeID, "event": "REQUEST_CHANGES"}); r.Error == nil {
+		t.Error("requesting changes without saying what should be refused")
+	}
+	if r := c.call("review", map[string]any{"prId": d.NodeID, "event": "APPROVE"}); r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	d = detail(theirs)
+	if len(d.Timeline) != before+2 || d.Timeline[before].Body != "Looks good to me" || d.Timeline[before+1].State != "APPROVED" {
+		t.Errorf("timeline after comment and approval: %+v", d.Timeline[before:])
+	}
+
+	m := detail(mine)
+	if r := c.call("review", map[string]any{"prId": m.NodeID, "event": "APPROVE"}); r.Error == nil {
+		t.Error("approving your own PR should be refused")
+	}
+	for _, e := range m.Timeline {
+		if e.Kind == "thread" {
+			if r := c.call("replyThread", map[string]any{"threadId": e.ThreadID, "body": "Fixed"}); r.Error != nil {
+				t.Fatal(r.Error.Message)
+			}
+			for _, e2 := range detail(mine).Timeline {
+				if e2.ThreadID == e.ThreadID && (len(e2.Replies) == 0 || e2.Replies[len(e2.Replies)-1].Body != "Fixed") {
+					t.Errorf("reply missing: %+v", e2.Replies)
+				}
+			}
+			return
+		}
+	}
+	t.Error("demo data changed: need a review thread on one of your PRs")
+}

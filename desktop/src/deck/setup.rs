@@ -384,7 +384,7 @@ impl Deck {
                         .border_1()
                         .border_color(rgb(0x2f4a2c))
                         .bg(rgb(0x1c2a1f))
-                        .child(avatar(&st.login, 28.))
+                        .child(self.images.face(&st.login, 28.))
                         .child(
                             div()
                                 .flex()

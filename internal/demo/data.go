@@ -184,7 +184,12 @@ func (b *Backend) load() {
 		b.prs = append(b.prs, s.pr)
 		commits, files := sampleCommits(s, b.start), sampleFiles(s)
 		b.flags[s.pr.Number] = s.flags
-		d := &github.Detail{PR: s.pr, Body: strings.Join(s.body, "\n"), Commits: s.commits, ChangedFiles: s.files, Additions: s.add, Deletions: s.del, Labels: s.labels, Timeline: s.timeline, CommitList: commits, Files: files}
+		for i := range s.timeline {
+			if s.timeline[i].Kind == "thread" {
+				s.timeline[i].ThreadID = fmt.Sprintf("demo-thread-%d-%d", s.pr.Number, i)
+			}
+		}
+		d := &github.Detail{NodeID: fmt.Sprintf("demo-pr-%d", s.pr.Number), PR: s.pr, Body: strings.Join(s.body, "\n"), Commits: s.commits, ChangedFiles: s.files, Additions: s.add, Deletions: s.del, Labels: s.labels, Timeline: s.timeline, CommitList: commits, Files: files}
 		for _, r := range s.reviewers {
 			d.Reviewers = append(d.Reviewers, github.Reviewer{Login: r[0], State: r[1]})
 		}

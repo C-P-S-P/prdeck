@@ -92,15 +92,88 @@ func (b *Backend) Search(_ context.Context, q string) ([]github.PR, error) {
 }
 
 func (b *Backend) CachedDetail(pr github.PR) (*github.Detail, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	d, ok := b.details[pr.Number]
-	return d, ok
+	if ok {
+		c := *d
+		return &c, true
+	}
+	return nil, false
 }
 
 func (b *Backend) Detail(_ context.Context, pr github.PR) (*github.Detail, error) {
-	if d, ok := b.details[pr.Number]; ok {
+	if d, ok := b.CachedDetail(pr); ok {
 		return d, nil
 	}
 	return &github.Detail{PR: pr}, nil
+}
+
+// Comment, Review and ReplyThread add to the sample conversation; nothing is sent.
+
+func (b *Backend) detailByID(id string) (*github.Detail, error) {
+	for _, d := range b.details {
+		if d.NodeID == id {
+			return d, nil
+		}
+	}
+	return nil, fmt.Errorf("no sample PR %q", id)
+}
+
+func (b *Backend) Comment(_ context.Context, prID, body string) error {
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("write a comment first")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	d, err := b.detailByID(prID)
+	if err != nil {
+		return err
+	}
+	d.Timeline = append(d.Timeline, github.Event{Kind: "comment", Author: "you", Body: body, At: time.Now()})
+	return nil
+}
+
+func (b *Backend) Review(_ context.Context, prID, event, body string) error {
+	if err := github.CheckReview(event, body); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	d, err := b.detailByID(prID)
+	if err != nil {
+		return err
+	}
+	if d.Author == "you" && event != github.CommentReview {
+		return fmt.Errorf("you can't approve or request changes on your own pull request")
+	}
+	state := map[string]string{github.Approve: "APPROVED", github.RequestChanges: "CHANGES_REQUESTED", github.CommentReview: "COMMENTED"}[event]
+	d.Timeline = append(d.Timeline, github.Event{Kind: "review", Author: "you", State: state, Body: body, At: time.Now()})
+	for i, r := range d.Reviewers {
+		if r.Login == "you" {
+			d.Reviewers = append(d.Reviewers[:i], d.Reviewers[i+1:]...)
+			break
+		}
+	}
+	d.Reviewers = append(d.Reviewers, github.Reviewer{Login: "you", State: state})
+	return nil
+}
+
+func (b *Backend) ReplyThread(_ context.Context, threadID, body string) error {
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("write a reply first")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, d := range b.details {
+		for i := range d.Timeline {
+			if d.Timeline[i].ThreadID == threadID {
+				d.Timeline[i].Replies = append(d.Timeline[i].Replies, github.Reply{Author: "you", Body: body, At: time.Now()})
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("no sample thread %q", threadID)
 }
 
 func (b *Backend) ResolveFolder(pr github.PR, wantWorktree bool) (core.Folder, error) {

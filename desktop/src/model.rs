@@ -98,6 +98,8 @@ impl Pr {
 pub struct Detail {
     #[serde(flatten)]
     pub pr: Pr,
+    /// GitHub's ID for the PR, for comments and reviews.
+    pub node_id: String,
     pub body: String,
     pub additions: u64,
     pub deletions: u64,
@@ -203,6 +205,8 @@ pub struct Event {
     pub path: String,
     pub line: u64,
     pub diff_hunk: String,
+    /// Review threads: GitHub's ID, for replies.
+    pub thread_id: String,
     pub resolved: bool,
     pub outdated: bool,
     #[serde(deserialize_with = "null_vec")]
