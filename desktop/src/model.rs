@@ -52,6 +52,13 @@ pub struct Cmd {
     pub worktree: bool,
 }
 
+impl Cmd {
+    /// Approve, Request changes and Comment: on the desktop the review box does these.
+    pub fn reviews(&self) -> bool {
+        matches!(self.action.as_str(), "approve" | "request_changes" | "comment")
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pr {
@@ -117,6 +124,28 @@ pub struct Detail {
     pub commit_list: Vec<Commit>,
     #[serde(deserialize_with = "null_vec")]
     pub files: Vec<ChangedFile>,
+    /// Set while auto-merge is on: GitHub merges the PR once checks and reviews pass.
+    pub auto_merge: Option<AutoMerge>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AutoMerge {
+    /// MERGE, SQUASH or REBASE.
+    pub method: String,
+    pub by: String,
+    pub at: String,
+}
+
+impl AutoMerge {
+    /// The method the way GitHub's merge button names it.
+    pub fn word(&self) -> &'static str {
+        match self.method.as_str() {
+            "SQUASH" => "squash and merge",
+            "REBASE" => "rebase and merge",
+            _ => "merge",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -258,6 +287,8 @@ pub struct Plan {
     pub pre: String,
     pub script: String,
     pub action: String,
+    /// The text a GitHub write sends (a comment, what should change).
+    pub input: String,
     pub folder: Folder,
     pub confirm: bool,
     pub terminal: bool,
@@ -429,7 +460,7 @@ pub struct DraftThread {
 
 #[cfg(test)]
 mod tests {
-    use super::{Check, Detail};
+    use super::{Check, Cmd, Detail};
 
     #[test]
     fn checks_read_links_and_runs() {
@@ -447,5 +478,17 @@ mod tests {
         // Saved before checks had links: still reads, nothing to open.
         assert_eq!(d.checks[2].log_url(), None);
         assert_eq!(Check::default().run_id, 0);
+    }
+
+    #[test]
+    fn auto_merge_and_review_commands() {
+        let d: Detail = serde_json::from_str(r#"{"autoMerge": {"method": "SQUASH", "by": "tnguyen", "at": "2026-11-04T10:00:00Z"}}"#).unwrap();
+        assert_eq!(d.auto_merge.as_ref().map(|a| (a.word(), a.by.as_str())), Some(("squash and merge", "tnguyen")));
+        // Off, or saved before PR Deck knew about auto-merge.
+        assert!(serde_json::from_str::<Detail>("{}").unwrap().auto_merge.is_none());
+
+        let cmds: Vec<Cmd> = serde_json::from_str(r#"[{"name": "Approve", "action": "approve"}, {"name": "Merge when ready", "action": "automerge"}, {"name": "Push", "run": "git push"}]"#).unwrap();
+        let reviews: Vec<&str> = cmds.iter().filter(|c| c.reviews()).map(|c| c.name.as_str()).collect();
+        assert_eq!(reviews, ["Approve"]);
     }
 }

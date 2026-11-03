@@ -345,6 +345,7 @@ impl Deck {
                             .ml_auto()
                             .flex()
                             .gap(px(8.))
+                    .children(self.merge_button(d, cx))
                     .child(action("request-changes", label(Post::RequestChanges, "Request changes"), RED, Post::RequestChanges, !mine && !busy, cx))
                     .child(action("approve", label(Post::Approve, "Approve"), GREEN, Post::Approve, !mine && !busy, cx))
                     .child(
@@ -369,6 +370,40 @@ impl Deck {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Merge when ready, next to the review buttons. It runs the command, which asks
+    /// first; once auto-merge is on it says so instead.
+    fn merge_button(&self, d: &Detail, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let cmd = self.find_cmd(|c| c.action == "automerge")?;
+        if let Some(a) = &d.auto_merge {
+            return Some(
+                div()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(rgb(GREEN))
+                    .child(icon("git-merge", 13., GREEN))
+                    .child(format!("Auto-merge on · {}", a.word()))
+                    .into_any_element(),
+            );
+        }
+        if d.pr.is_draft || matches!(d.pr.state.as_str(), "MERGED" | "CLOSED") {
+            return None;
+        }
+        let (name, key) = (cmd.name.clone(), cmd.key.clone());
+        Some(
+            button_look("merge-when-ready")
+                .h(px(28.))
+                .text_size(px(12.))
+                .on_click(cx.listener(move |this, _, window, cx| this.start(cmd.clone(), window, cx)))
+                .child(icon("git-merge", 13., SOFT))
+                .child(name)
+                .when(!key.is_empty(), |b| b.child(kbd(key)))
+                .into_any_element(),
+        )
     }
 
     /// Under a code thread: a Reply link, or the reply box when replying.

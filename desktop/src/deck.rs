@@ -516,6 +516,11 @@ impl Deck {
             cx.notify();
             return;
         };
+        if cmd.reviews() {
+            // The review box comments and reviews here, with a preview and line
+            // comments; its keys open it rather than asking again in the command bar.
+            return self.focus_composer(window, cx);
+        }
         if cmd.prompt.is_empty() {
             self.prepare(pr, cmd, String::new(), window, cx);
             return;
@@ -568,13 +573,18 @@ impl Deck {
         let res = rpc.call::<ExecResult>("execute", json!({ "plan": plan, "changes": changes }));
         let pr = plan.pr.clone();
         let reload = plan.action == "clone" || !plan.pre.is_empty() || plan.action.is_empty();
-        let rerun = plan.action == "rerun";
+        let refresh = plan.action == "rerun" || plan.action == "automerge";
+        let merge = plan.action == "automerge";
         let silent = plan.silent;
         self.set_stage(Stage::Running(plan));
         cx.notify();
         cx.spawn(async move |this, cx| {
             let res = res.await;
             let _ = this.update(cx, |this, cx| {
+                if merge && res.as_ref().is_ok_and(|r| r.ok) {
+                    // A PR merged at once leaves the list of open ones.
+                    this.load(cx);
+                }
                 let stage = match res {
                     Ok(r) => {
                         let mut out = r.output.trim().to_string();
@@ -589,8 +599,8 @@ impl Deck {
                     Err(e) => Stage::Done { title: "Command".into(), ok: false, output: e.message },
                 };
                 this.set_stage(stage);
-                if rerun {
-                    // Show the re-run jobs as queued.
+                if refresh {
+                    // Show the re-run jobs as queued, or auto-merge as on.
                     this.refresh_detail(pr.clone(), cx);
                 }
                 if reload {
@@ -1484,12 +1494,16 @@ impl Deck {
         let detail = self.details.get(&key);
         let editor = if self.hello.editor.is_empty() { "editor".to_string() } else { self.hello.editor.clone() };
         let commits = detail.map(|d| d.commits).unwrap_or(0);
-        let (state_label, state_bg) = if pr.is_draft {
-            ("Draft", BG_HOVER)
+        // Merged from here (Merge when ready on a ready PR): the PR as loaded again says so.
+        let merged = detail.is_some_and(|d| d.pr.state == "MERGED");
+        let (state_label, state_bg, state_icon, state_fg) = if merged {
+            ("Merged", 0x241f30, "git-merge", PURPLE)
+        } else if pr.is_draft {
+            ("Draft", BG_HOVER, "git-pull-request-draft", state_color(&pr))
         } else if pr.conflict() {
-            ("Conflict", 0x2a2418)
+            ("Conflict", 0x2a2418, "git-pull-request", state_color(&pr))
         } else {
-            ("Open", 0x1c2a1f)
+            ("Open", 0x1c2a1f, "git-pull-request", state_color(&pr))
         };
 
         let header = div()
@@ -1540,13 +1554,9 @@ impl Deck {
                                             .gap(px(5.))
                                             .bg(rgb(state_bg))
                                             .border_1()
-                                            .border_color(rgb(state_color(&pr)))
-                                            .text_color(rgb(state_color(&pr)))
-                                            .child(icon(
-                                                if pr.is_draft { "git-pull-request-draft" } else { "git-pull-request" },
-                                                12.,
-                                                state_color(&pr),
-                                            ))
+                                            .border_color(rgb(state_fg))
+                                            .text_color(rgb(state_fg))
+                                            .child(icon(state_icon, 12., state_fg))
                                             .child(state_label),
                                     )
                                     .child(
@@ -1554,10 +1564,10 @@ impl Deck {
                                             .flex()
                                             .gap(px(4.))
                                             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(pr.author.clone()))
-                                            .child(if commits > 0 {
-                                                format!("wants to merge {commits} commit{} into", if commits == 1 { "" } else { "s" })
-                                            } else {
-                                                "wants to merge into".to_string()
+                                            .child(match (merged, commits) {
+                                                (true, _) => "merged into".to_string(),
+                                                (false, 0) => "wants to merge into".to_string(),
+                                                (false, n) => format!("wants to merge {n} commit{} into", if n == 1 { "" } else { "s" }),
                                             }),
                                     )
                                     .child(code_chip(pr.base.clone(), TEXT_SOFT))
@@ -1846,6 +1856,18 @@ impl Deck {
                 aside_section("Branch")
                     .child(div().font_family(MONO).text_color(rgb(BLUE_LIGHT)).truncate().child(pr.head.clone()))
                     .child(div().text_color(rgb(SOFT)).child(format!("into {}", pr.base)))
+                    .when_some(d.auto_merge.as_ref(), |s, a| {
+                        s.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_color(rgb(GREEN))
+                                .child(icon("git-merge", 12., GREEN))
+                                .child("Auto-merge on"),
+                        )
+                        .child(div().text_color(rgb(SOFT)).child(format!("GitHub will {} once checks and reviews pass · by {}", a.word(), a.by)))
+                    })
                     .when(pr.conflict(), |s| {
                         s.child(
                             div()
@@ -1976,7 +1998,8 @@ impl Deck {
             .commands
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.bar)
+            // Reviews and Merge when ready are buttons of the review box; Review goes there.
+            .filter(|(_, c)| c.bar && !c.reviews() && c.action != "automerge")
             .map(|(i, c)| {
                 let cmd = c.clone();
                 let active = self.run.as_ref().is_some_and(|r| r.cmd.name == c.name);
@@ -2791,6 +2814,12 @@ impl Deck {
                     self.start(c, window, cx);
                 }
             }
+            "merge" => {
+                if let Some(c) = self.find_cmd(|c| c.action == "automerge") {
+                    self.start(c, window, cx);
+                }
+            }
+            "confirm" => self.confirm("", cx),
             "noclone" => {
                 if let Some(pr) = self.prs.iter().find(|p| p.repo == "upstream/datakit").cloned() {
                     self.select(pr, cx);
