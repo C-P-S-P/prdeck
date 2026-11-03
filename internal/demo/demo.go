@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/C-P-S-P/prdeck/internal/cache"
-	"github.com/C-P-S-P/prdeck/internal/config"
-	"github.com/C-P-S-P/prdeck/internal/core"
-	"github.com/C-P-S-P/prdeck/internal/github"
-	"github.com/C-P-S-P/prdeck/internal/repos"
-	"github.com/C-P-S-P/prdeck/internal/runner"
+	"github.com/MasterPushers/prdeck/internal/cache"
+	"github.com/MasterPushers/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/core"
+	"github.com/MasterPushers/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/repos"
+	"github.com/MasterPushers/prdeck/internal/runner"
 )
 
 type Backend struct {
@@ -161,6 +161,7 @@ func (b *Backend) Review(_ context.Context, prID, event, body string, threads []
 		}
 		d.Timeline = append(d.Timeline, github.Event{
 			Kind: "thread", Author: "you", Body: t.Body, At: time.Now(), Path: t.Path, Line: t.Line, Side: t.Side,
+			StartLine: t.StartLine, StartSide: t.StartSide,
 			DiffHunk: hunk, ThreadID: fmt.Sprintf("demo-thread-%d-new-%d-%d", d.Number, len(d.Timeline), i),
 		})
 	}

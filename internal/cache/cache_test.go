@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/github"
 )
 
 func TestDetailStaleWhenChecksChange(t *testing.T) {

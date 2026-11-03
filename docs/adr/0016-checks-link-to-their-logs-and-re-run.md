@@ -1,4 +1,4 @@
-# 0015. Checks link to their logs, and Re-run failed
+# 0016. Checks link to their logs, and Re-run failed
 
 - Status: accepted
 - Date: 2026-11-04

@@ -61,8 +61,8 @@ impl Rpc {
         let bin = sidecar();
         let mut cmd = Command::new(&bin);
         cmd.arg("serve");
-        if let Some(path) = login_path() {
-            cmd.env("PATH", path);
+        for (name, value) in login_env() {
+            cmd.env(name, value);
         }
         if demo {
             cmd.arg(if signed_out { "--demo-signed-out" } else { "--demo" });
@@ -165,12 +165,28 @@ impl Rpc {
     }
 }
 
-/// PATH from the user's login shell. An app opened from Finder or the Dock gets a bare
-/// PATH without Homebrew, so `gh` and `git` would not be found; Zed does the same.
-fn login_path() -> Option<String> {
+/// Settings prdeck needs from the user's login shell: PATH (an app opened from Finder
+/// or the Dock gets a bare one, without Homebrew's `gh` and `git`; Zed does the same)
+/// and where the config lives, so the app and the terminal read the same file.
+const SHELL_VARS: [&str; 4] = ["PATH", "XDG_CONFIG_HOME", "PRDECK_CONFIG", "GH_CONFIG_DIR"];
+
+/// The SHELL_VARS the login shell sets differently from this process.
+fn login_env() -> Vec<(&'static str, String)> {
+    let script = SHELL_VARS.iter().map(|v| format!("printf '%s\\0' \"${v}\"")).collect::<Vec<_>>().join("; ");
+    let Some(out) = login_shell(&script) else { return vec![] };
+    SHELL_VARS
+        .iter()
+        .zip(out.split('\0'))
+        .filter(|(name, value)| !value.is_empty() && std::env::var(name).ok().as_deref() != Some(*value))
+        .map(|(name, value)| (*name, value.to_string()))
+        .collect()
+}
+
+/// Runs a script in the user's login shell (3 seconds at most) and returns its output.
+fn login_shell(script: &str) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut child = Command::new(shell)
-        .args(["-l", "-c", "printf '%s' \"$PATH\""])
+        .args(["-l", "-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -191,8 +207,7 @@ fn login_path() -> Option<String> {
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let out = out.trim();
-    (!out.is_empty()).then(|| out.to_string())
+    Some(out)
 }
 
 /// The prdeck binary: $PRDECK_BIN, else one next to this app (inside the .app bundle),

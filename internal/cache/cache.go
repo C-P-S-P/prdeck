@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/github"
 )
 
 const keepDetails = 30 * 24 * time.Hour

@@ -30,7 +30,7 @@ Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/sc
 Needs Go 1.26+, `git`, and the GitHub CLI signed in (`gh auth login`). prdeck uses your gh login; it never stores a token.
 
 ```bash
-git clone https://github.com/C-P-S-P/prdeck && cd prdeck
+git clone https://github.com/MasterPushers/prdeck && cd prdeck
 go build -o ~/.local/bin/prdeck ./cmd/prdeck
 ```
 
@@ -111,7 +111,7 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 | ![Comment and review](docs/screenshots/desktop-review.png) | ![A commit with its diff](docs/screenshots/desktop-commit.png) |
 | **Comment, approve or request changes**, and reply on code threads | **Click a commit** to see what it changed |
 | ![Files changed](docs/screenshots/desktop-files.png) | ![Inline review](docs/screenshots/desktop-inline.png) |
-| **Files changed**: every file's diff, each one collapsible | **Inline review**: click a line number to comment; send them all as one review |
+| **Files changed**: every file's diff, each one collapsible | **Inline review**: select lines to comment or suggest a change; send them all as one review |
 | ![Checks](docs/screenshots/desktop-checks.png) | ![Re-run failed](docs/screenshots/desktop-rerun.png) |
 | **Checks**: click one to open its log | **Re-run failed**: only the failed jobs, with your gh login |
 | ![Merge when ready](docs/screenshots/desktop-merge.png) | ![Auto-merge on](docs/screenshots/desktop-automerge.png) |
@@ -121,7 +121,7 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 - **Comment and review**: a reply box at the end of every conversation (Write / Preview) with Comment, Approve and Request changes, and Reply on each code thread. Drafts are kept per PR. `⌘⇧C`, the Review button, or the `a` `x` `i` keys jump there; `⌘↵` comments.
 - **Merge when ready** (or `M`), next to Approve: the same as in the terminal, confirmed in the command bar. Once auto-merge is on, the side panel and the reply box say so.
 - **Diffs**: click a commit to see what it changed (Previous / Next steps through them), or open Files changed for every file's diff with line numbers. Big PRs open the first ~1,500 lines and keep the rest one click away.
-- **Inline review**: click a line number in Files changed to comment on that line. Add a single comment, or start a review: comments stay pending under their lines until you Submit review, Approve or Request changes, and go to GitHub together. Existing review threads show at their lines with Reply.
+- **Inline review**: click a line number in Files changed to comment on that line, or drag across line numbers (or Shift-click) to comment on several. The comment box can copy the selected lines or turn them into a suggested change. Add a single comment, or start a review: comments stay pending under their lines until you Submit review, Approve or Request changes, and go to GitHub together. Existing review threads show at their lines with Reply.
 - **Checks**: every check opens its log in the browser; the side panel lists the first few failing ones. When CI failed, **Re-run failed** (or `F`) re-runs only the failed GitHub Actions jobs.
 - **Profile photos** from GitHub next to every author and reviewer.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.

@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/C-P-S-P/prdeck/internal/config"
-	"github.com/C-P-S-P/prdeck/internal/github"
-	"github.com/C-P-S-P/prdeck/internal/runner"
+	"github.com/MasterPushers/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/runner"
 )
 
 // Plan is a command ready to show and run.

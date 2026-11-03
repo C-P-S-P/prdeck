@@ -1,7 +1,8 @@
-//! Inline review: click a line number in Files changed to comment on that line.
-//! "Add single comment" posts it at once; "Start a review" keeps it as pending, shown
-//! under its line, until the review is submitted from the review box with Comment,
-//! Approve or Request changes. Existing review threads show at their lines too.
+//! Inline review: click a line number in Files changed to comment on that line, or
+//! drag across line numbers (or click one and Shift-click another) to comment on
+//! several. "Add single comment" posts at once; "Start a review" keeps the comment
+//! pending under its lines until the review is submitted from the review box with
+//! Comment, Approve or Request changes. Existing review threads show at their lines.
 
 use std::collections::HashMap;
 
@@ -12,14 +13,28 @@ use gpui_kit::component::input::{Textarea, TextareaState};
 pub(super) struct LineEditor {
     pr: String,
     path: String,
+    /// The selected lines, as indices into the file's diff, and the first one clicked.
+    from: usize,
+    to: usize,
+    anchor: usize,
+    /// Where the comment ends (GitHub's line and side) and, for several lines, starts.
     line: u32,
     side: &'static str,
+    start: Option<(&'static str, u32)>,
     /// Editing a pending comment (its index) instead of writing a new one.
     editing: Option<usize>,
     pub(super) input: Entity<TextareaState>,
     posting: bool,
     error: Option<String>,
     _sub: Subscription,
+}
+
+/// Lines being dragged over, before the comment box opens.
+pub(super) struct LineDrag {
+    pr: String,
+    path: String,
+    from: usize,
+    to: usize,
 }
 
 /// Where a diff line can take a comment: removed lines by their old number on the
@@ -32,34 +47,108 @@ pub(super) fn anchor(l: &Line) -> Option<(&'static str, u32)> {
     }
 }
 
+/// The first and last content line of the hunk holding `ix`; GitHub only takes
+/// comments on several lines within one hunk.
+fn hunk_bounds(lines: &[Line], ix: usize) -> (usize, usize) {
+    let mut a = ix;
+    while a > 0 && lines[a].kind != Kind::Hunk {
+        a -= 1;
+    }
+    if lines[a].kind == Kind::Hunk {
+        a += 1;
+    }
+    let mut b = ix;
+    while b + 1 < lines.len() && lines[b + 1].kind != Kind::Hunk {
+        b += 1;
+    }
+    (a, b.max(a))
+}
+
+/// `from..=to` sorted and kept inside the hunk of the line `fixed` (the first click).
+fn span(lines: &[Line], fixed: usize, other: usize) -> (usize, usize) {
+    let (a, b) = hunk_bounds(lines, fixed);
+    let other = other.clamp(a, b);
+    (fixed.min(other), fixed.max(other))
+}
+
 impl Deck {
-    pub(super) fn open_line_editor(
-        &mut self,
-        pr: String,
-        path: String,
-        line: u32,
-        side: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_editor(pr, path, line, side, None, String::new(), window, cx);
+    /// The diff lines of one file of a PR, once loaded.
+    fn file_lines(&self, pr: &str, path: &str) -> Option<&[Line]> {
+        match self.diffs.get(&format!("pr:{pr}")) {
+            Some(DiffState::Files(files)) => files.iter().find(|f| f.file.path == path).map(|f| f.lines.as_slice()),
+            _ => None,
+        }
     }
 
+    /// The lines to highlight in a file: being dragged over, or under the open box.
+    pub(super) fn selection(&self, pr: &str, path: &str) -> Option<(usize, usize)> {
+        if let Some(d) = self.drag.as_ref().filter(|d| d.pr == pr && d.path == path) {
+            return Some((d.from.min(d.to), d.from.max(d.to)));
+        }
+        self.line_editor.as_ref().filter(|e| e.pr == pr && e.path == path).map(|e| (e.from, e.to))
+    }
+
+    /// A press on a line number: Shift extends the open comment box to this line;
+    /// otherwise a selection starts here.
+    pub(super) fn line_press(&mut self, pr: String, path: String, ix: usize, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if shift {
+            if let Some(ed) = self.line_editor.as_ref().filter(|e| e.pr == pr && e.path == path && e.editing.is_none()) {
+                let anchor = ed.anchor;
+                if let Some((from, to)) = self.file_lines(&pr, &path).map(|lines| span(lines, anchor, ix)) {
+                    self.set_editor_range(from, to, cx);
+                    return;
+                }
+            }
+        }
+        self.drag = Some(LineDrag { pr, path, from: ix, to: ix });
+        let _ = window;
+        cx.notify();
+    }
+
+    pub(super) fn line_drag(&mut self, pr: String, path: String, ix: usize, cx: &mut Context<Self>) {
+        let Some(d) = self.drag.as_ref().filter(|d| d.pr == pr && d.path == path) else { return };
+        let Some((from, to)) = self.file_lines(&pr, &path).map(|lines| span(lines, d.from, ix)) else { return };
+        let to = if ix < d.from { from } else { to };
+        if let Some(d) = self.drag.as_mut() {
+            if d.to != to {
+                d.to = to;
+                cx.notify();
+            }
+        }
+    }
+
+    /// The mouse came up: open the comment box on the dragged lines.
+    pub(super) fn line_release(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(d) = self.drag.take() else { return };
+        self.open_range(d.pr, d.path, d.from, d.to, None, String::new(), window, cx);
+    }
+
+    /// Opens the box on one line, by its number and side (screenshot tests).
+    #[cfg(feature = "snapshot")]
+    pub(super) fn open_line_editor(&mut self, pr: String, path: String, line: u32, side: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let ix = self.file_lines(&pr, &path).and_then(|lines| lines.iter().position(|l| anchor(l) == Some((side, line))));
+        if let Some(ix) = ix {
+            self.open_range(pr, path, ix, ix, None, String::new(), window, cx);
+        }
+    }
+
+    /// Opens the comment box on lines `fixed..other` of a file (indices into its diff).
     #[allow(clippy::too_many_arguments)]
-    fn open_editor(
+    fn open_range(
         &mut self,
         pr: String,
         path: String,
-        line: u32,
-        side: &'static str,
+        fixed: usize,
+        other: usize,
         editing: Option<usize>,
         text: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(3, 12).placeholder(format!("Comment on line {line}. Markdown works."))
-        });
+        let Some(lines) = self.file_lines(&pr, &path) else { return };
+        let (from, to) = span(lines, fixed, other);
+        let Some((side, line, start)) = ends(lines, from, to) else { return };
+        let input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 12).placeholder("Leave a comment. Markdown works."));
         if !text.is_empty() {
             input.update(cx, |s, cx| s.set_value(text, window, cx));
         }
@@ -69,13 +158,75 @@ impl Deck {
             }
         });
         input.update(cx, |s, cx| s.focus(window, cx));
-        self.line_editor = Some(LineEditor { pr, path, line, side, editing, input, posting: false, error: None, _sub: sub });
+        self.line_editor = Some(LineEditor {
+            pr,
+            path,
+            from,
+            to,
+            anchor: fixed,
+            line,
+            side,
+            start,
+            editing,
+            input,
+            posting: false,
+            error: None,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    fn set_editor_range(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let Some(ed) = self.line_editor.as_ref() else { return };
+        let Some(found) = self.file_lines(&ed.pr, &ed.path).and_then(|lines| ends(lines, from, to)) else { return };
+        if let Some(ed) = self.line_editor.as_mut() {
+            (ed.side, ed.line, ed.start) = found;
+            ed.from = from;
+            ed.to = to;
+        }
         cx.notify();
     }
 
     pub(super) fn close_line_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.line_editor = None;
         self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The selected code, without diff markers.
+    fn selected_code(&self, new_only: bool) -> Option<String> {
+        let ed = self.line_editor.as_ref()?;
+        let lines = self.file_lines(&ed.pr, &ed.path)?;
+        let picked: Vec<&str> = lines[ed.from..=ed.to]
+            .iter()
+            .filter(|l| match l.kind {
+                Kind::Add | Kind::Context => true,
+                Kind::Del => !new_only,
+                _ => false,
+            })
+            .map(|l| l.text.as_str())
+            .collect();
+        Some(picked.join("\n"))
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn suggest_change_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.suggest_change(window, cx);
+    }
+
+    /// Adds a GitHub suggestion with the selected lines, ready to edit into the change.
+    fn suggest_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(code) = self.selected_code(true) else { return };
+        let Some(ed) = self.line_editor.as_ref() else { return };
+        let mut text = ed.input.read(cx).value().to_string();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("```suggestion\n{code}\n```"));
+        ed.input.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+        });
         cx.notify();
     }
 
@@ -91,7 +242,14 @@ impl Deck {
             cx.notify();
             return;
         }
-        let draft = DraftThread { path: ed.path.clone(), line: ed.line, side: ed.side, body };
+        let draft = DraftThread {
+            path: ed.path.clone(),
+            line: ed.line,
+            side: ed.side,
+            start_line: ed.start.map(|s| s.1),
+            start_side: ed.start.map(|s| s.0),
+            body,
+        };
         let pr = ed.pr.clone();
         if !single {
             let list = self.pending.entry(pr).or_default();
@@ -218,6 +376,11 @@ impl Deck {
                     .child(self.images.face(&e.author, 20.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
                     .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at))))
+                    .when(e.start_line > 0, |d| {
+                        let s = if e.start_side == "LEFT" { "LEFT" } else { "RIGHT" };
+                        let side = if e.side == "LEFT" { "LEFT" } else { "RIGHT" };
+                        d.child(div().text_color(rgb(DIM)).child(format!("lines {}", lines_label(s, e.start_line as u32, side, e.line as u32))))
+                    })
                     .when(e.resolved, |d| d.child(div().ml_auto().text_color(rgb(GREEN)).child("resolved"))),
             )
             .child(body)
@@ -244,6 +407,7 @@ impl Deck {
                     .child(self.images.face(&self.hello.viewer, 20.))
                     .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(if self.hello.viewer.is_empty() { "you".to_string() } else { self.hello.viewer.clone() }))
                     .child(div().px(px(6.)).border_1().border_color(rgb(0x5a4a26)).text_color(rgb(YELLOW)).text_size(px(11.)).child("Pending"))
+                    .when_some(t.start_line.zip(t.start_side), |d, (a, s)| d.child(div().text_color(rgb(DIM)).child(format!("lines {}", lines_label(s, a, t.side, t.line)))))
                     .child(div().flex_1())
                     .child(
                         div()
@@ -251,7 +415,17 @@ impl Deck {
                             .cursor_pointer()
                             .hover(|s| s.text_color(rgb(TEXT)))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_editor(pr_e.clone(), t2.path.clone(), t2.line, t2.side, Some(n), t2.body.clone(), window, cx)
+                                let found = this.file_lines(&pr_e, &t2.path).and_then(|lines| {
+                                    let end = lines.iter().position(|l| anchor(l) == Some((t2.side, t2.line)))?;
+                                    let begin = match (t2.start_side, t2.start_line) {
+                                        (Some(s), Some(n)) => lines.iter().position(|l| anchor(l) == Some((s, n))).unwrap_or(end),
+                                        _ => end,
+                                    };
+                                    Some((begin, end))
+                                });
+                                if let Some((begin, end)) = found {
+                                    this.open_range(pr_e.clone(), t2.path.clone(), begin, end, Some(n), t2.body.clone(), window, cx);
+                                }
                             }))
                             .child("Edit"),
                     )
@@ -281,12 +455,47 @@ impl Deck {
 
     fn line_editor_view(&self, ed: &LineEditor, cx: &mut Context<Self>) -> AnyElement {
         let pending = self.pending_count(&ed.pr);
-        let side = if ed.side == "LEFT" { "removed line" } else { "line" };
+        let what = match ed.start {
+            Some((s, a)) => format!("Comment on lines {} of {}", lines_label(s, a, ed.side, ed.line), ed.path),
+            None if ed.side == "LEFT" => format!("Comment on removed line {} of {}", ed.line, ed.path),
+            None => format!("Comment on line {} of {}", ed.line, ed.path),
+        };
+        let can_suggest = ed.side == "RIGHT" && ed.start.is_none_or(|s| s.0 == "RIGHT");
         Self::inline_box()
             .border_color(rgb(RING_ACTIVE))
             .p(px(8.))
             .gap(px(8.))
-            .child(div().text_size(px(12.)).text_color(rgb(SOFT)).child(format!("Comment on {side} {} of {}", ed.line, ed.path)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .text_color(rgb(SOFT))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(what))
+                    .child(div().text_color(rgb(DIM)).child("Shift-click a line to extend"))
+                    .child(
+                        button_look("copy-lines")
+                            .h(px(24.))
+                            .text_size(px(12.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(code) = this.selected_code(false) {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code));
+                                    this.say_done("Lines copied", cx);
+                                }
+                            }))
+                            .child("Copy lines"),
+                    )
+                    .when(can_suggest, |d| {
+                        d.child(
+                            button_look("suggest")
+                                .h(px(24.))
+                                .text_size(px(12.))
+                                .on_click(cx.listener(|this, _, window, cx| this.suggest_change(window, cx)))
+                                .child("Suggest change"),
+                        )
+                    }),
+            )
             .child(Textarea::new(&ed.input))
             .child(
                 div()
@@ -337,5 +546,24 @@ impl Deck {
                     ),
             )
             .into_any_element()
+    }
+}
+
+/// Where a comment on lines `from..=to` ends (side and line) and, for several lines,
+/// starts. Hunk headers and notes inside the range are skipped.
+fn ends(lines: &[Line], from: usize, to: usize) -> Option<(&'static str, u32, Option<(&'static str, u32)>)> {
+    let last = (from..=to).rev().find_map(|i| anchor(&lines[i]))?;
+    let first = (from..=to).find_map(|i| anchor(&lines[i]))?;
+    let start = (first != last).then_some(first);
+    Some((last.0, last.1, start))
+}
+
+/// "13–15", or "−14 to +14" when the range runs from removed lines into new ones.
+fn lines_label(start_side: &str, start: u32, side: &str, end: u32) -> String {
+    if start_side == side {
+        format!("{start}–{end}")
+    } else {
+        let sign = |s: &str| if s == "LEFT" { "−" } else { "+" };
+        format!("{}{start} to {}{end}", sign(start_side), sign(side))
     }
 }

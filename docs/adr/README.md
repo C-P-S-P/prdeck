@@ -122,7 +122,8 @@ sequenceDiagram
 | [0012](0012-comment-and-review-from-the-app.md) | Comment and review from the app |
 | [0013](0013-diffs-in-the-app.md) | Diffs in the app |
 | [0014](0014-inline-review.md) | Inline review on the diff |
-| [0015](0015-checks-link-to-their-logs-and-re-run.md) | Checks link to their logs, and Re-run failed |
-| [0016](0016-review-and-merge-commands.md) | Approve, Request changes, Comment and Merge when ready as commands |
+| [0015](0015-comments-on-several-lines.md) | Comments on several lines |
+| [0016](0016-checks-link-to-their-logs-and-re-run.md) | Checks link to their logs, and Re-run failed |
+| [0017](0017-review-and-merge-commands.md) | Approve, Request changes, Comment and Merge when ready as commands |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.

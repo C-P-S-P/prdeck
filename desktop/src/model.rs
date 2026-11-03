@@ -250,6 +250,9 @@ pub struct Event {
     pub thread_id: String,
     /// Review threads: RIGHT (new and unchanged lines) or LEFT (removed lines).
     pub side: String,
+    /// Review threads on several lines: where they start (`line` is where they end).
+    pub start_line: u64,
+    pub start_side: String,
     pub resolved: bool,
     pub outdated: bool,
     #[serde(deserialize_with = "null_vec")]
@@ -455,6 +458,11 @@ pub struct DraftThread {
     pub line: u32,
     /// RIGHT: added or unchanged lines (new numbers); LEFT: removed lines (old numbers).
     pub side: &'static str,
+    /// Comments on several lines start here (in the same hunk) and end at `line`.
+    #[serde(rename = "startLine", skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(rename = "startSide", skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<&'static str>,
     pub body: String,
 }
 

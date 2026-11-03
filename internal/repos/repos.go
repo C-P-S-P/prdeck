@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/config"
 )
 
 // Clone is a local checkout and the remote in it that points at the GitHub repo.

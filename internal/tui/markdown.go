@@ -3,7 +3,7 @@ package tui
 import (
 	"strings"
 
-	"github.com/C-P-S-P/prdeck/internal/mdrender"
+	"github.com/MasterPushers/prdeck/internal/mdrender"
 )
 
 // markdown renders PR bodies and comments with mdrender, caching by text for the

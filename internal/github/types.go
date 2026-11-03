@@ -146,9 +146,12 @@ type Event struct {
 	DiffHunk string    `json:"diffHunk"`
 	ThreadID string    `json:"threadId"` // review threads: GitHub's ID, for replies
 	Side     string    `json:"side"`     // review threads: RIGHT (new lines) or LEFT (removed lines)
-	Resolved bool      `json:"resolved"`
-	Outdated bool      `json:"outdated"`
-	Replies  []Reply   `json:"replies"`
+	// Review threads on several lines: where they start (Line is where they end).
+	StartLine int     `json:"startLine"`
+	StartSide string  `json:"startSide"`
+	Resolved  bool    `json:"resolved"`
+	Outdated  bool    `json:"outdated"`
+	Replies   []Reply `json:"replies"`
 }
 
 type Reply struct {
