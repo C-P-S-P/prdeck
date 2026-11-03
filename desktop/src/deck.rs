@@ -2839,6 +2839,12 @@ impl Deck {
                     self.load(cx);
                 }
             }
+            s if s.starts_with("pick:") => {
+                // pick:312 selects that PR in the list, as a click does.
+                if let Some(pr) = s[5..].parse().ok().and_then(|n| pick(self, n)) {
+                    self.select(pr, cx);
+                }
+            }
             s if s.starts_with("scroll:") => {
                 let y: f32 = s[7..].parse().unwrap_or(0.);
                 self.detail_scroll.set_offset(point(px(0.), px(-y)));

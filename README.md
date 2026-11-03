@@ -22,8 +22,12 @@ A dashboard for the pull requests you're involved in, in the terminal and on the
 | **`F` re-run failed**: failing checks link to their logs; only the failed jobs run again | **`a` approve**: shows what it sends, then approves on `enter` |
 | ![Merge when ready](docs/screenshots/merge.png) | ![New since you last looked](docs/screenshots/unread.png) |
 | **`M` merge when ready**: auto-merge on, so GitHub merges once checks and reviews pass | **`n` what's new**: unread PRs are blue and bold; new comments are tagged, `n` jumps to the first |
+| ![Approved since you last looked](docs/screenshots/newreview.png) | ![Request changes](docs/screenshots/request.png) |
+| **Opened, it is read**: #312's new approval is tagged `new`; PRs you have not opened stay blue and bold | **`x` request changes**: asks what should change, then posts it on that PR |
+| ![Changes requested](docs/screenshots/requested.png) | ![Merge when ready with conflicts](docs/screenshots/blocked.png) |
+| **Posted**: the review shows in the PR view right away | **`M` with conflicts**: says to rebase first; failing checks link to their logs |
 
-Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/screenshots/capture.sh`.
+Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/screenshots/capture.sh`; `capture.sh request blocked` retakes only those.
 
 ## Install
 
@@ -121,6 +125,10 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 | **Merge when ready** next to Approve; asks first | **Auto-merge on**: GitHub merges once checks and reviews pass |
 | ![Unread PRs and what is new](docs/screenshots/desktop-unread.png) | ![Jump to first new](docs/screenshots/desktop-new.png) |
 | **Unread**: a dot on PRs that changed since you last looked; the conversation says how many are new | **Jump to first new** (or `n`): what came in since is tagged New |
+| ![An approval since you last looked](docs/screenshots/desktop-newreview.png) | ![All checks passed](docs/screenshots/desktop-passing.png) |
+| **Opened, it is read**: its dot goes and the new approval is tagged New; the others keep theirs | **Checks passed**: no Re-run failed button, and `F` says why |
+| ![Repo without auto-merge](docs/screenshots/desktop-noautomerge.png) | ![Merge when ready with conflicts](docs/screenshots/desktop-mergeconflict.png) |
+| **No auto-merge** on the repo: Merge when ready says what to do instead | **Conflicts**: Merge when ready says to rebase first |
 
 - **PR text like github.com**: images (your GitHub login is used for GitHub-hosted ones), `<img width>`, `<details>`, tables of screenshots side by side, syntax-highlighted code, `[!NOTE]`/`[!WARNING]` boxes, emoji and linked @mentions. Text is selectable.
 - **Comment and review**: a reply box at the end of every conversation (Write / Preview) with Comment, Approve and Request changes, and Reply on each code thread. Drafts are kept per PR. `⌘⇧C`, the Review button, or the `a` `x` `i` keys jump there; `⌘↵` comments.
@@ -160,7 +168,7 @@ cargo run --release             # your PRs (uses your gh login)
 | `⌘,` | edit the config |
 | your command keys | run that command; `esc` closes the command bar |
 
-Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|new|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
+Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|new|pick:312|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
 
 ## Configuration
 
