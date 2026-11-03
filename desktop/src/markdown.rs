@@ -106,6 +106,12 @@ impl Images {
         let _ = self.queue.unbounded_send(url.to_string());
         blank()
     }
+
+    /// Forgets the images that failed (offline, a timeout), so the next draw asks for
+    /// them again. ⌘R calls it.
+    pub fn retry_failed(&self) {
+        self.map.lock().unwrap().retain(|_, e| !matches!(e, Entry::Failed));
+    }
 }
 
 /// A transparent pixel, shown while an image loads.
