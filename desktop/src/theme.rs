@@ -34,14 +34,34 @@ pub const RED: u32 = 0xe57b7b;
 pub const YELLOW: u32 = 0xe0c070;
 pub const PRIMARY: u32 = 0x3b6fb6;
 
-pub const MONO: &str = "Menlo";
+static MONO: std::sync::OnceLock<SharedString> = std::sync::OnceLock::new();
+
+/// The monospace family: Menlo on the Mac; elsewhere the theme's default (Consolas on
+/// Windows, DejaVu Sans Mono on Linux), which gpui-component swaps for an installed
+/// one. GPUI would draw a family that is not installed in a proportional font.
+pub fn mono() -> SharedString {
+    MONO.get().cloned().unwrap_or_else(|| "Menlo".into())
+}
+
+/// A shortcut hint as this system writes it, from its Mac form: "⌘K" and "⌘↵ comments"
+/// on the Mac are "Ctrl+K" and "Ctrl+Enter comments" on Windows and Linux.
+pub fn key_hint(mac: &'static str) -> SharedString {
+    if cfg!(target_os = "macos") { mac.into() } else { ctrl_hint(mac).into() }
+}
+
+fn ctrl_hint(mac: &str) -> String {
+    mac.replace("⌘↵", "Ctrl+Enter").replace("⌘⇧", "Ctrl+Shift+").replace('⌘', "Ctrl+")
+}
 
 /// Dark theme for the gpui-component widgets (inputs, markdown) in the design's colors.
 pub fn apply(window: &mut Window, cx: &mut App) {
     Theme::change(ThemeMode::Dark, Some(window), cx);
     let t = Theme::global_mut(cx);
     t.font_size = px(13.);
-    t.mono_font_family = MONO.into();
+    if cfg!(target_os = "macos") {
+        t.mono_font_family = "Menlo".into();
+    }
+    let _ = MONO.set(t.mono_font_family.clone());
     t.mono_font_size = px(12.5);
     t.radius = px(0.);
     t.radius_lg = px(0.);
@@ -80,7 +100,7 @@ pub fn kbd(text: impl Into<SharedString>) -> Div {
         .bg(rgb(BG_INPUT))
         .text_color(rgb(TEXT_SOFT))
         .text_size(px(10.5))
-        .font_family(MONO)
+        .font_family(mono())
         .child(text.into())
 }
 
@@ -151,4 +171,18 @@ pub fn primary_look(id: impl Into<ElementId>) -> Stateful<Div> {
         .text_color(rgb(0xffffff))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0x4579c2)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ctrl_hint;
+
+    #[test]
+    fn key_hints_off_the_mac() {
+        assert_eq!(ctrl_hint("⌘K"), "Ctrl+K");
+        assert_eq!(ctrl_hint("⌘⇧C"), "Ctrl+Shift+C");
+        assert_eq!(ctrl_hint("⌘T go to PR · ⌘K filters"), "Ctrl+T go to PR · Ctrl+K filters");
+        assert_eq!(ctrl_hint("Markdown works · ⌘↵ comments"), "Markdown works · Ctrl+Enter comments");
+        assert_eq!(ctrl_hint("in the config (⌘,)."), "in the config (Ctrl+,).");
+    }
 }

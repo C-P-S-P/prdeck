@@ -341,6 +341,10 @@ pub struct SetupStatus {
     pub gh_installed: bool,
     pub gh_version: String,
     pub brew_found: bool,
+    /// What prdeck installs gh with here: brew, winget, or "" (it cannot).
+    pub installer: String,
+    /// How to install gh by hand on this system.
+    pub install_hint: String,
     pub signed_in: bool,
     pub login: String,
     pub config_exists: bool,

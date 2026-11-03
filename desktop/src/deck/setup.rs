@@ -1,6 +1,7 @@
 //! First-run setup: sign in to GitHub (through the GitHub CLI, so PR Deck never holds
 //! a token), choose the folders that hold your clones, and choose an editor. It shows
-//! on the first launch, whenever nobody is signed in, and from PR Deck → Set Up….
+//! on the first launch, whenever nobody is signed in, and from PR Deck → Set Up… (the
+//! gear in the title bar on Windows and Linux, which have no menu bar).
 
 use super::*;
 
@@ -348,21 +349,26 @@ impl Deck {
         let mut col = div().flex().flex_col().gap(px(14.)).child(title).child(blurb);
 
         if !st.gh_installed {
-            col = col.child(div().text_color(rgb(YELLOW)).child("The GitHub CLI (gh) is not installed."));
+            // What prdeck can install gh with here: Homebrew on the Mac, winget on
+            // Windows. On Linux it says the command instead (it needs sudo).
+            let installer = if st.brew_found { "Homebrew" } else if st.installer == "winget" { "winget" } else { "" };
+            col = col
+                .child(div().text_color(rgb(YELLOW)).child("The GitHub CLI (gh) is not installed."))
+                .when(installer.is_empty() && !cfg!(target_os = "macos"), |c| c.child(div().text_color(rgb(SOFT)).child(st.install_hint.clone())));
             col = match &s.login {
-                LoginState::Installing => col.child(div().text_color(rgb(SOFT)).child("Installing gh with Homebrew…")),
+                LoginState::Installing => col.child(div().text_color(rgb(SOFT)).child(format!("Installing gh with {installer}…"))),
                 _ => col.child(
                     div()
                         .flex()
                         .gap(px(8.))
-                        .when(st.brew_found, |d| {
+                        .when(!installer.is_empty(), |d| {
                             d.child(
                                 primary_look("install-gh")
                                     .on_click(cx.listener(|this, _, _, cx| this.install_gh(cx)))
-                                    .child("Install with Homebrew"),
+                                    .child(format!("Install with {installer}")),
                             )
                         })
-                        .when(!st.brew_found, |d| {
+                        .when(installer.is_empty(), |d| {
                             d.child(
                                 primary_look("get-gh")
                                     .on_click(cx.listener(|_, _, _, cx| cx.open_url("https://cli.github.com")))
@@ -434,7 +440,7 @@ impl Deck {
                                         .border_1()
                                         .border_color(rgb(RING_ACTIVE))
                                         .bg(rgb(BG_ACTIVE))
-                                        .font_family(MONO)
+                                        .font_family(mono())
                                         .text_size(px(26.))
                                         .text_color(rgb(TEXT_BRIGHT))
                                         .child(code.code.clone()),
@@ -487,7 +493,7 @@ impl Deck {
                     cx.notify();
                 }))
                 .child(check_box(on))
-                .child(div().flex_1().font_family(MONO).text_color(rgb(TEXT)).child(path.clone()))
+                .child(div().flex_1().font_family(mono()).text_color(rgb(TEXT)).child(path.clone()))
                 .child(div().text_size(px(12.)).text_color(rgb(DIM)).child(match clones {
                     0 => "no clones yet".to_string(),
                     1 => "1 clone".to_string(),
@@ -554,7 +560,8 @@ impl Deck {
                 .child(div().flex_1().text_color(rgb(if e.installed { TEXT } else { DIM })).child(e.label.clone()))
                 .child(div().text_size(px(12.)).text_color(rgb(if e.installed { GREEN } else { DIM })).child(if !e.installed {
                     "not found"
-                } else if e.run.is_empty() {
+                } else if e.run.is_empty() || !cfg!(target_os = "macos") {
+                    // Off the Mac, run is the editor's full path when it is not on PATH.
                     "installed"
                 } else {
                     "app found (opens with open -a)"
@@ -566,7 +573,7 @@ impl Deck {
             .flex_col()
             .gap(px(12.))
             .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT_BRIGHT)).child("Open pull requests in"))
-            .child(div().text_color(rgb(SOFT)).child("“Open in editor” checks out the PR's branch, then opens the folder here. Change it any time in the config (⌘,)."))
+            .child(div().text_color(rgb(SOFT)).child(key_hint("“Open in editor” checks out the PR's branch, then opens the folder here. Change it any time in the config (⌘,).")))
             .child(div().flex().flex_col().gap(px(6.)).children(rows))
             .child(
                 div()

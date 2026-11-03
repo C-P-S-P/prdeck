@@ -3,6 +3,9 @@
 //!
 //! Run with sample data: `cargo run -- --demo`
 
+// No console window behind the release app on Windows.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod deck;
 mod diff;
 mod layout;
@@ -48,29 +51,47 @@ impl AssetSource for AppAssets {
 }
 
 /// The standard Mac shortcuts, plus PR Deck's own. Deck-level ones only fire while
-/// the PR Deck window has focus.
+/// the PR Deck window has focus. Windows and Linux get the same ones with Ctrl for
+/// Cmd; Hide and Minimize are Mac shortcuts (there the title bar minimizes).
 fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new(shortcut("cmd-q"), Quit, None),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-h", Hide, None),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("alt-cmd-h", HideOthers, None),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-m", Minimize, None),
-        KeyBinding::new("cmd-t", GoToPr, Some("Deck")),
-        KeyBinding::new("cmd-p", GoToPr, Some("Deck")),
-        KeyBinding::new("cmd-k", Filters, Some("Deck")),
-        KeyBinding::new("cmd-w", CloseTab, Some("Deck")),
-        KeyBinding::new("cmd-shift-t", ReopenTab, Some("Deck")),
-        KeyBinding::new("cmd-r", Refresh, Some("Deck")),
-        KeyBinding::new("cmd-shift-]", NextTab, Some("Deck")),
-        KeyBinding::new("cmd-shift-[", PrevTab, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-t"), GoToPr, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-p"), GoToPr, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-k"), Filters, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-w"), CloseTab, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-shift-t"), ReopenTab, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-r"), Refresh, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-shift-]"), NextTab, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-shift-["), PrevTab, Some("Deck")),
         KeyBinding::new("ctrl-tab", NextTab, Some("Deck")),
         KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Deck")),
-        KeyBinding::new("cmd-,", OpenConfig, Some("Deck")),
-        KeyBinding::new("cmd-o", OpenInEditor, Some("Deck")),
-        KeyBinding::new("cmd-shift-o", OpenOnGitHub, Some("Deck")),
-        KeyBinding::new("cmd-b", ToggleSidebar, Some("Deck")),
-        KeyBinding::new("cmd-shift-c", CommentOnPr, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-,"), OpenConfig, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-o"), OpenInEditor, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-shift-o"), OpenOnGitHub, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-b"), ToggleSidebar, Some("Deck")),
+        KeyBinding::new(shortcut("cmd-shift-c"), CommentOnPr, Some("Deck")),
     ]);
+}
+
+/// A Mac shortcut ("cmd-k") as this system binds it: "ctrl-k" on Windows and Linux.
+fn shortcut(mac: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") {
+        mac
+    } else {
+        // ponytail: leaks each binding's few bytes once, at startup; KeyBinding wants 'static.
+        Box::leak(ctrl_for_cmd(mac).into_boxed_str())
+    }
+}
+
+fn ctrl_for_cmd(mac: &str) -> String {
+    mac.replace("cmd-", "ctrl-")
 }
 
 fn menus() -> Vec<Menu> {
@@ -147,12 +168,17 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(1360.), px(880.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // The header is the title bar on the Mac. Windows keeps its own title bar,
+            // with its buttons; Linux gets the window manager's, or the header's.
             titlebar: Some(TitlebarOptions {
                 title: Some("PR Deck".into()),
-                appears_transparent: true,
+                appears_transparent: cfg!(target_os = "macos"),
                 traffic_light_position: Some(point(px(14.), px(13.))),
             }),
             window_min_size: Some(size(px(960.), px(600.))),
+            // Matches prdeck.desktop, so Linux shows the launcher's name and icon.
+            #[cfg(target_os = "linux")]
+            app_id: Some("prdeck".into()),
             ..Default::default()
         };
         let (_window, _deck) = gpui_kit::open_window(options, cx, |window, cx| {
@@ -170,4 +196,17 @@ fn main() {
         .detach();
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ctrl_for_cmd;
+
+    #[test]
+    fn shortcuts_use_ctrl_off_the_mac() {
+        assert_eq!(ctrl_for_cmd("cmd-k"), "ctrl-k");
+        assert_eq!(ctrl_for_cmd("cmd-shift-]"), "ctrl-shift-]");
+        assert_eq!(ctrl_for_cmd("cmd-,"), "ctrl-,");
+        assert_eq!(ctrl_for_cmd("ctrl-tab"), "ctrl-tab");
+    }
 }

@@ -283,7 +283,7 @@ impl Deck {
                             ),
                     )
                     .when_some(body, |d, b| {
-                        d.child(div().font_family(MONO).text_size(px(12.)).text_color(rgb(SOFT)).children(b.lines().map(|l| div().child(l.to_string()))))
+                        d.child(div().font_family(mono()).text_size(px(12.)).text_color(rgb(SOFT)).children(b.lines().map(|l| div().child(l.to_string()))))
                     })
                     .child(
                         div()
@@ -431,7 +431,7 @@ impl Deck {
                     .border_color(rgb(color))
                     .text_color(rgb(color))
                     .text_size(px(10.5))
-                    .font_family(MONO)
+                    .font_family(mono())
                     .child(badge),
             )
             .child(
@@ -439,7 +439,7 @@ impl Deck {
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .font_family(MONO)
+                    .font_family(mono())
                     .text_size(px(12.5))
                     .child(
                         div()
@@ -605,7 +605,7 @@ fn diff_block(kind: Kind, start: usize, lines: &[Line], click: Option<&Click>, s
         .w_full()
         .bg(rgb(bg))
         .text_color(rgb(fg))
-        .font_family(MONO)
+        .font_family(mono())
         .text_size(px(12.))
         .line_height(px(ROW))
         .whitespace_nowrap()
@@ -622,7 +622,7 @@ fn sha_chip(id: impl Into<ElementId>, short: String, full: String, cx: &mut Cont
         .px(px(6.))
         .border_1()
         .border_color(rgb(BORDER_3))
-        .font_family(MONO)
+        .font_family(mono())
         .text_size(px(11.5))
         .text_color(rgb(BLUE_LIGHT))
         .cursor_pointer()
