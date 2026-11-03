@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,11 +59,16 @@ func edit(file string, change func(root *yaml.Node)) error {
 			return fmt.Errorf("%s: %w", file, err)
 		}
 	}
+	// A file of only comments parses to nothing; its text is kept, in place of the header.
+	var keep []byte
 	if doc.Kind == 0 || len(doc.Content) == 0 {
 		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{
 			Kind:        yaml.MappingNode,
 			HeadComment: "PR Deck config. Run `prdeck config init` elsewhere to see every option.",
 		}}}
+		if keep = bytes.TrimSpace(raw); len(keep) > 0 {
+			doc.Content[0].HeadComment = ""
+		}
 	}
 	root := doc.Content[0]
 	if root.Kind != yaml.MappingNode {
@@ -76,14 +82,45 @@ func edit(file string, change func(root *yaml.Node)) error {
 	if err := enc.Encode(&doc); err != nil {
 		return err
 	}
+	out := buf.Bytes()
+	if len(keep) > 0 {
+		out = bytes.Join([][]byte{keep, out}, []byte("\n"))
+	}
+	// Write the real file behind a symlink (dotfiles), so the link stays a link.
+	link := file
+	if p, err := filepath.EvalSymlinks(file); err == nil {
+		file = p
+	}
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return err
 	}
-	tmp := file + ".tmp"
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+	// A temp file of this save's own, so two saves at once can't write into the same one.
+	tmp := fmt.Sprintf("%s.%d.tmp", file, rand.Uint64())
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil && file != link {
+		// The link points into a folder we can't write (home-manager's /nix/store),
+		// so replace the link with a file, as saving always did.
+		file = link
+		tmp = fmt.Sprintf("%s.%d.tmp", file, rand.Uint64())
+		f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	}
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, file)
+	_, err = f.Write(out)
+	if st, serr := os.Lstat(file); serr == nil && st.Mode().IsRegular() && err == nil {
+		err = f.Chmod(st.Mode().Perm()) // keep the file's permissions (a 0600 config stays 0600)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, file)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }
 
 // child returns the mapping under key, creating it (or replacing an empty value).

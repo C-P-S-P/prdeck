@@ -328,10 +328,11 @@ func ExpandHome(p string) string {
 	return p
 }
 
-// ShortenHome turns the user's home folder back into ~ for display.
+// ShortenHome turns the user's home folder back into ~ for display. Only the whole
+// folder counts, so /Users/sam-old stays as it is when home is /Users/sam.
 func ShortenHome(p string) string {
 	home, err := os.UserHomeDir()
-	if err == nil && home != "" && strings.HasPrefix(p, home) {
+	if err == nil && home != "" && (p == home || strings.HasPrefix(p, home+string(filepath.Separator))) {
 		return "~" + strings.TrimPrefix(p, home)
 	}
 	return p

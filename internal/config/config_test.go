@@ -143,3 +143,21 @@ func TestExampleParses(t *testing.T) {
 		t.Errorf("example has warnings: %v", cfg.Warnings)
 	}
 }
+
+func TestShortenHomeNeedsASeparator(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for in, want := range map[string]string{
+		home:                 "~",
+		home + "/code/api":   "~/code/api",
+		home + "-old/code":   home + "-old/code",
+		"/elsewhere/project": "/elsewhere/project",
+	} {
+		if got := ShortenHome(in); got != want {
+			t.Errorf("ShortenHome(%q) = %q, want %q", in, got, want)
+		}
+		if got := ExpandHome(ShortenHome(in)); got != in {
+			t.Errorf("ExpandHome(ShortenHome(%q)) = %q", in, got)
+		}
+	}
+}
