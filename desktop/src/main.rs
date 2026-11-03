@@ -4,6 +4,7 @@
 //! Run with sample data: `cargo run -- --demo`
 
 mod deck;
+mod diff;
 mod layout;
 mod markdown;
 mod model;

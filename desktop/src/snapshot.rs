@@ -95,7 +95,11 @@ pub fn schedule(window: AnyWindowHandle, deck: Entity<Deck>, cx: &mut App) {
             cx.background_executor().timer(Duration::from_millis(1200)).await;
         }
         let _ = cx.update_window(window, |_, window, cx| {
+            let t = std::time::Instant::now();
             let _ = window.draw(cx);
+            if std::env::var_os("PRDECK_DEBUG").is_some() {
+                eprintln!("frame drawn in {:?}", t.elapsed());
+            }
         });
         let _ = cx.update_window(window, |_, window, _| match window.render_to_image() {
             Ok(img) => match img.save(&path) {

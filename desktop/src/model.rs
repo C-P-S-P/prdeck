@@ -378,3 +378,27 @@ pub struct LoginDone {
     pub ok: bool,
     pub login: String,
 }
+
+/// One file's change from GitHub, with its unified-diff patch (empty for binary or
+/// very large files).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileDiff {
+    pub path: String,
+    pub previous_path: String,
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub patch: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct CommitDiff {
+    pub oid: String,
+    pub message: String,
+    pub author: String,
+    pub at: String,
+    #[serde(deserialize_with = "null_vec")]
+    pub files: Vec<FileDiff>,
+}

@@ -31,6 +31,9 @@ type Service struct {
 	mu    sync.RWMutex
 	index *repos.Index
 
+	diffMu      sync.Mutex
+	commitDiffs map[string]*github.CommitDiff // by "owner/name@sha"
+
 	diskMu sync.Mutex
 	disk   []repos.DiskClone // every clone under the home folder, from the last scan
 	diskAt time.Time
@@ -160,6 +163,41 @@ func (s *Service) ReplyThread(ctx context.Context, threadID, body string) error 
 		return ErrSignedOut
 	}
 	return gh.ReplyThread(ctx, threadID, body)
+}
+
+// CommitDiff loads a commit's changes. Commits never change, so each is fetched once.
+func (s *Service) CommitDiff(ctx context.Context, repo, sha string) (*github.CommitDiff, error) {
+	gh := s.client()
+	if gh == nil {
+		return nil, ErrSignedOut
+	}
+	key := strings.ToLower(repo) + "@" + sha
+	s.diffMu.Lock()
+	d, ok := s.commitDiffs[key]
+	s.diffMu.Unlock()
+	if ok {
+		return d, nil
+	}
+	d, err := gh.CommitDiff(ctx, repo, sha)
+	if err != nil {
+		return nil, err
+	}
+	s.diffMu.Lock()
+	if s.commitDiffs == nil {
+		s.commitDiffs = map[string]*github.CommitDiff{}
+	}
+	s.commitDiffs[key] = d
+	s.diffMu.Unlock()
+	return d, nil
+}
+
+// PRDiff loads the patches of every file a PR changes.
+func (s *Service) PRDiff(ctx context.Context, pr github.PR) ([]github.FileDiff, error) {
+	gh := s.client()
+	if gh == nil {
+		return nil, ErrSignedOut
+	}
+	return gh.PRDiff(ctx, pr.Repo, pr.Number)
 }
 
 // ConfigPath is the config file the service reads and writes.

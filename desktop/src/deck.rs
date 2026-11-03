@@ -18,8 +18,10 @@ use crate::model::*;
 use crate::rpc::Rpc;
 use crate::theme::*;
 
+mod diffs;
 mod review;
 mod setup;
+use diffs::*;
 use review::*;
 use setup::*;
 
@@ -125,6 +127,11 @@ pub struct Deck {
     want: Option<String>,
     /// Scroll position of the PR's conversation; back to the top on a new PR.
     detail_scroll: ScrollHandle,
+    /// Diffs loaded from GitHub (by "pr:…" or "commit:…"), the commit open in
+    /// Commits, and files opened or closed by hand in a diff.
+    diffs: HashMap<String, DiffState>,
+    commit: Option<String>,
+    file_open: HashMap<String, bool>,
     /// Reply boxes, by PR key, and the code thread being replied to.
     drafts: HashMap<String, Draft>,
     thread_reply: Option<ThreadReply>,
@@ -168,6 +175,9 @@ impl Deck {
             want: None,
             detail_scroll: ScrollHandle::new(),
             setup: None,
+            diffs: HashMap::new(),
+            commit: None,
+            file_open: HashMap::new(),
             drafts: HashMap::new(),
             thread_reply: None,
             notice: None,
@@ -380,6 +390,7 @@ impl Deck {
         let key = pr.key();
         if self.selected.as_ref() != Some(&key) {
             self.detail_scroll.set_offset(point(px(0.), px(0.)));
+            self.commit = None;
         }
         self.selected = Some(key.clone());
         match self.tabs.iter_mut().find(|t| t.key() == key) {
@@ -393,6 +404,7 @@ impl Deck {
         }
         self.load_detail(pr.clone(), cx);
         self.load_folder(pr, cx);
+        self.load_section(cx);
         cx.notify();
     }
 
@@ -951,7 +963,12 @@ impl Deck {
             return;
         }
         match ks.key.as_str() {
-            "escape" => return self.close_run(window, cx),
+            "escape" => {
+                if self.run.is_none() && self.commit.is_some() && self.section == Section::Commits {
+                    return self.open_commit(None, cx);
+                }
+                return self.close_run(window, cx);
+            }
             "enter" => return self.confirm("", cx),
             "down" => return self.move_selection(1, cx),
             "up" => return self.move_selection(-1, cx),
@@ -1664,7 +1681,11 @@ impl Deck {
                 .cursor_pointer()
                 .hover(|st| st.text_color(rgb(TEXT)))
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.section == s && s == Section::Commits {
+                        this.commit = None;
+                    }
                     this.section = s;
+                    this.load_section(cx);
                     cx.notify();
                 }))
                 .child(label)
@@ -1706,190 +1727,6 @@ impl Deck {
                     }))
                     .child(format!("Open in {editor}")),
             )
-            .into_any_element()
-    }
-
-    fn commits_view(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
-        if d.commit_list.is_empty() {
-            return self.handoff(format!("{} commits", d.commits), cx);
-        }
-        let url = d.pr.url.clone();
-        let shown = d.commit_list.len() as u64;
-        let more = d.commits.saturating_sub(shown);
-        let rows = d.commit_list.iter().enumerate().map(|(i, c)| {
-            let open = format!("{url}/commits/{}", c.oid);
-            let sha = c.oid.clone();
-            let first_body_line = c.body.lines().find(|l| !l.trim().is_empty()).map(|l| l.to_string());
-            div()
-                .id(("commit", i))
-                .flex()
-                .items_start()
-                .gap(px(10.))
-                .px(px(14.))
-                .py(px(10.))
-                .border_t_1()
-                .border_color(rgb(BORDER))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(BG_HOVER)))
-                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&open)))
-                .child(div().pt(px(2.)).child(icon("git-commit-horizontal", 15., DIM)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(div().truncate().text_color(rgb(TEXT)).font_weight(FontWeight::MEDIUM).child(c.headline.clone()))
-                        .when_some(first_body_line, |d, l| {
-                            d.child(div().truncate().text_size(px(12.)).text_color(rgb(DIM)).child(l))
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_size(px(12.))
-                                .text_color(rgb(SOFT))
-                                .child(self.images.face(&c.author, 16.))
-                                .child(div().text_color(rgb(TEXT_SOFT)).child(c.author.clone()))
-                                .child(format!("committed {} ago", ago(&c.at)))
-                                .when(c.additions + c.deletions > 0, |d| {
-                                    d.child(div().text_color(rgb(GREEN)).child(format!("+{}", c.additions)))
-                                        .child(div().text_color(rgb(RED)).child(format!("−{}", c.deletions)))
-                                }),
-                        ),
-                )
-                .children(ci(&c.check_state).map(|(g, col, _)| div().pt(px(2.)).text_color(rgb(col)).child(g)))
-                .child(
-                    div()
-                        .id(("sha", i))
-                        .px(px(6.))
-                        .border_1()
-                        .border_color(rgb(BORDER_3))
-                        .font_family(MONO)
-                        .text_size(px(11.5))
-                        .text_color(rgb(BLUE_LIGHT))
-                        .hover(|s| s.bg(rgb(BG_CODE)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.write_to_clipboard(ClipboardItem::new_string(sha.clone()));
-                            this.banner = Some(format!("Copied {sha}"));
-                            cx.notify();
-                        }))
-                        .child(c.short.clone()),
-                )
-        });
-        card()
-            .child(
-                card_head()
-                    .child(icon("git-commit-horizontal", 14., SOFT))
-                    .child(div().text_color(rgb(TEXT)).child(format!("{} commit{}", d.commits, if d.commits == 1 { "" } else { "s" })))
-                    .child(div().text_color(rgb(DIM)).child("· click a commit to open it on GitHub, the hash to copy it")),
-            )
-            .children(rows)
-            .when(more > 0, |c| {
-                c.child(div().px(px(14.)).py(px(10.)).border_t_1().border_color(rgb(BORDER)).text_color(rgb(DIM)).child(format!(
-                    "{more} earlier commits are not shown"
-                )))
-            })
-            .into_any_element()
-    }
-
-    fn files_view(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
-        if d.files.is_empty() {
-            return self.handoff(format!("{} changed files", d.changed_files), cx);
-        }
-        let editor = self.hello.editor.clone();
-        let max = d.files.iter().map(|f| f.additions + f.deletions).max().unwrap_or(1).max(1);
-        let rows = d.files.iter().map(|f| {
-            let (badge, color) = match f.change_type.as_str() {
-                "ADDED" => ("A", GREEN),
-                "DELETED" => ("D", RED),
-                "RENAMED" => ("R", BLUE),
-                "COPIED" => ("C", BLUE),
-                _ => ("M", YELLOW),
-            };
-            let (dir, base) = match f.path.rsplit_once('/') {
-                Some((d, b)) => (format!("{d}/"), b.to_string()),
-                None => (String::new(), f.path.clone()),
-            };
-            let total = f.additions + f.deletions;
-            let blocks = ((total * 5 + max - 1) / max).clamp(if total > 0 { 1 } else { 0 }, 5);
-            let green = if total == 0 { 0 } else { (blocks * f.additions + total / 2) / total };
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .px(px(14.))
-                .h(px(34.))
-                .border_t_1()
-                .border_color(rgb(BORDER))
-                .child(
-                    div()
-                        .size(px(18.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .border_1()
-                        .border_color(rgb(color))
-                        .text_color(rgb(color))
-                        .text_size(px(10.5))
-                        .font_family(MONO)
-                        .child(badge),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .truncate()
-                        .font_family(MONO)
-                        .text_size(px(12.5))
-                        .child(div().flex().child(div().text_color(rgb(DIM)).child(dir)).child(div().text_color(rgb(TEXT)).child(base))),
-                )
-                .child(div().text_size(px(12.)).text_color(rgb(GREEN)).child(format!("+{}", f.additions)))
-                .child(div().text_size(px(12.)).text_color(rgb(RED)).child(format!("−{}", f.deletions)))
-                .child(div().flex().gap(px(2.)).children((0..5u64).map(|b| {
-                    let c = if b < green { GREEN } else if b < blocks { RED } else { BORDER_3 };
-                    div().size(px(8.)).bg(rgb(c))
-                })))
-        });
-        let more = d.changed_files.saturating_sub(d.files.len() as u64);
-        card()
-            .child(
-                card_head()
-                    .child(icon("file-diff", 14., SOFT))
-                    .child(div().text_color(rgb(TEXT)).child(format!("{} files changed", d.changed_files)))
-                    .child(div().text_color(rgb(GREEN)).child(format!("+{}", d.additions)))
-                    .child(div().text_color(rgb(RED)).child(format!("−{}", d.deletions)))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("files-open")
-                            .px(px(8.))
-                            .h(px(24.))
-                            .flex()
-                            .items_center()
-                            .border_1()
-                            .border_color(rgb(BORDER_3))
-                            .text_color(rgb(TEXT))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(BG_HOVER)))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
-                                    this.start(c, window, cx);
-                                }
-                            }))
-                            .child(format!("Review in {editor}")),
-                    ),
-            )
-            .children(rows)
-            .when(more > 0, |c| {
-                c.child(div().px(px(14.)).py(px(10.)).border_t_1().border_color(rgb(BORDER)).text_color(rgb(DIM)).child(format!(
-                    "{more} more files; open the branch in {editor} to see them all"
-                )))
-            })
             .into_any_element()
     }
 
@@ -2813,7 +2650,15 @@ impl Deck {
             "setup-folders" => self.setup_step(SetupStep::Folders, cx),
             "setup-editor" => self.setup_step(SetupStep::Editor, cx),
             "commits" => self.section = Section::Commits,
-            "files" => self.section = Section::Files,
+            "files" => {
+                self.section = Section::Files;
+                self.load_section(cx);
+            }
+            s if s.starts_with("commit:") => {
+                self.section = Section::Commits;
+                let sha = s[7..].parse::<usize>().ok().and_then(|i| self.selected_pr().and_then(|p| self.details.get(&p.key())?.commit_list.get(i).map(|c| c.oid.clone())));
+                self.open_commit(sha, cx);
+            }
             "palette" => {
                 self.open_palette(PaletteMode::Filters, window, cx);
                 if let Some(p) = self.palette.as_ref() {

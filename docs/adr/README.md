@@ -23,7 +23,9 @@ This folder holds the architecture decision records (ADRs): one short file per d
 | ![Go to a pull request](../screenshots/desktop-goto.png) | ![First-run setup](../screenshots/desktop-setup.png) |
 | `⌘T` jumps to any PR | First-run setup: GitHub sign-in, folders, editor |
 | ![Files changed](../screenshots/desktop-files.png) | ![Comment and review](../screenshots/desktop-review.png) |
-| Changed files with their size of change | Comment, approve or request changes, reply on threads |
+| Every changed file's diff, each one collapsible | Comment, approve or request changes, reply on threads |
+| ![A commit with its diff](../screenshots/desktop-commit.png) | |
+| A commit opened: message, author and what it changed | |
 
 All screenshots use the sample data from `prdeck demo` / `--demo`.
 
@@ -114,5 +116,6 @@ sequenceDiagram
 | [0010](0010-pr-text-rendered-like-github.md) | PR text on the desktop is rendered like github.com |
 | [0011](0011-first-run-setup.md) | First-run setup signs in through gh |
 | [0012](0012-comment-and-review-from-the-app.md) | Comment and review from the app |
+| [0013](0013-diffs-in-the-app.md) | Diffs in the app |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.

@@ -225,3 +225,36 @@ func TestCommentReviewAndReply(t *testing.T) {
 	}
 	t.Error("demo data changed: need a review thread on one of your PRs")
 }
+
+func TestDiffs(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	var pr github.PR
+	for _, p := range res.PRs {
+		if p.Number == 4821 {
+			pr = p
+		}
+	}
+	var files []github.FileDiff
+	if err := json.Unmarshal(c.call("prDiff", map[string]any{"pr": pr}).Result, &files); err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 || !strings.Contains(files[1].Patch, "class StreamPushSource") || files[1].Additions == 0 {
+		t.Fatalf("PR diff: %+v", files)
+	}
+	var d github.Detail
+	_ = json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d)
+	var commit github.CommitDiff
+	r := c.call("commitDiff", map[string]any{"repo": pr.Repo, "sha": d.CommitList[4].OID})
+	if r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	_ = json.Unmarshal(r.Result, &commit)
+	if len(commit.Files) != 1 || !strings.Contains(commit.Files[0].Patch, "+    def push(self, name, df, *, allow_registry_cache=False):") {
+		t.Errorf("commit diff: %+v", commit)
+	}
+	if r := c.call("commitDiff", map[string]any{"repo": pr.Repo, "sha": "nope"}); r.Error == nil {
+		t.Error("an unknown commit should be an error")
+	}
+}

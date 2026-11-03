@@ -11,15 +11,21 @@ import (
 
 // Client runs PR Deck's GraphQL queries. Auth comes from gh (`gh auth login`) or GH_TOKEN.
 type Client struct {
-	gql *api.GraphQLClient
+	gql  *api.GraphQLClient
+	rest *api.RESTClient // diffs: GraphQL has no patches
 }
 
 func NewClient() (*Client, error) {
-	gql, err := api.NewGraphQLClient(api.ClientOptions{Timeout: 30 * time.Second})
+	opts := api.ClientOptions{Timeout: 30 * time.Second}
+	gql, err := api.NewGraphQLClient(opts)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub login not found; run `gh auth login` first (%w)", err)
 	}
-	return &Client{gql: gql}, nil
+	rest, err := api.NewRESTClient(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{gql: gql, rest: rest}, nil
 }
 
 // Login is the signed-in user's GitHub login.

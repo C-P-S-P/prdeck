@@ -55,6 +55,12 @@ type writer interface {
 	ReplyThread(ctx context.Context, threadID, body string) error
 }
 
+// differ is a backend that can load diffs.
+type differ interface {
+	CommitDiff(ctx context.Context, repo, sha string) (*github.CommitDiff, error)
+	PRDiff(ctx context.Context, pr github.PR) ([]github.FileDiff, error)
+}
+
 // imageFetcher is a backend that can download images with the user's GitHub login.
 type imageFetcher interface {
 	FetchImage(ctx context.Context, url string) ([]byte, string, error)
@@ -304,6 +310,34 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"ok": true}, nil
+
+	case "commitDiff", "prDiff":
+		p, err := decode[struct {
+			Repo, SHA string
+			PR        github.PR
+		}](raw)
+		if err != nil {
+			return nil, err
+		}
+		d, ok := s.b.(differ)
+		if !ok {
+			return nil, errors.New("this backend has no diffs")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		if method == "commitDiff" {
+			c, err := d.CommitDiff(ctx, p.Repo, p.SHA)
+			if err != nil {
+				return nil, err
+			}
+			c.Files = nonNil(c.Files)
+			return c, nil
+		}
+		files, err := d.PRDiff(ctx, p.PR)
+		if err != nil {
+			return nil, err
+		}
+		return nonNil(files), nil
 
 	case "setupStatus":
 		return s.setupStatus()
