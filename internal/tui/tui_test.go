@@ -11,11 +11,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/patelchaitany/prdeck/internal/cache"
-	"github.com/patelchaitany/prdeck/internal/config"
-	"github.com/patelchaitany/prdeck/internal/core"
-	"github.com/patelchaitany/prdeck/internal/github"
-	"github.com/patelchaitany/prdeck/internal/repos"
+	"github.com/C-P-S-P/prdeck/internal/cache"
+	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/C-P-S-P/prdeck/internal/core"
+	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/repos"
 )
 
 type fakeBackend struct {

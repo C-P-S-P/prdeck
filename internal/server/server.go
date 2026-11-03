@@ -21,12 +21,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/patelchaitany/prdeck/internal/cache"
-	"github.com/patelchaitany/prdeck/internal/config"
-	"github.com/patelchaitany/prdeck/internal/core"
-	"github.com/patelchaitany/prdeck/internal/github"
-	"github.com/patelchaitany/prdeck/internal/mdrender"
-	"github.com/patelchaitany/prdeck/internal/repos"
+	"github.com/C-P-S-P/prdeck/internal/cache"
+	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/C-P-S-P/prdeck/internal/core"
+	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/mdrender"
+	"github.com/C-P-S-P/prdeck/internal/repos"
 )
 
 // Backend is what the server needs from the core. core.Service and the demo backend

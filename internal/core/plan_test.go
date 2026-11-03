@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/patelchaitany/prdeck/internal/config"
-	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/C-P-S-P/prdeck/internal/github"
 )
 
 func command(name string) config.Command {

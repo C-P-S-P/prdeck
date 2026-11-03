@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/github"
 )
 
 // Sample data: fictional repos and people, the same ones the UI design uses.

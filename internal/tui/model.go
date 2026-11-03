@@ -16,12 +16,12 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/patelchaitany/prdeck/internal/cache"
-	"github.com/patelchaitany/prdeck/internal/config"
-	"github.com/patelchaitany/prdeck/internal/core"
-	"github.com/patelchaitany/prdeck/internal/fuzzy"
-	"github.com/patelchaitany/prdeck/internal/github"
-	"github.com/patelchaitany/prdeck/internal/repos"
+	"github.com/C-P-S-P/prdeck/internal/cache"
+	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/C-P-S-P/prdeck/internal/core"
+	"github.com/C-P-S-P/prdeck/internal/fuzzy"
+	"github.com/C-P-S-P/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/repos"
 )
 
 // Backend is what the UI needs from the core. *core.Service implements it.

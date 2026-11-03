@@ -10,8 +10,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/patelchaitany/prdeck/internal/config"
-	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/config"
+	"github.com/C-P-S-P/prdeck/internal/github"
 )
 
 func stripANSI(s string) string { return ansi.Strip(s) }

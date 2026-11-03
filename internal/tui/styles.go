@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/C-P-S-P/prdeck/internal/github"
 )
 
 // Colors follow the UI design: dark, low-chroma panels with a few signal colors.
