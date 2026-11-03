@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,7 +59,10 @@ func (s *Service) Viewer() string { return s.cache.Viewer() }
 
 // Rescan rebuilds the map of local clones.
 func (s *Service) Rescan() {
-	ix := repos.Build(s.cfg.Repos.Scan, s.cfg.Repos.Paths)
+	s.mu.RLock()
+	scan, paths := s.cfg.Repos.Scan, s.cfg.Repos.Paths
+	s.mu.RUnlock()
+	ix := repos.Build(scan, paths)
 	s.mu.Lock()
 	s.index = ix
 	s.mu.Unlock()
@@ -210,7 +215,9 @@ func (s *Service) Reload() error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
 	*s.cfg = *cfg
+	s.mu.Unlock()
 	s.Rescan()
 	s.diskMu.Lock()
 	s.disk = nil
@@ -231,22 +238,34 @@ type Folder struct {
 	Branch   string   `json:"branch"`   // checked out now ("HEAD" when detached)
 	Changes  []string `json:"changes"`  // uncommitted changes, `git status --porcelain` lines
 	Rebasing bool     `json:"rebasing"`
+	// The local branch named like the PR's head is the user's own, not the PR's (a PR
+	// from a fork's main, which gh checks out as <owner>/main).
+	OwnBranch bool `json:"ownBranch"`
 }
 
-// ResolveFolder finds where commands for pr run, without changing anything. Commands run
-// in the user's clone, or in a worktree that already has the PR's branch. A new worktree
-// is planned only when asked for (wantWorktree) or turned on in config.
+// ResolveFolder finds where commands for pr run, without changing anything (it only
+// drops a worktree of the PR whose folder was deleted). Commands run in the user's
+// clone, or in a worktree that already has the PR's branch. A new worktree is planned
+// only when asked for (wantWorktree) or turned on in config.
 func (s *Service) ResolveFolder(pr github.PR, wantWorktree bool) (Folder, error) {
 	c, ok := s.clone(pr.Repo)
 	if !ok {
 		return Folder{}, fmt.Errorf("%w of %s", ErrNoClone, pr.Repo)
 	}
 	f := Folder{Path: c.Path, Clone: c.Path, Remote: c.Remote, Exists: true}
-	if p := repos.BranchWorktree(c.Path, pr.HeadRefName); p != "" {
+	f.OwnBranch = pr.IsCrossRepo && repos.OwnBranch(c.Path, c.Remote, pr.Repo, pr.HeadRefName)
+	if p := repos.BranchWorktree(c.Path, pr.HeadRefName); p != "" && !f.OwnBranch {
 		f.Path, f.Worktree = p, p != c.Path
 	} else if wantWorktree || s.cfg.Editor.UseWorktree() {
-		f.Path, f.Worktree = repos.WorktreePath(s.cfg.Editor.WorktreeDir, pr.Repo, pr.Number), true
+		dir := s.cfg.Editor.WorktreeDir
+		f.Path, f.Worktree = repos.WorktreePath(dir, pr.Repo, pr.Number), true
 		st, err := os.Stat(f.Path)
+		if err == nil && st.IsDir() && !repos.SameClone(f.Path, c.Path) {
+			// <name>-<number> is taken by another repo of the same name (another org's
+			// api): use <owner>-<name>-<number>. WorktreePath drops what is before the "/".
+			f.Path = repos.WorktreePath(dir, "/"+pr.Owner()+"-"+pr.Name(), pr.Number)
+			st, err = os.Stat(f.Path)
+		}
 		f.Exists = err == nil && st.IsDir()
 	}
 	if f.Exists {
@@ -289,9 +308,22 @@ func (s *Service) createWorktree(ctx context.Context, pr github.PR, f Folder) (s
 	script := strings.Join([]string{
 		"git -C " + runner.Quote(f.Clone) + " fetch " + runner.Quote(f.Remote) + " --quiet",
 		"git -C " + runner.Quote(f.Clone) + " worktree add --detach --quiet " + runner.Quote(f.Path),
-		"cd " + runner.Quote(f.Path) + " && gh pr checkout " + runner.Quote(pr.URL),
 	}, " && ")
 	out, err := runner.Run(ctx, script, f.Clone)
+	if err == nil {
+		var co string
+		co, err = runner.Run(ctx, "gh pr checkout "+runner.Quote(pr.URL), f.Path)
+		if err != nil {
+			// Left behind, a worktree whose checkout failed would be opened next time as
+			// it is, without the PR's branch. Removed even when ctx was cancelled, but only
+			// once add worked: if add failed, the folder may be another request's worktree.
+			_, _ = runner.Run(context.Background(), "git worktree remove --force "+runner.Quote(f.Path), f.Clone)
+		}
+		if out != "" && co != "" {
+			out += "\n"
+		}
+		out += co
+	}
 	if err != nil {
 		return out, fmt.Errorf("creating worktree %s: %w", config.ShortenHome(f.Path), err)
 	}
@@ -311,10 +343,44 @@ func (s *Service) Execute(ctx context.Context, p Plan) Result {
 	}
 	if p.Action == "open" {
 		c := runner.Command(context.Background(), p.Script, p.Dir(), true)
+		// The output goes to a file, not a pipe, so an editor left running never keeps
+		// Wait from returning. A command that fails at once (no such editor) is reported.
+		tmp, _ := os.CreateTemp("", "prdeck-open-*")
+		output := func() string { // reads and closes the file
+			if tmp == nil {
+				return ""
+			}
+			defer tmp.Close()
+			b, _ := io.ReadAll(io.NewSectionReader(tmp, 0, 1<<20))
+			return strings.TrimRight(string(b), "\n")
+		}
+		if tmp != nil {
+			c.Stdout, c.Stderr = tmp, tmp
+			// The editor keeps the file open, so its name can go on return: nothing is
+			// left behind when prdeck quits before the editor does.
+			defer os.Remove(tmp.Name())
+		}
 		if err := c.Start(); err != nil {
+			output()
 			return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
 		}
-		go func() { _ = c.Wait() }()
+		var out string
+		done := make(chan error, 1)
+		go func() {
+			err := c.Wait()
+			out = output()
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				if out != "" {
+					log = append(log, out)
+				}
+				return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
+			}
+		case <-time.After(500 * time.Millisecond):
+		}
 		log = append(log, "Opened "+config.ShortenHome(p.Folder.Path))
 		return Result{Plan: p, Output: strings.Join(log, "\n")}
 	}
@@ -365,10 +431,13 @@ func (s *Service) ListClones(ctx context.Context) []repos.DiskClone {
 		return nil
 	}
 	roots := []string{home, filepath.Join(home, "go", "src", "github.com")}
-	for _, d := range s.cfg.Repos.Scan {
+	s.mu.RLock()
+	scan, paths := s.cfg.Repos.Scan, s.cfg.Repos.Paths
+	s.mu.RUnlock()
+	for _, d := range scan {
 		roots = append(roots, config.ExpandHome(d))
 	}
-	for _, p := range s.cfg.Repos.Paths {
+	for _, p := range paths {
 		roots = append(roots, config.ExpandHome(p))
 	}
 	var all []repos.DiskClone
@@ -406,10 +475,15 @@ func (s *Service) SetClonePath(repo, path string) (string, error) {
 	if err := config.SaveRepoPath(s.cfgPath, repo, top); err != nil {
 		return "", fmt.Errorf("saving to config: %w", err)
 	}
-	if s.cfg.Repos.Paths == nil {
-		s.cfg.Repos.Paths = map[string]string{}
+	// A new map, not an edit: Rescan and ListClones may still be reading the old one.
+	s.mu.Lock()
+	paths := maps.Clone(s.cfg.Repos.Paths)
+	if paths == nil {
+		paths = map[string]string{}
 	}
-	s.cfg.Repos.Paths[repo] = top
+	paths[repo] = top
+	s.cfg.Repos.Paths = paths
+	s.mu.Unlock()
 	s.Rescan()
 	s.diskMu.Lock()
 	s.disk = nil // pick up a clone that was outside the last scan

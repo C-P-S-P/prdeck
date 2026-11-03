@@ -157,7 +157,27 @@ func WorktreePath(dir, repo string, number int) string {
 	return filepath.Join(config.ExpandHome(dir), name+"-"+strconv.Itoa(number))
 }
 
+// SameClone reports whether dir is clone itself or one of its worktrees.
+func SameClone(dir, clone string) bool { return commonDir(dir) == commonDir(clone) }
+
+// commonDir is the .git folder a clone shares with its worktrees, or "".
+func commonDir(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimSpace(string(out))
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		p = real
+	}
+	return p
+}
+
 // BranchWorktree returns the worktree (or the clone itself) that has branch checked out.
+// A worktree whose folder was deleted by hand is still registered with git and keeps
+// the branch from being checked out anywhere else, so it is removed and "" returned.
+// Only that one: `git worktree prune` would also drop worktrees on a disk that is not
+// mounted right now.
 func BranchWorktree(clone, branch string) string {
 	out, err := exec.Command("git", "-C", clone, "worktree", "list", "--porcelain").Output()
 	if err != nil {
@@ -169,10 +189,42 @@ func BranchWorktree(clone, branch string) string {
 		case strings.HasPrefix(line, "worktree "):
 			path = strings.TrimPrefix(line, "worktree ")
 		case line == "branch refs/heads/"+branch:
+			if st, err := os.Stat(path); err != nil || !st.IsDir() {
+				_ = exec.Command("git", "-C", clone, "worktree", "remove", "--force", path).Run()
+				return ""
+			}
 			return path
 		}
 	}
 	return ""
+}
+
+// OwnBranch reports whether a fork PR whose head is branch is checked out by gh under
+// another name (<owner>/<branch>), so the local branch named branch is the user's own.
+// gh does that when branch is the base repo's default branch and no remote points at
+// the fork. That is only certain when the remote's HEAD names branch and every remote
+// points at repo, the base.
+func OwnBranch(clone, remote, repo, branch string) bool {
+	out, err := exec.Command("git", "-C", clone, "symbolic-ref", "--short", "refs/remotes/"+remote+"/HEAD").Output()
+	if err != nil || strings.TrimSpace(string(out)) != remote+"/"+branch {
+		return false
+	}
+	out, err = exec.Command("git", "-C", clone, "remote", "-v").Output()
+	if err != nil {
+		return false
+	}
+	n := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || f[len(f)-1] != "(fetch)" {
+			continue
+		}
+		if r, ok := ParseRemote(f[1]); len(f) != 3 || !ok || !strings.EqualFold(r, repo) {
+			return false
+		}
+		n++
+	}
+	return n > 0
 }
 
 // CurrentBranch returns the checked-out branch, or "HEAD" when detached (mid-rebase).
