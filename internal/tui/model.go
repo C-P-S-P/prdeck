@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -773,7 +775,7 @@ func (m Model) pathMatches() []pathMatch {
 		}
 		return out[i].disp < out[j].disp
 	})
-	if strings.HasPrefix(q, "/") || strings.HasPrefix(q, "~") || strings.HasPrefix(q, ".") {
+	if strings.HasPrefix(q, "/") || strings.HasPrefix(q, "~") || strings.HasPrefix(q, ".") || filepath.IsAbs(q) { // IsAbs: C:\x on Windows
 		lit := pathMatch{path: q, disp: q, literal: true}
 		for _, o := range out {
 			if o.disp == q || o.path == q {
@@ -1027,6 +1029,13 @@ func copyToClipboard(s string) string {
 	switch runtime.GOOS {
 	case "darwin":
 		c = exec.Command("pbcopy")
+	case "windows":
+		// The Windows clipboard API takes UTF-16, which clip.exe would need fed by hand.
+		// The package is the one Bubble Tea's text input already pastes with.
+		if err := clipboard.WriteAll(strings.ReplaceAll(s, "\x00", "")); err != nil {
+			return "! could not copy: " + err.Error()
+		}
+		return "Copied command"
 	default:
 		c = exec.Command("sh", "-c", "wl-copy 2>/dev/null || xclip -selection clipboard")
 	}

@@ -143,3 +143,25 @@ func TestExampleParses(t *testing.T) {
 		t.Errorf("example has warnings: %v", cfg.Warnings)
 	}
 }
+
+// Paths shortened for display expand back on every system: ShortenHome gives ~\code on
+// Windows.
+func TestHomeRoundTrip(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	p := filepath.Join(home, "code", "tool")
+	short := ShortenHome(p)
+	if want := "~" + string(filepath.Separator) + filepath.Join("code", "tool"); short != want {
+		t.Errorf("ShortenHome(%q) = %q, want %q", p, short, want)
+	}
+	for _, s := range []string{short, "~/code/tool"} {
+		if got := ExpandHome(s); got != p {
+			t.Errorf("ExpandHome(%q) = %q, want %q", s, got, p)
+		}
+	}
+	if got := ExpandHome(`~x\y`); got != `~x\y` {
+		t.Errorf("ExpandHome(~x) = %q", got)
+	}
+}
