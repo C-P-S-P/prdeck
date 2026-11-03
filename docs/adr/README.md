@@ -28,6 +28,8 @@ This folder holds the architecture decision records (ADRs): one short file per d
 | A commit opened: message, author and what it changed | Inline review: comment on lines, pending until submitted |
 | ![Checks](../screenshots/desktop-checks.png) | ![Re-run failed](../screenshots/desktop-rerun.png) |
 | Checks open their logs; Re-run failed when CI failed | Only the failed GitHub Actions jobs run again |
+| ![Merge when ready](../screenshots/desktop-merge.png) | ![Auto-merge on](../screenshots/desktop-automerge.png) |
+| Merge when ready, next to the review buttons, asks first | Auto-merge on: GitHub merges once checks and reviews pass |
 
 All screenshots use the sample data from `prdeck demo` / `--demo`.
 
@@ -121,5 +123,6 @@ sequenceDiagram
 | [0013](0013-diffs-in-the-app.md) | Diffs in the app |
 | [0014](0014-inline-review.md) | Inline review on the diff |
 | [0015](0015-checks-link-to-their-logs-and-re-run.md) | Checks link to their logs, and Re-run failed |
+| [0016](0016-review-and-merge-commands.md) | Approve, Request changes, Comment and Merge when ready as commands |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.

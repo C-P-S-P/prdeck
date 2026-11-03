@@ -71,3 +71,15 @@ keys "1"
 sleep 1.5
 keys "F"
 shot rerun "prdeck — re-run failed checks" 1.5
+keys Escape
+
+keys "j"
+sleep 1
+keys "a"
+shot approve "prdeck — approve"
+keys Enter
+sleep 1.5
+keys "M"
+sleep 0.5
+keys Enter
+shot merge "prdeck — merge when ready" 1.5
