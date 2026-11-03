@@ -12,7 +12,8 @@ $name = "prdeck-desktop-$version-windows-$($env:PROCESSOR_ARCHITECTURE.ToLower()
 $out = "$here\dist\$name"
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force $out | Out-Null
-Copy-Item "$here\target\release\prdeck-desktop.exe" "$out\PR Deck.exe"
+$target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$here\target" }
+Copy-Item "$target\release\prdeck-desktop.exe" "$out\PR Deck.exe"
 Push-Location $root
 try { go build -o "$out\prdeck.exe" ./cmd/prdeck } finally { Pop-Location }
 if ($LASTEXITCODE) { exit $LASTEXITCODE }

@@ -12,7 +12,7 @@ name="prdeck-desktop-$version-linux-$(uname -m)"
 out="$here/dist/$name"
 rm -rf "$out"
 mkdir -p "$out"
-cp "$here/target/release/prdeck-desktop" "$out/prdeck-desktop"
+cp "${CARGO_TARGET_DIR:-$here/target}/release/prdeck-desktop" "$out/prdeck-desktop"
 (cd "$root" && go build -o "$out/prdeck" ./cmd/prdeck)
 # The pull request icon PR Deck shows in its lists (Lucide, ISC), in the app's blue.
 sed 's/currentColor/#6fa8f5/' "$here/assets/icons/git-pull-request.svg" > "$out/prdeck.svg"
@@ -42,7 +42,7 @@ share="${XDG_DATA_HOME:-$HOME/.local/share}"
 mkdir -p "$bin" "$share/applications" "$share/icons/hicolor/scalable/apps"
 cp prdeck-desktop prdeck "$bin/"
 cp prdeck.svg "$share/icons/hicolor/scalable/apps/"
-sed "s|^Exec=.*|Exec=$bin/prdeck-desktop|" prdeck.desktop > "$share/applications/prdeck.desktop"
+sed "s|^Exec=.*|Exec=\"$bin/prdeck-desktop\"|" prdeck.desktop > "$share/applications/prdeck.desktop"
 echo "Installed: PR Deck is in your applications, and prdeck (the terminal app) in $bin."
 INSTALL
 chmod +x "$out/install.sh"
