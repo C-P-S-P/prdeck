@@ -30,6 +30,15 @@ git clone https://github.com/MasterPushers/prdeck && cd prdeck
 go build -o ~/.local/bin/prdeck ./cmd/prdeck
 ```
 
+### Windows and Linux
+
+The terminal app works the same on Linux and Windows, with the same config file (`~/.config/prdeck/config.yaml`, which is `%USERPROFILE%\.config\prdeck\config.yaml` on Windows) and the same commands.
+
+- **Windows** needs [Git for Windows](https://gitforwindows.org) as well as `gh` (`winget install --id GitHub.cli`). Commands are shell commands, so prdeck runs them with Git for Windows' `sh.exe` (found on PATH, next to `git.exe`, or in `Program Files\Git`); write your own commands as you would on a Mac (`&&`, `$(…)`, `'quotes'`). Build with `go build -o prdeck.exe ./cmd/prdeck` and put it on your PATH. `b` opens the PR in your default browser, `y` copies to the Windows clipboard, `esc` on a running command stops everything it started, and paths can be typed as `C:\code\x` or `~\code\x`.
+- **Linux** runs commands with `/bin/sh`, opens links with `xdg-open`, and copies with `wl-copy` or `xclip`.
+
+Why and how: [ADR 0016](docs/adr/0016-windows-and-linux.md).
+
 ## Use
 
 ```bash

@@ -93,7 +93,7 @@ sequenceDiagram
 | `internal/github` | GitHub GraphQL with the gh login: search, PR detail, the viewer, image downloads. |
 | `internal/cache` | The last PR lists and PR details as JSON, so both apps open instantly. |
 | `internal/repos` | Finds clones on disk, reads their branch and uncommitted changes, plans worktrees. |
-| `internal/runner` | Fills `{placeholders}` (shell-quoted) and runs commands with `/bin/sh -c`. |
+| `internal/runner` | Fills `{placeholders}` (shell-quoted) and runs commands with `/bin/sh -c` (Git for Windows' `sh.exe` on Windows). |
 | `internal/core` | `Service`: ties the above together; turns a command into a `Plan` and runs it. |
 | `internal/server` | `prdeck serve`: the core as one-JSON-object-per-line requests; first-run setup. |
 | `internal/tui`, `internal/mdrender`, `internal/termout` | The terminal app, its markdown renderer, and its terminal writer. |
@@ -119,5 +119,6 @@ sequenceDiagram
 | [0013](0013-diffs-in-the-app.md) | Diffs in the app |
 | [0014](0014-inline-review.md) | Inline review on the diff |
 | [0015](0015-comments-on-several-lines.md) | Comments on several lines |
+| [0016](0016-windows-and-linux.md) | Windows and Linux |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.
