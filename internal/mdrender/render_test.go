@@ -228,3 +228,68 @@ func TestFencesFollowCommonMark(t *testing.T) {
 		}
 	}
 }
+
+func TestCodeSpanKeepsBackslashes(t *testing.T) {
+	// Backslashes in code are literal. Entities still read as characters, so HTML
+	// <code>&lt;T&gt;</code> from the cleanup step shows <T>.
+	out := plain(Render("match `^\\d+\\.\\d+$` in `a\\_b`, not schema\\_x, and <code>&lt;T&gt;</code>", Options{Width: 80}))
+	for _, want := range []string{" ^\\d+\\.\\d+$ ", " a\\_b ", "schema_x", " <T>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+}
+
+func TestHTMLCodeReadsEscapes(t *testing.T) {
+	// HTML <code> is markdown on GitHub, so \_ reads _ there, unlike in a code span.
+	out := plain(Render("<code>a\\_b</code> <kbd>Ctrl+\\\\</kbd> `c\\_d`", Options{Width: 80}))
+	for _, want := range []string{"a_b ", " Ctrl+\\ ", " c\\_d"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+}
+
+func TestTabsSeparateWords(t *testing.T) {
+	if out := plain(Render("BenchmarkFoo\t1234 ns/op\ta\tb", Options{Width: 80})); out != "BenchmarkFoo 1234 ns/op a b" {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestListCanStartAtZero(t *testing.T) {
+	if out := plain(Render("0. zero\n1. one", Options{Width: 40})); out != "0. zero\n1. one" {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestCodeCutAtEdgeKeepsPanelWidth(t *testing.T) {
+	// A token that ends exactly at the edge, and wide characters across it.
+	for _, src := range []string{
+		"```python\naaaaaaaaaaaaaaaaaa = 1\n```",
+		"```go\nx := \"日本語日本語日本語日本語\"\n```",
+		"```\n日本語日本語日本語日本語日本語\n```",
+	} {
+		out := Render(src, Options{Width: 20})
+		for _, l := range strings.Split(out, "\n") {
+			if ansi.StringWidth(l) != 20 {
+				t.Errorf("%q: code panel line is %d wide, want 20: %q", src, ansi.StringWidth(l), plain(l))
+			}
+		}
+		if lines := strings.Split(plain(out), "\n"); !strings.HasSuffix(strings.TrimRight(lines[len(lines)-1], " "), "…") {
+			t.Errorf("%q: long code line should end in …: %q", src, lines[len(lines)-1])
+		}
+	}
+	// The "…" has its own style, not the bold or italic of the token it cuts.
+	if out := Render("```go\nfunc aaaaaaaaaaaaaaaaaaaa() {}\n```", Options{Width: 12}); !strings.Contains(out, "\x1b[0m"+paint("…", style{fg: cDim, bg: cPanel}, false)) {
+		t.Errorf("the … should follow a reset: %q", out)
+	}
+}
+
+func TestHTMLBlockEntitiesRead(t *testing.T) {
+	if out := plain(Render("<table><tr><td>a &amp; b &#x2705; &lt;br&gt;</td></tr></table>", Options{Width: 60})); out != "a & b ✅ <br>" {
+		t.Errorf("got %q", out)
+	}
+	if out := Render("<table><tr><td>&#27;]0;t&#7;</td></tr></table>", Options{Width: 60}); strings.Contains(out, "\x1b]") || strings.Contains(out, "\a") {
+		t.Errorf("an escape reached the output: %q", out)
+	}
+}

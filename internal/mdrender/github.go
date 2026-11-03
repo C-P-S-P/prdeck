@@ -22,6 +22,7 @@ var (
 	summaryTag   = regexp.MustCompile(`(?is)<summary>\s*(.*?)\s*</summary>`)
 	brTag        = regexp.MustCompile(`(?i)<br\s*/?>`)
 	codeTag      = regexp.MustCompile(`(?is)<(kbd|code)>(.*?)</(kbd|code)>`)
+	escapedPunct = regexp.MustCompile(`\\([!-/:-@\[-_{-~])`)
 	boldTag      = regexp.MustCompile(`(?is)<(b|strong)>(.*?)</(b|strong)>`)
 	italicTag    = regexp.MustCompile(`(?is)<(i|em)>(.*?)</(i|em)>`)
 	otherTag     = regexp.MustCompile(`(?i)</?(details|summary|p|div|span|sub|sup|center|picture|source|ins|del|u|small|big|h[1-6]|a|dl|dt|dd|blockquote|b|strong|i|em|code|kbd)\b[^>]*>`)
@@ -113,7 +114,11 @@ func convertHTML(s string) string {
 	s = summaryTag.ReplaceAllString(s, "\n**▸ $1**\n")
 	// A real line break would fall out of list items, so <br> becomes a space.
 	s = brTag.ReplaceAllString(s, " ")
-	s = codeTag.ReplaceAllString(s, "`$2`")
+	// Inside HTML <code> GitHub still reads \_ as _, but a markdown code span would
+	// keep the backslash, so escapes go now. \` stays: it would end the span early.
+	s = codeTag.ReplaceAllStringFunc(s, func(tag string) string {
+		return "`" + escapedPunct.ReplaceAllString(codeTag.FindStringSubmatch(tag)[2], "$1") + "`"
+	})
 	s = boldTag.ReplaceAllString(s, "**$2**")
 	s = italicTag.ReplaceAllString(s, "*$2*")
 	s = otherTag.ReplaceAllString(s, "")

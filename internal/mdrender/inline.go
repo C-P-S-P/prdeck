@@ -46,7 +46,15 @@ func (r *renderer) inlineNode(n ast.Node, base style) []run {
 	case *ast.CodeSpan:
 		st := base
 		st.fg, st.bg, st.bold, st.italic = cCodeFg, cCodeBg, false, false
-		return []run{{text: " " + plainText(n, r.src) + " ", st: st}}
+		// Backslashes in code are literal (`^\d+\.\d+$`). Entities still resolve, so
+		// <code>&lt;T&gt;</code> from the cleanup step reads <T>.
+		var b strings.Builder
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			if t, ok := c.(*ast.Text); ok {
+				b.WriteString(noControls(string(util.ResolveEntityNames(util.ResolveNumericReferences(t.Segment.Value(r.src)))), "\n\t"))
+			}
+		}
+		return []run{{text: " " + b.String() + " ", st: st}}
 	case *ast.Emphasis:
 		st := base
 		if n.Level >= 2 {
@@ -252,7 +260,8 @@ func pieces(runs []run) []piece {
 					j = len(text)
 				}
 				endWord()
-				sp := strings.Repeat(" ", ansi.StringWidth(strings.ReplaceAll(text[:j], "\n", " ")))
+				// A tab has no width of its own, but still parts the words around it.
+				sp := strings.Repeat(" ", max(ansi.StringWidth(strings.ReplaceAll(text[:j], "\n", " ")), 1))
 				out = append(out, piece{parts: []run{{text: sp, st: rn.st}}, space: true, width: len(sp)})
 				text = text[j:]
 				continue

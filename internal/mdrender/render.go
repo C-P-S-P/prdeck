@@ -1,6 +1,7 @@
 package mdrender
 
 import (
+	"html"
 	"regexp"
 	"strconv"
 	"strings"
@@ -144,9 +145,6 @@ func (r *renderer) list(n *ast.List, w int) []string {
 	defer func() { r.depth-- }()
 	count := n.ChildCount()
 	start := n.Start
-	if start == 0 {
-		start = 1
-	}
 	numW := len(strconv.Itoa(start + count - 1))
 	var out []string
 	i := 0
@@ -203,7 +201,8 @@ func (r *renderer) html(n *ast.HTMLBlock, w int) []string {
 		seg := n.Lines().At(i)
 		b.Write(seg.Value(r.src))
 	}
-	t := strings.TrimSpace(spaceRe.ReplaceAllString(tagRe.ReplaceAllString(b.String(), " "), " "))
+	// Entities are decoded after the tags go, so an escaped &lt;tag&gt; stays as text.
+	t := strings.TrimSpace(spaceRe.ReplaceAllString(noControls(html.UnescapeString(tagRe.ReplaceAllString(b.String(), " ")), "\n\r\t"), " "))
 	if t == "" {
 		return nil
 	}
