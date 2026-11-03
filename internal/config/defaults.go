@@ -104,9 +104,6 @@ commands:
     run: git commit -am {input}
     branch: true
 
-theme:
-  markdown: dark               # dark | light | dracula | notty
-
 ui:
   mouse: true                  # click and scroll; hold Option (or Shift) to select text
 `

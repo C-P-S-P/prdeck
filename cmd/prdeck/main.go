@@ -76,7 +76,7 @@ func run(args []string) error {
 			fmt.Println(tui.PrepareMarkdown(string(raw)))
 			return nil
 		}
-		fmt.Println(tui.RenderMarkdown(string(raw), width, "dark"))
+		fmt.Println(tui.RenderMarkdown(string(raw), width))
 		return nil
 	case "demo":
 		cfg, err := config.Load(config.DefaultPath())

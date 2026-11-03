@@ -93,7 +93,7 @@ type Command struct {
 func (c Command) OnBar() bool { return c.Bar != nil && *c.Bar }
 
 type Theme struct {
-	Markdown string `yaml:"markdown"` // glamour style: dark, light, dracula, notty…
+	Markdown string `yaml:"markdown"` // no longer used (one built-in style); kept so old configs still load
 }
 
 type UI struct {

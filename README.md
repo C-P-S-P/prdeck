@@ -51,7 +51,14 @@ prdeck config init         # write a starter config
 | `?` | Help: every key and the exact command it runs |
 | Mouse | Click a repo, PR, filter tab or a key in the bottom bar; click the selected PR again to open it; the wheel scrolls the pane under it |
 
-PR descriptions and comments render like on GitHub: headings, tables, task lists, code, alerts (`> [!NOTE]`), `<details>` sections, `@mentions`, suggestion blocks, and images as `[image: …]` links.
+PR descriptions and comments render like on GitHub, inside the pane:
+
+- **Links** show only their text and are clickable (terminal hyperlinks); long bare URLs are shortened to `host/path…`. With mouse support on, hold ⌘ (iTerm2, Ghostty, WezTerm) or your terminal's modifier to click them.
+- **Tables** shrink to fit the pane; long cells wrap and short columns stay on one line. Bot reports from Codecov or CodeRabbit stay readable.
+- **Code** blocks are syntax highlighted and never wrap; a line too long for the pane ends in `…`.
+- **GitHub extras:** alerts (`> [!NOTE]`, colored by type), task lists, `<details>` sections, emoji codes (`:warning:` → ⚠️), `@mentions`, suggestion blocks, and images as `[image: …]` links. A newline is a line break, as on GitHub.
+
+`prdeck md FILE [WIDTH]` renders a markdown file the same way, to check something without opening a PR.
 
 With mouse support on, hold Option (or Shift, depending on your terminal) to select text. Set `ui.mouse: false` to turn it off.
 
@@ -110,7 +117,7 @@ Keys `j k q ? / R 1-9` are kept for navigation.
 
 ## How it's built
 
-One Go core (`internal/core`, `config`, `github`, `cache`, `repos`, `runner`) behind a Bubble Tea front-end (`internal/tui`). GitHub data comes from the GraphQL API through [go-gh](https://github.com/cli/go-gh); PR text is rendered with [Glamour](https://github.com/charmbracelet/glamour). The same core is meant to back a Mac app later.
+One Go core (`internal/core`, `config`, `github`, `cache`, `repos`, `runner`) behind a Bubble Tea front-end (`internal/tui`). GitHub data comes from the GraphQL API through [go-gh](https://github.com/cli/go-gh); PR text is parsed with [goldmark](https://github.com/yuin/goldmark) and drawn by `internal/mdrender`, which keeps every line inside the pane. The same core is meant to back a Mac app later.
 
 ```bash
 go test ./...

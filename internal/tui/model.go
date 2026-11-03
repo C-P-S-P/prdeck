@@ -144,7 +144,7 @@ func New(be Backend) Model {
 		be: be, cfg: cfg, filters: filters, focus: panePRs,
 		details: map[string]*github.Detail{}, fetching: map[string]bool{},
 		detErr: map[string]string{}, folders: map[string]string{},
-		pin: pin, promptIn: pi, spin: sp, md: newMarkdown(cfg.Theme.Markdown),
+		pin: pin, promptIn: pi, spin: sp, md: newMarkdown(),
 		vp:  viewport.New(80, 20),
 		seq: 1, loading: true,
 	}
