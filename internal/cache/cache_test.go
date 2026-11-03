@@ -1,7 +1,11 @@
 package cache
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,15 +68,47 @@ func TestSeenSharedBetweenApps(t *testing.T) {
 }
 
 func TestOldSeenPruned(t *testing.T) {
-	c := Open(filepath.Join(t.TempDir(), "cache.json"))
+	path := filepath.Join(t.TempDir(), "cache.json")
+	c := Open(path)
 	c.data.SeenSince = time.Now().Add(-90 * 24 * time.Hour)
 	old := github.PR{Number: 1, Repo: "acme/tool", UpdatedAt: time.Now().Add(-40 * 24 * time.Hour)}
+	c.mu.Lock()
 	c.data.Seen[old.Key()] = old.UpdatedAt // opened 40 days ago
+	c.mu.Unlock()
+	raw, _ := json.Marshal(c.data)
+	_ = os.WriteFile(path, raw, 0o600) // and saved then
 	c.PutDetail(&github.Detail{PR: github.PR{Number: 2, Repo: "acme/tool"}})
-	if _, kept := c.data.Seen[old.Key()]; kept {
-		t.Error("a mark older than keepDetails should be dropped")
+	if _, kept := Open(path).data.Seen[old.Key()]; kept {
+		t.Error("a mark older than keepDetails should be dropped, not merged back from the file")
 	}
 	if c.Unread(old) {
 		t.Error("nothing that old is unread, mark or not")
+	}
+}
+
+func TestSavesSideBySide(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	term, desk := Open(path), Open(path)
+	var wg sync.WaitGroup
+	for i := range 40 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := term
+			if i%2 == 1 {
+				c = desk
+			}
+			pr := github.PR{Number: i, Repo: "acme/tool", Title: strings.Repeat("x", 4000), UpdatedAt: time.Now()}
+			c.MarkSeen(pr.Key(), pr.UpdatedAt)
+			c.PutSearch("involves:@me", "you", []github.PR{pr})
+		}()
+	}
+	wg.Wait()
+	raw, err := os.ReadFile(path)
+	if err != nil || !json.Valid(raw) {
+		t.Fatalf("saves at the same time left a broken file (%v)", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "*.tmp")); len(left) > 0 {
+		t.Errorf("temp files left behind: %v", left)
 	}
 }

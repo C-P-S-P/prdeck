@@ -124,11 +124,6 @@ func (c *Cache) PutDetail(d *github.Detail) {
 			delete(c.data.Details, k)
 		}
 	}
-	for k, t := range c.data.Seen {
-		if time.Since(t) > keepDetails {
-			delete(c.data.Seen, k) // SeenAt never looks back that far
-		}
-	}
 	c.mu.Unlock()
 	c.save()
 }
@@ -183,6 +178,11 @@ func (c *Cache) save() {
 			c.data.Seen[k] = t
 		}
 	}
+	for k, t := range c.data.Seen {
+		if time.Since(t) > keepDetails {
+			delete(c.data.Seen, k) // SeenAt never looks back that far; after the merge, so it stays gone
+		}
+	}
 	if !disk.SeenSince.IsZero() && disk.SeenSince.Before(c.data.SeenSince) {
 		c.data.SeenSince = disk.SeenSince
 	}
@@ -194,8 +194,15 @@ func (c *Cache) save() {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o700); err != nil {
 		return
 	}
-	tmp := c.path + ".tmp"
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, c.path)
+	// A temp file of its own: both apps, and searches running side by side, save
+	// at once, and a shared one could be renamed into place half written.
+	f, err := os.CreateTemp(filepath.Dir(c.path), "cache-*.tmp")
+	if err != nil {
+		return
 	}
+	_, err = f.Write(raw)
+	if f.Close() == nil && err == nil && os.Rename(f.Name(), c.path) == nil {
+		return
+	}
+	_ = os.Remove(f.Name())
 }
