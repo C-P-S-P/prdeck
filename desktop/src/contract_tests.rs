@@ -6,12 +6,13 @@
 use std::{fs, path::PathBuf};
 
 use base64::Engine as _;
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned};
 use serde_json::Value;
 
 use crate::model::{
-    CachedDetail, CommitDiff, Detail, DeviceCode, ExecResult, FetchedImage, FileDiff, Folder, Hello, LoginDone, Plan, Pr,
-    SearchResult, SetPath, SetupStatus,
+    CachedDetail, ChangedFile, Check, Cmd, Commit, CommitDiff, Detail, DeviceCode, EditorChoice, Event, ExecResult,
+    FetchedImage, FileDiff, Filter, Folder, FolderChoice, Hello, LoginDone, Plan, Pr, Reply, Reviewer, SearchResult,
+    SetPath, SetupStatus,
 };
 
 /// Every reply read below. A fixture not listed here fails `every_fixture_is_read`.
@@ -86,6 +87,53 @@ fn round_trips<T: DeserializeOwned + serde::Serialize>(sent: &Value, what: &str)
     keys(sent, &back, what);
 }
 
+/// The names T reads from a reply, as serde's derive lists them: Grab stops at the
+/// struct before reading anything. A type with a flattened field lists none.
+fn fields<T: DeserializeOwned>() -> &'static [&'static str] {
+    struct Grab<'a>(&'a mut &'static [&'static str]);
+    impl<'de> de::Deserializer<'de> for Grab<'_> {
+        type Error = de::value::Error;
+        fn deserialize_any<V: de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(de::Error::custom("not a struct"))
+        }
+        fn deserialize_struct<V: de::Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(de::Error::custom("got the names"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf option unit
+            unit_struct newtype_struct seq tuple tuple_struct map enum identifier ignored_any
+        }
+    }
+    let mut names: &'static [&'static str] = &[];
+    let _ = T::deserialize(Grab(&mut names));
+    names
+}
+
+/// Fails when a field T reads is not in the reply at all. `filled!` only catches a
+/// rename where the demo has a value; this catches it where the value is empty too.
+fn sent<T: DeserializeOwned>(reply: &Value, what: &str) {
+    let names = fields::<T>();
+    assert!(!names.is_empty(), "{what}: no field names to check");
+    for n in names {
+        assert!(reply.get(n).is_some(), "{what}.{n} is not in the reply: renamed on one side?");
+    }
+}
+
+/// `sent` for each item of a list in the reply.
+fn each_sent<T: DeserializeOwned>(list: &Value, what: &str) {
+    let items = list.as_array().unwrap_or_else(|| panic!("{what} is not a list"));
+    assert!(!items.is_empty(), "{what} is empty");
+    for v in items {
+        sent::<T>(v, what);
+    }
+}
+
 fn check_pr(p: &Pr) {
     filled!(p.number, p.title, p.url, p.repo, p.author, p.head, p.base, p.state, p.mergeable);
     filled!(p.updated_at, p.created_at, p.check_state);
@@ -98,6 +146,57 @@ fn every_fixture_is_read() {
         let method = name.strip_suffix(".json").unwrap_or(&name);
         assert!(READ.contains(&method), "{name} is not read by these tests; add a check for it");
     }
+}
+
+#[test]
+fn every_field_is_sent() {
+    let h: Value = read("hello");
+    sent::<Hello>(&h, "hello");
+    each_sent::<Filter>(&h["filters"], "hello.filters");
+    each_sent::<Cmd>(&h["commands"], "hello.commands");
+    let s: Value = read("setupStatus");
+    sent::<SetupStatus>(&s, "setupStatus");
+    each_sent::<FolderChoice>(&s["folders"], "setupStatus.folders");
+    each_sent::<EditorChoice>(&s["editors"], "setupStatus.editors");
+
+    // search sends no "found", which only the cached reply has.
+    let cached: Value = read("cachedSearch");
+    sent::<SearchResult>(&cached, "cachedSearch");
+    each_sent::<Pr>(&cached["prs"], "cachedSearch.prs");
+    each_sent::<Pr>(&read::<Value>("search")["prs"], "search.prs");
+
+    // Detail flattens Pr into itself, so serde lists no names for it; pr_detail checks
+    // its own fields have values.
+    let cd: Value = read("cachedDetail");
+    sent::<CachedDetail>(&cd, "cachedDetail");
+    let d: Value = read("detail");
+    for (v, what) in [(&cd["detail"], "cachedDetail.detail"), (&d, "detail")] {
+        sent::<Pr>(v, what);
+        each_sent::<Reviewer>(&v["reviewers"], &format!("{what}.reviewers"));
+        each_sent::<Check>(&v["checks"], &format!("{what}.checks"));
+        each_sent::<Event>(&v["timeline"], &format!("{what}.timeline"));
+        each_sent::<Commit>(&v["commitList"], &format!("{what}.commitList"));
+        each_sent::<ChangedFile>(&v["files"], &format!("{what}.files"));
+    }
+    let t = d["timeline"].as_array().unwrap().iter().find(|e| e["kind"] == "thread").unwrap();
+    each_sent::<Reply>(&t["replies"], "detail.timeline.replies");
+
+    sent::<Folder>(&read("folder"), "folder");
+    for m in ["prepare", "clonePlan"] {
+        let p: Value = read(m);
+        sent::<Plan>(&p, m);
+        sent::<Folder>(&p["folder"], &format!("{m}.folder"));
+        sent::<Pr>(&p["pr"], &format!("{m}.pr"));
+    }
+    sent::<ExecResult>(&read("execute"), "execute");
+    sent::<SetPath>(&read("setClonePath"), "setClonePath");
+    sent::<FetchedImage>(&read("image"), "image");
+    each_sent::<FileDiff>(&read("prDiff"), "prDiff");
+    let c: Value = read("commitDiff");
+    sent::<CommitDiff>(&c, "commitDiff");
+    each_sent::<FileDiff>(&c["files"], "commitDiff.files");
+    sent::<DeviceCode>(&read("loginStart"), "loginStart");
+    sent::<LoginDone>(&read("loginWait"), "loginWait");
 }
 
 #[test]

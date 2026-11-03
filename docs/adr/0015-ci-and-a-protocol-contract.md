@@ -13,7 +13,7 @@ Nothing ran the checks on a push or a pull request; they ran when someone rememb
   - **go** (Linux): `gofmt -l` must print nothing, then `go vet ./...` and `go test -race ./...`.
   - **desktop** (macOS on Apple silicon, the only place it builds): Go for `build.rs`, stable Rust, `cargo build --locked` and `cargo test --locked`, with the Rust build cached.
 - **Contract test.** `TestContract` (`internal/server`) runs the demo backend, calls each method the desktop app uses with the parameters the app sends, and compares each reply with `desktop/tests/fixtures/<method>.json`. Times and what is installed on the machine are blanked first, so a file changes only when the protocol does. `go test ./internal/server -run TestContract -update` rewrites them.
-- `desktop/src/contract_tests.rs` reads every fixture into the type the app reads that reply into (`model.rs`) and checks that the fields the app uses have values. Plans and PRs, which the app sends back, must keep every field the server sent. A fixture without a check fails.
+- `desktop/src/contract_tests.rs` reads every fixture into the type the app reads that reply into (`model.rs`) and checks that the fields the app uses have values. It also checks that every field each type reads is in the reply, using the names serde's derive lists, so a rename fails even where the demo's value is empty or false. Plans and PRs, which the app sends back, must keep every field the server sent. A fixture without a check fails.
 - `openConfig` is left out, since it opens an editor. `hello` lists editors sorted, so its reply is the same every time.
 
 ## Consequences
