@@ -6,7 +6,9 @@ package demo
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/patelchaitany/prdeck/internal/config"
 	"github.com/patelchaitany/prdeck/internal/core"
 	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/patelchaitany/prdeck/internal/repos"
 	"github.com/patelchaitany/prdeck/internal/runner"
 )
 
@@ -142,6 +145,25 @@ func (b *Backend) FindClones(_ context.Context, repo string) []string {
 		return []string{"/Users/you/work/datakit", "/Users/you/old/datakit-fork"}
 	}
 	return nil
+}
+
+// ListClones pretends these clones are on disk, for the fuzzy path prompt.
+func (b *Backend) ListClones(context.Context) []repos.DiskClone {
+	time.Sleep(400 * time.Millisecond)
+	home, _ := os.UserHomeDir()
+	at := func(p string, rs ...string) repos.DiskClone {
+		return repos.DiskClone{Path: filepath.Join(home, p), Repos: rs}
+	}
+	return []repos.DiskClone{
+		at("code/registry", "northwind/registry"),
+		at("code/operator", "northwind/operator"),
+		at("code/console", "northwind/console"),
+		at("code/sdk-python", "northwind/sdk-python"),
+		at("work/datakit", "upstream/datakit", "you/datakit"),
+		at("old/datakit-fork", "you/datakit"),
+		at("code/dotfiles", "you/dotfiles"),
+		at("scratch/notes"),
+	}
 }
 
 func (b *Backend) SetClonePath(repo, path string) (string, error) {

@@ -70,6 +70,27 @@ var skipDirs = map[string]bool{
 // It stops when ctx ends and returns what it found so far.
 func FindClones(ctx context.Context, repo string, roots []string, depth int) []string {
 	var found []string
+	for _, c := range ListClones(ctx, roots, depth) {
+		for _, r := range c.Repos {
+			if strings.EqualFold(r, repo) {
+				found = append(found, c.Path)
+				break
+			}
+		}
+	}
+	return found
+}
+
+// DiskClone is a git clone found on disk and the GitHub repos its remotes point at.
+type DiskClone struct {
+	Path  string
+	Repos []string
+}
+
+// ListClones walks roots (depth levels deep) for every git clone. It stops when ctx
+// ends and returns what it found so far.
+func ListClones(ctx context.Context, roots []string, depth int) []DiskClone {
+	var found []DiskClone
 	seen := map[string]bool{}
 	var walk func(dir string, d int)
 	walk = func(dir string, d int) {
@@ -77,11 +98,13 @@ func FindClones(ctx context.Context, repo string, roots []string, depth int) []s
 			return
 		}
 		if st, err := os.Stat(filepath.Join(dir, ".git")); err == nil && st.IsDir() {
-			for _, r := range readRemotes(filepath.Join(dir, ".git", "config")) {
-				if strings.EqualFold(r.repo, repo) && !seen[dir] {
-					seen[dir] = true
-					found = append(found, dir)
+			if !seen[dir] {
+				seen[dir] = true
+				c := DiskClone{Path: dir}
+				for _, r := range readRemotes(filepath.Join(dir, ".git", "config")) {
+					c.Repos = append(c.Repos, r.repo)
 				}
+				found = append(found, c)
 			}
 			return // don't look inside clones
 		}

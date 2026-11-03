@@ -28,6 +28,10 @@ type Service struct {
 
 	mu    sync.RWMutex
 	index *repos.Index
+
+	diskMu sync.Mutex
+	disk   []repos.DiskClone // every clone under the home folder, from the last scan
+	diskAt time.Time
 }
 
 // New wires the service. cfgPath is where SetClonePath saves repo paths.
@@ -201,22 +205,56 @@ func (s *Service) TerminalCmd(p Plan) *exec.Cmd {
 
 // FindClones searches the home folder for clones of repo, beyond the scan folders.
 func (s *Service) FindClones(ctx context.Context, repo string) []string {
+	var found []string
+	for _, c := range s.ListClones(ctx) {
+		for _, r := range c.Repos {
+			if strings.EqualFold(r, repo) {
+				found = append(found, c.Path)
+				break
+			}
+		}
+	}
+	return found
+}
+
+// ListClones is every git clone under the home folder (four levels deep, plus the
+// scan folders, configured paths and the GOPATH layout). The scan takes a few seconds,
+// so its result is kept for ten minutes.
+func (s *Service) ListClones(ctx context.Context) []repos.DiskClone {
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	if s.disk != nil && time.Since(s.diskAt) < 10*time.Minute {
+		return s.disk
+	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	_, name, _ := strings.Cut(repo, "/")
-	owner, _, _ := strings.Cut(repo, "/")
-	// The usual GOPATH layout is deeper than the general search goes.
-	found := repos.FindClones(ctx, repo, []string{filepath.Join(home, "go", "src", "github.com", owner, name)}, 0)
-	for _, p := range repos.FindClones(ctx, repo, []string{home}, 4) {
-		if !contains(found, p) {
-			found = append(found, p)
+	roots := []string{home, filepath.Join(home, "go", "src", "github.com")}
+	for _, d := range s.cfg.Repos.Scan {
+		roots = append(roots, config.ExpandHome(d))
+	}
+	for _, p := range s.cfg.Repos.Paths {
+		roots = append(roots, config.ExpandHome(p))
+	}
+	var all []repos.DiskClone
+	seen := map[string]bool{}
+	for i, r := range roots {
+		depth := 4
+		if i > 0 {
+			depth = 3
+		}
+		for _, c := range repos.ListClones(ctx, []string{r}, depth) {
+			if !seen[c.Path] {
+				seen[c.Path] = true
+				all = append(all, c)
+			}
 		}
 	}
-	return found
+	s.disk, s.diskAt = all, time.Now()
+	return all
 }
 
 // SetClonePath points repo at a clone on disk and saves it under repos.paths in the
@@ -241,6 +279,9 @@ func (s *Service) SetClonePath(repo, path string) (string, error) {
 	}
 	s.cfg.Repos.Paths[repo] = top
 	s.Rescan()
+	s.diskMu.Lock()
+	s.disk = nil // pick up a clone that was outside the last scan
+	s.diskMu.Unlock()
 	note := ""
 	if remote == "" {
 		note = "no remote in it points at " + repo + "; commands will use origin"

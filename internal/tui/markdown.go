@@ -237,3 +237,13 @@ func trimBlankLines(s string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// RenderMarkdown renders GitHub markdown for a pane of the given width, as the PR view
+// does. Used by `prdeck md` to compare renderers.
+func RenderMarkdown(src string, width int, style string) string {
+	return newMarkdown(style).render(src, width)
+}
+
+// PrepareMarkdown is the GitHub cleanup step alone (HTML, alerts, mentions), so other
+// renderers can be compared on the same input.
+func PrepareMarkdown(src string) string { return githubToMarkdown(src) }

@@ -13,6 +13,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.w == 0 || m.prompt != nil {
 		return m, nil
 	}
+	if m.pathRepo != "" {
+		l := m.layout()
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && msg.Y >= 1+l.bodyH {
+			return m.clickBottom(msg.Y-1-l.bodyH, msg.X, l)
+		}
+		return m, nil
+	}
 	l := m.layout()
 	bodyTop, bodyEnd := 1, 1+l.bodyH
 	reposEnd := bodyTop + l.reposH
@@ -104,6 +111,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) clickBottom(row, x int, l layout) (tea.Model, tea.Cmd) {
+	if m.pathRepo != "" {
+		if i := row - 1; i >= 0 && i < min(len(m.pathMatches()), pathRows) {
+			m.pathCur = i
+			return m.promptKey(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+		return m, nil
+	}
 	if m.palette {
 		items := m.paletteItems()
 		if i := row - 1; i >= 0 && i < min(len(items), 8) {

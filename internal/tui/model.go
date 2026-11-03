@@ -19,7 +19,9 @@ import (
 	"github.com/patelchaitany/prdeck/internal/cache"
 	"github.com/patelchaitany/prdeck/internal/config"
 	"github.com/patelchaitany/prdeck/internal/core"
+	"github.com/patelchaitany/prdeck/internal/fuzzy"
 	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/patelchaitany/prdeck/internal/repos"
 )
 
 // Backend is what the UI needs from the core. *core.Service implements it.
@@ -39,6 +41,7 @@ type Backend interface {
 	FindClones(ctx context.Context, repo string) []string
 	SetClonePath(repo, path string) (string, error)
 	ClonePath(repo string) string
+	ListClones(ctx context.Context) []repos.DiskClone
 }
 
 // missingClone is shown when a command needs a clone that was not found: prdeck
@@ -103,6 +106,11 @@ type Model struct {
 	pathRepo string // the path prompt is open for this repo
 	promptIn textinput.Model
 
+	// The path prompt fuzzy-searches every clone under the home folder.
+	pathCands   []repos.DiskClone
+	pathLoading bool
+	pathCur     int
+
 	missing     *missingClone
 	dropConfirm bool
 
@@ -160,6 +168,7 @@ type (
 		repo  string
 		paths []string
 	}
+	clonesMsg     struct{ clones []repos.DiskClone }
 	wantDetailMsg struct{ key string }
 	tickMsg       time.Time
 	resultMsg     core.Result
@@ -438,6 +447,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case clonesMsg:
+		m.pathCands, m.pathLoading = msg.clones, false
+		return m, nil
+
 	case findMsg:
 		if m.missing == nil || m.missing.pr.Repo != msg.repo {
 			return m, nil
@@ -701,15 +714,75 @@ func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd
 }
 
 func (m Model) askPath(repo string) (tea.Model, tea.Cmd) {
-	m.pathRepo = repo
-	m.promptIn.Prompt = "Path to your clone of " + repo + ": "
-	cur := m.be.ClonePath(repo)
-	if cur == "" {
-		cur = "~/"
+	m.pathRepo, m.pathCur = repo, 0
+	m.promptIn.Prompt = "Clone of " + repo + " ❯ "
+	m.promptIn.Placeholder = "type part of a folder name, or a full path"
+	m.promptIn.SetValue("")
+	cmds := []tea.Cmd{m.promptIn.Focus()}
+	if m.pathCands == nil && !m.pathLoading {
+		m.pathLoading = true
+		be := m.be
+		cmds = append(cmds, func() tea.Msg { return clonesMsg{be.ListClones(context.Background())} })
 	}
-	m.promptIn.SetValue(config.ShortenHome(cur))
-	m.promptIn.CursorEnd()
-	return m, m.promptIn.Focus()
+	return m, tea.Batch(cmds...)
+}
+
+// pathMatch is one row of the path prompt's list.
+type pathMatch struct {
+	path    string // full path to use
+	disp    string // what is shown (~ for home)
+	idx     []int  // matched byte offsets in disp
+	repos   []string
+	ours    bool // a remote points at the repo being set
+	literal bool // the typed text itself
+	score   int
+}
+
+// pathMatches ranks clones on disk against the typed text. Clones of the repo being
+// set come first; a typed path ("~/x", "/x", "./x") is offered as the first row.
+func (m Model) pathMatches() []pathMatch {
+	q := strings.TrimSpace(m.promptIn.Value())
+	_, repoName, _ := strings.Cut(m.pathRepo, "/")
+	var out []pathMatch
+	for _, c := range m.pathCands {
+		disp := config.ShortenHome(c.Path)
+		score, idx, ok := fuzzy.Match(q, disp)
+		if !ok {
+			continue
+		}
+		if q == "" {
+			// Nothing typed yet: float folders named like the repo to the top.
+			if hint, _, ok := fuzzy.Match(repoName, disp); ok {
+				score += hint
+			}
+		}
+		ours := false
+		for _, r := range c.Repos {
+			if strings.EqualFold(r, m.pathRepo) {
+				ours = true
+			}
+		}
+		if ours {
+			score += 1000
+		}
+		out = append(out, pathMatch{path: c.Path, disp: disp, idx: idx, repos: c.Repos, ours: ours, score: score})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].score != out[j].score {
+			return out[i].score > out[j].score
+		}
+		return out[i].disp < out[j].disp
+	})
+	if strings.HasPrefix(q, "/") || strings.HasPrefix(q, "~") || strings.HasPrefix(q, ".") {
+		lit := pathMatch{path: q, disp: q, literal: true}
+		for _, o := range out {
+			if o.disp == q || o.path == q {
+				return out // the typed path is already a listed clone
+			}
+		}
+		out = append([]pathMatch{lit}, out...)
+	}
+	return out
 }
 
 // useClone saves path as repo's clone and, when a command was waiting for it, runs it.
@@ -834,12 +907,13 @@ func (m Model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if repo := m.pathRepo; repo != "" {
-			path := strings.TrimSpace(m.promptIn.Value())
-			m.pathRepo = ""
-			m.promptIn.Blur()
-			if path == "" || path == "~/" {
+			matches := m.pathMatches()
+			if len(matches) == 0 {
 				return m, nil
 			}
+			path := matches[min(m.pathCur, len(matches)-1)].path
+			m.pathRepo = ""
+			m.promptIn.Blur()
 			return m.useClone(repo, path)
 		}
 		c, in := m.prompt, strings.TrimSpace(m.promptIn.Value())
@@ -851,8 +925,29 @@ func (m Model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.startCommand(c, in)
 	}
+	if m.pathRepo != "" {
+		n := len(m.pathMatches())
+		switch k.String() {
+		case "up", "ctrl+p", "shift+tab":
+			m.pathCur = max(m.pathCur-1, 0)
+			return m, nil
+		case "down", "ctrl+n":
+			m.pathCur = min(m.pathCur+1, max(n-1, 0))
+			return m, nil
+		case "tab": // put the chosen path in the box to edit it
+			if n > 0 {
+				m.promptIn.SetValue(m.pathMatches()[min(m.pathCur, n-1)].disp)
+				m.promptIn.CursorEnd()
+				m.pathCur = 0
+			}
+			return m, nil
+		}
+	}
 	var cmd tea.Cmd
 	m.promptIn, cmd = m.promptIn.Update(k)
+	if m.pathRepo != "" {
+		m.pathCur = 0
+	}
 	return m, cmd
 }
 

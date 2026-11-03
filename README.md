@@ -47,7 +47,7 @@ prdeck config init         # write a starter config
 | `o` | Check out the PR's branch and open your clone in your editor (Zed by default) |
 | `w` | Open the PR in a separate git worktree instead |
 | `b` | Open the PR on GitHub |
-| `L` | Set where your clone of this repo is (saved to the config) |
+| `L` | Find your clone of this repo with fuzzy search; saved to the config |
 | `?` | Help: every key and the exact command it runs |
 | Mouse | Click a repo, PR, filter tab or a key in the bottom bar; click the selected PR again to open it; the wheel scrolls the pane under it |
 
@@ -65,7 +65,9 @@ Commands run in **your existing clone** of the PR's repo. The PR view's `folder`
 - **Uncommitted changes:** when a command would switch branches or needs a clean tree (pull, rebase), prdeck lists the changes and asks: `s` stash them (`git stash push --include-untracked`, so nothing is lost), `d` drop them (asks a second time, then `git reset --hard` and `git clean -fd`), or `esc` to cancel.
 - **Worktrees** are made only when you ask: `w` opens the PR in `~/prdeck/<repo>-<number>`, leaving your clone alone. Set `editor.worktree: true` to use a worktree for every command. If the PR's branch is already checked out in a worktree, prdeck uses that one.
 
-**Finding your clone.** prdeck scans `~/projects`, `~/code` and `~/src` (two levels deep) for GitHub remotes. If a repo isn't there, the first command on it searches your home folder and lists the clones it finds; pick one with `1`–`9`, type a path with `p`, or clone it with `c`. Press `L` any time to point a repo at a different clone. Your choice is saved under `repos.paths` in the config, so you only do it once.
+**Finding your clone.** prdeck scans `~/projects`, `~/code` and `~/src` (two levels deep) for GitHub remotes. If a repo isn't there, the first command on it searches your home folder and lists the clones it finds; pick one with `1`–`9`, search for it with `p`, or clone it with `c`. Press `L` any time to point a repo at a different clone.
+
+The clone search (`L` or `p`) is fuzzy, like fzf: it lists every git clone under your home folder, with clones of this repo first, and narrows as you type (`odh fea` finds `~/projects/odh-feast/feast`). Pick with `↑↓` and `enter` or a click; `tab` copies the path into the box to edit; a typed path (`~/work/x`) can be used as is. Your choice is saved under `repos.paths` in the config, so you only do it once.
 
 ## Configuration
 

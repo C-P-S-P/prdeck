@@ -58,6 +58,26 @@ func run(args []string) error {
 		return nil
 	case "config":
 		return configCmd(args[1:])
+	case "md": // prdeck md FILE [WIDTH]: render a markdown file the way the PR view does
+		if len(args) < 2 {
+			return fmt.Errorf("usage: prdeck md FILE [WIDTH]")
+		}
+		raw, err := os.ReadFile(args[1])
+		if err != nil {
+			return err
+		}
+		width := 100
+		if len(args) > 2 {
+			if width, err = strconv.Atoi(args[2]); err != nil {
+				return err
+			}
+		}
+		if len(args) > 3 && args[3] == "--prepare" {
+			fmt.Println(tui.PrepareMarkdown(string(raw)))
+			return nil
+		}
+		fmt.Println(tui.RenderMarkdown(string(raw), width, "dark"))
+		return nil
 	case "demo":
 		cfg, err := config.Load(config.DefaultPath())
 		if err != nil {

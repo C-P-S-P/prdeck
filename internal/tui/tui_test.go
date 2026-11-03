@@ -15,6 +15,7 @@ import (
 	"github.com/patelchaitany/prdeck/internal/config"
 	"github.com/patelchaitany/prdeck/internal/core"
 	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/patelchaitany/prdeck/internal/repos"
 )
 
 type fakeBackend struct {
@@ -91,6 +92,14 @@ func (f *fakeBackend) SetClonePath(repo, path string) (string, error) {
 	return "", nil
 }
 func (f *fakeBackend) ClonePath(repo string) string { return f.saved[repo] }
+func (f *fakeBackend) ListClones(context.Context) []repos.DiskClone {
+	return []repos.DiskClone{
+		{Path: "/home/me/projects/odh-feast", Repos: []string{"opendatahub-io/feast"}},
+		{Path: "/home/me/projects/registry", Repos: []string{"northwind/registry"}},
+		{Path: "/home/me/projects/registry-old", Repos: []string{"me/registry"}},
+		{Path: "/home/me/projects/cp", Repos: []string{"me/cp"}},
+	}
+}
 
 func newTest(t *testing.T) (*fakeBackend, Model) {
 	t.Helper()
@@ -449,14 +458,56 @@ func TestSetClonePathPrompt(t *testing.T) {
 	be, m := newTest(t)
 	m = search(t, m)
 	m = send(t, m, key("L"))
-	if m.pathRepo != "northwind/registry" {
-		t.Fatalf("pathRepo = %q", m.pathRepo)
+	if m.pathRepo != "northwind/registry" || len(m.pathCands) != 4 {
+		t.Fatalf("pathRepo = %q, clones = %d", m.pathRepo, len(m.pathCands))
 	}
-	for _, r := range "work/registry" {
+	// With nothing typed, the clone of this repo is listed first.
+	if top := m.pathMatches()[0]; top.path != "/home/me/projects/registry" || !top.ours {
+		t.Fatalf("top = %+v", top)
+	}
+	for _, r := range "cp" {
 		m = send(t, m, key(string(r)))
 	}
+	if top := m.pathMatches()[0]; top.path != "/home/me/projects/cp" {
+		t.Fatalf("fuzzy top = %+v", top)
+	}
 	m = send(t, m, key("enter"))
-	if be.saved["northwind/registry"] != "~/work/registry" {
+	if be.saved["northwind/registry"] != "/home/me/projects/cp" || m.pathRepo != "" {
 		t.Errorf("saved = %v", be.saved)
+	}
+}
+
+func TestPathPromptTypedPath(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("L"))
+	for _, r := range "~/elsewhere/reg" {
+		m = send(t, m, key(string(r)))
+	}
+	if top := m.pathMatches()[0]; !top.literal {
+		t.Fatalf("a typed path should be offered first: %+v", top)
+	}
+	m = send(t, m, key("enter"))
+	if be.saved["northwind/registry"] != "~/elsewhere/reg" {
+		t.Errorf("saved = %v", be.saved)
+	}
+}
+
+func TestPathPromptArrowsAndClick(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("L"))
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.pathCur != 1 {
+		t.Fatalf("pathCur = %d", m.pathCur)
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "✓ northwind/registry") || !strings.Contains(v, "odh-feast") {
+		t.Errorf("list not shown:\n%s", v)
+	}
+	l := m.layout()
+	m = send(t, m, click(4, 1+l.bodyH+3)) // input line, then rows 1, 2, 3
+	want := m.be.(*fakeBackend).saved["northwind/registry"]
+	if want == "" || m.pathRepo != "" {
+		t.Errorf("click did not pick a clone: saved=%v", be.saved)
 	}
 }

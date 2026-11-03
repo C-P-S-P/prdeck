@@ -509,7 +509,7 @@ func (m Model) bottomLines() []string {
 		}
 		lines = append(lines, sDim.Render("↑↓ choose · enter apply · esc close"))
 	case m.pathRepo != "":
-		lines = append(lines, fit(m.promptIn.View(), w), hints(w, "enter", "save to config", "esc", "cancel"))
+		lines = append(lines, m.pathLines(w)...)
 	case m.prompt != nil:
 		lines = append(lines, fit(m.promptIn.View(), w), hints(w, "enter", "run", "esc", "cancel"))
 	case m.missing != nil:
@@ -586,6 +586,74 @@ func hints(w int, pairs ...string) string {
 		parts = append(parts, sText.Render(pairs[i])+sDim.Render(" "+pairs[i+1]))
 	}
 	return fit(strings.Join(parts, sDim.Render(" · ")), w)
+}
+
+// pathRows is how many matches the path prompt lists.
+const pathRows = 8
+
+func (m Model) pathLines(w int) []string {
+	lines := []string{fit(m.promptIn.View(), w)}
+	matches := m.pathMatches()
+	for i, mt := range matches {
+		if i == pathRows {
+			break
+		}
+		var row string
+		if mt.literal {
+			row = "  " + sText.Render(mt.disp) + sDim.Render("  use this path")
+		} else {
+			row = "  " + markMatches(mt.disp, mt.idx)
+			switch {
+			case mt.ours:
+				row += "  " + sGreen.Render("✓ "+m.pathRepo)
+			case len(mt.repos) > 0:
+				row += "  " + sDim.Render(strings.Join(mt.repos, ", "))
+			default:
+				row += "  " + sDim.Render("no GitHub remote")
+			}
+		}
+		if i == m.pathCur {
+			row = highlight(row, w, sSel)
+		}
+		lines = append(lines, fit(row, w))
+	}
+	status := ""
+	switch {
+	case m.pathLoading:
+		status = m.spin.View() + sSoft.Render(" Looking for git clones in your home folder…")
+	case len(matches) == 0 && len(m.pathCands) == 0:
+		status = sSoft.Render("  No git clones found under your home folder; type a full path.")
+	case len(matches) == 0:
+		status = sSoft.Render("  No clone matches. Type a full path (~/… or /…) to use one directly.")
+	case len(matches) > pathRows:
+		status = sDim.Render(fmt.Sprintf("  %d more; keep typing to narrow it down", len(matches)-pathRows))
+	}
+	if status != "" {
+		lines = append(lines, fit(status, w))
+	}
+	keys := []string{"↑↓", "choose", "enter", "use it (saved to config)", "tab", "edit the path", "esc", "cancel"}
+	if cur := m.be.ClonePath(m.pathRepo); cur != "" {
+		keys = append(keys, "now", config.ShortenHome(cur))
+	}
+	return append(lines, hints(w, keys...))
+}
+
+// markMatches colors the matched letters of a fuzzy match.
+func markMatches(s string, idx []int) string {
+	hit := map[int]bool{}
+	for _, i := range idx {
+		hit[i] = true
+	}
+	mark := lipgloss.NewStyle().Foreground(cBlue).Bold(true)
+	var b strings.Builder
+	for i, r := range s {
+		if hit[i] {
+			b.WriteString(mark.Render(string(r)))
+		} else {
+			b.WriteString(sText.Render(string(r)))
+		}
+	}
+	return b.String()
 }
 
 func (m Model) missingLines(w int) []string {
