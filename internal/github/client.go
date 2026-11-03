@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -14,7 +15,7 @@ import (
 // Client runs PR Deck's GraphQL queries. Auth comes from gh (`gh auth login`) or GH_TOKEN.
 type Client struct {
 	gql  *api.GraphQLClient
-	rest *api.RESTClient // diffs: GraphQL has no patches
+	rest *api.RESTClient // diffs and re-runs: GraphQL has neither
 }
 
 func NewClient() (*Client, error) {
@@ -134,6 +135,22 @@ func webURL(s string) string {
 		return ""
 	}
 	return s
+}
+
+// onlyRunErrors reports GraphQL errors that are all about checks' Actions runs. A
+// token that may not read Actions (a fine-grained GH_TOKEN without that permission)
+// gets those back with the rest of the PR intact; those checks just have no run.
+func onlyRunErrors(err error) bool {
+	var ge *api.GraphQLError
+	if !errors.As(err, &ge) || len(ge.Errors) == 0 {
+		return false
+	}
+	for _, e := range ge.Errors {
+		if len(e.Path) == 0 || e.Path[len(e.Path)-1] != "workflowRun" {
+			return false
+		}
+	}
+	return true
 }
 
 func loginOf(l *login) string {
@@ -326,7 +343,7 @@ func (c *Client) Detail(ctx context.Context, repo string, number int) (*Detail, 
 		} `json:"repository"`
 	}
 	vars := map[string]any{"owner": owner, "name": name, "number": number}
-	if err := c.gql.DoWithContext(ctx, detailQuery, vars, &resp); err != nil {
+	if err := c.gql.DoWithContext(ctx, detailQuery, vars, &resp); err != nil && !onlyRunErrors(err) {
 		return nil, err
 	}
 	n := resp.Repository.PullRequest

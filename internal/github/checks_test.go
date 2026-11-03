@@ -53,6 +53,39 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// A token that may not read Actions gets an error for each check's workflowRun with
+// the rest of the PR. The PR view must still load; other errors still fail.
+func TestDetailWithoutActionsAccess(t *testing.T) {
+	answer := func(errPath string) *Client {
+		body := `{"data": {"repository": {"pullRequest": {"number": 7, "title": "Fix", "repository": {"nameWithOwner": "acme/tool"},
+			"commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {"nodes": [
+				{"__typename": "CheckRun", "name": "unit", "conclusion": "FAILURE", "detailsUrl": "https://github.com/acme/tool/actions/runs/11/job/2", "checkSuite": {"workflowRun": null}}
+			]}}}}]}}}},
+			"errors": [{"type": "FORBIDDEN", "message": "Resource not accessible by personal access token", "path": ` + errPath + `}]}`
+		gql, err := api.NewGraphQLClient(api.ClientOptions{Host: "github.com", AuthToken: "test", Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &Client{gql: gql}
+	}
+
+	c := answer(`["repository", "pullRequest", "commits", "nodes", 0, "commit", "statusCheckRollup", "contexts", "nodes", 0, "checkSuite", "workflowRun"]`)
+	d, err := c.Detail(context.Background(), "acme/tool", 7)
+	if err != nil {
+		t.Fatalf("detail failed over a workflowRun error: %v", err)
+	}
+	if d.Title != "Fix" || len(d.Checks) != 1 || d.Checks[0].URL == "" || d.Checks[0].RunID != 0 {
+		t.Errorf("detail = %+v", d)
+	}
+
+	c = answer(`["repository", "pullRequest"]`)
+	if _, err := c.Detail(context.Background(), "acme/tool", 7); err == nil {
+		t.Error("an error about the PR itself should still fail")
+	}
+}
+
 func TestRerunFailedJobs(t *testing.T) {
 	var got string
 	rest, err := api.NewRESTClient(api.ClientOptions{Host: "github.com", AuthToken: "test", Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
