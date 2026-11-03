@@ -30,7 +30,8 @@ type fakeBackend struct {
 	noClone  map[string]bool
 	found    []string
 	saved    map[string]string
-	loaded   int // Detail calls
+	loaded   int  // Detail calls
+	news     bool // Detail marks mlin's thread new since your last visit
 }
 
 func (f *fakeBackend) Config() *config.Config { return f.cfg }
@@ -51,7 +52,7 @@ func (f *fakeBackend) Detail(_ context.Context, pr github.PR) (*github.Detail, e
 		Reviewers: []github.Reviewer{{Login: "mlin", State: "CHANGES_REQUESTED"}},
 		Timeline: []github.Event{
 			{Kind: "review", Author: "mlin", State: "CHANGES_REQUESTED", Body: "One thing first.", At: time.Now().Add(-2 * time.Hour)},
-			{Kind: "thread", Author: "mlin", Path: "push.py", Line: 41, DiffHunk: "@@ -1 +1 @@\n+def push():", Body: "Default to False?", At: time.Now().Add(-time.Hour)},
+			{Kind: "thread", Author: "mlin", Path: "push.py", Line: 41, DiffHunk: "@@ -1 +1 @@\n+def push():", Body: "Default to False?", At: time.Now().Add(-time.Hour), New: f.news},
 		},
 	}, nil
 }
@@ -348,6 +349,49 @@ func TestMergeWhenReadyAndAutoMergeShown(t *testing.T) {
 	m = send(t, m, key("?"))
 	if v := ansi.Strip(m.View()); !strings.Contains(v, "Merge when ready") || !strings.Contains(v, "approves the PR on GitHub") {
 		t.Errorf("help should list the review commands:\n%s", v)
+	}
+}
+
+func TestUnreadAndJumpToNew(t *testing.T) {
+	be, m := newTest(t)
+	be.news = true
+	be.prs[1].Unread = true // #312
+	m = search(t, m)
+	m = send(t, m, tea.WindowSizeMsg{Width: 140, Height: 20})
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(0) // termenv.TrueColor; tests have no colors otherwise
+	defer lipgloss.SetColorProfile(old)
+	if row := m.prRow(m.prs[1], 1, 56, 5); !strings.Contains(row, sBlue.Render("●")) || !strings.Contains(row, sBold.Render(m.prs[1].Title)) {
+		t.Errorf("an unread PR has a blue dot and a bold title: %q", row)
+	}
+	if row := m.prRow(m.prs[2], 2, 56, 5); !strings.Contains(row, sDim.Render("◌")) || strings.Contains(row, sBold.Render(m.prs[2].Title)) {
+		t.Errorf("a read draft looks as before: %q", row)
+	}
+
+	m = send(t, m, key("j"))
+	if m.prs[1].Unread {
+		t.Error("opening #312 should clear its dot")
+	}
+	pr, _ := m.selected()
+	d, _ := be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "1 since you last looked") || strings.Contains(ansi.Strip(m.vp.View()), "push.py:41") {
+		t.Fatalf("the new thread is below; the header says so:\n%s", v)
+	}
+	m = send(t, m, key("n"))
+	if m.focus != paneDetail || !strings.Contains(ansi.Strip(m.vp.View()), "mlin on push.py:41 · 1h ago  new") {
+		t.Errorf("n should scroll to the new thread:\n%s", ansi.Strip(m.vp.View()))
+	}
+
+	be.news = false
+	m = send(t, m, key("esc")) // back to the list
+	m = send(t, m, key("j"))
+	pr, _ = m.selected()
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	m = send(t, m, key("n"))
+	if m.flash != "Nothing new since you last looked" {
+		t.Errorf("n on #%d with nothing new: flash %q", pr.Number, m.flash)
 	}
 }
 

@@ -55,7 +55,9 @@ func (m *Model) syncViewport() {
 	if key != m.vpKey {
 		prev, _, _ := strings.Cut(m.vpKey, "|")
 		cur, _, _ := strings.Cut(key, "|")
-		m.vp.SetContent(m.detailContent(m.vp.Width))
+		content, newAt := m.detailContent(m.vp.Width)
+		m.vp.SetContent(content)
+		m.newAt = newAt
 		if prev != cur {
 			m.vp.GotoTop()
 		}
@@ -221,6 +223,9 @@ func (m Model) prRow(p github.PR, i, inner, numW int) string {
 	right := " " + reviewGlyph(p) + " " + ciGlyph(p.CheckState) + " " + sDim.Render(fmt.Sprintf("%3s", ago(p.UpdatedAt)))
 	num := fmt.Sprintf("%-*s", numW, "#"+strconv.Itoa(p.Number))
 	title := sText.Render(p.Title)
+	if p.Unread {
+		title = sBold.Render(p.Title)
+	}
 	if m.repoSel == "" {
 		title = sDim.Render(p.Name()+" ") + title
 	}
@@ -251,13 +256,15 @@ func (m Model) detailBox(w, h int) string {
 	return box(title, body, w, h, m.focus == paneDetail)
 }
 
-func (m Model) detailContent(w int) string {
+// detailContent is the PR view, and the line of its first new comment, review or
+// reply (-1 when nothing is new).
+func (m Model) detailContent(w int) (string, int) {
 	if m.help {
-		return m.helpContent(w)
+		return m.helpContent(w), -1
 	}
 	pr, ok := m.selected()
 	if !ok {
-		return sSoft.Render("Select a pull request.")
+		return sSoft.Render("Select a pull request."), -1
 	}
 	d := m.details[pr.Key()]
 	var b strings.Builder
@@ -318,6 +325,9 @@ func (m Model) detailContent(w int) string {
 		if len(d.Labels) > 0 {
 			line(wrap.Render(sSoft.Render("labels   ") + sPurple.Render(strings.Join(d.Labels, ", "))))
 		}
+		if n := newCount(d); n > 0 {
+			line(wrap.Render(sSoft.Render("new      ") + sBlue.Render(strconv.Itoa(n)+" since you last looked") + sDim.Render("  ·  ") + sText.Render("n") + sDim.Render(" jump to the first")))
+		}
 	}
 	if pr.Mergeable == "CONFLICTING" {
 		line(sYellow.Render("⚠ conflicts with " + pr.BaseRefName + ": rebase with r"))
@@ -330,10 +340,10 @@ func (m Model) detailContent(w int) string {
 	switch {
 	case d == nil && m.detErr[pr.Key()] != "":
 		line(sRed.Render("Could not load the conversation: " + m.detErr[pr.Key()]))
-		return b.String()
+		return b.String(), -1
 	case d == nil:
 		line(sSoft.Render("Loading conversation…"))
-		return b.String()
+		return b.String(), -1
 	}
 
 	if body := m.md.render(d.Body, w); body != "" {
@@ -342,19 +352,26 @@ func (m Model) detailContent(w int) string {
 		line(sDim.Render("  No description."))
 	}
 
+	newAt := -1
+	markNew := func(isNew bool) {
+		if isNew && newAt < 0 {
+			newAt = strings.Count(b.String(), "\n")
+		}
+	}
 	for _, ev := range d.Timeline {
 		line("")
+		markNew(ev.New)
 		when := ago(ev.At)
 		if when != "now" {
 			when += " ago"
 		}
 		switch ev.Kind {
 		case "comment":
-			line(rule(ev.Author+" commented · "+when, w, sSoft))
+			line(eventRule(ev.Author+" commented · "+when, w, sSoft, ev.New))
 			line(m.md.render(ev.Body, w))
 		case "review":
 			word, st := reviewWord(ev.State)
-			line(rule(ev.Author+" "+word+" · "+when, w, st))
+			line(eventRule(ev.Author+" "+word+" · "+when, w, st, ev.New))
 			if strings.TrimSpace(ev.Body) != "" {
 				line(m.md.render(ev.Body, w))
 			}
@@ -373,7 +390,7 @@ func (m Model) detailContent(w int) string {
 			if ev.Resolved {
 				st = sDim
 			}
-			line(rule(label, w, st))
+			line(eventRule(label, w, st, ev.New))
 			for _, h := range lastLines(ev.DiffHunk, 4) {
 				line(fit(diffLine(h), w))
 			}
@@ -383,7 +400,12 @@ func (m Model) detailContent(w int) string {
 				if rw != "now" {
 					rw += " ago"
 				}
-				line(sDim.Render("  ↳ ") + sText.Render(r.Author) + sDim.Render(" · "+rw))
+				markNew(r.New)
+				tag := ""
+				if r.New {
+					tag = " " + sNew.Render(" new ")
+				}
+				line(sDim.Render("  ↳ ") + sText.Render(r.Author) + sDim.Render(" · "+rw) + tag)
 				line(m.md.render(r.Body, w))
 			}
 		}
@@ -391,7 +413,23 @@ func (m Model) detailContent(w int) string {
 	if len(d.Timeline) == 0 {
 		line(sDim.Render("  No comments yet."))
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n"), newAt
+}
+
+// newCount is how many comments, reviews and replies came after your last visit.
+func newCount(d *github.Detail) int {
+	n := 0
+	for _, ev := range d.Timeline {
+		if ev.New {
+			n++
+		}
+		for _, r := range ev.Replies {
+			if r.New {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // rerunHint names the key that re-runs failed checks, when it can run on pr.
@@ -447,7 +485,7 @@ func (m Model) helpContent(w int) string {
 		key("j/k", "move"), key("h/l", "switch pane"), key("tab", "next pane"), key("enter", "open"),
 		key("esc", "back / dismiss"), key("g/G", "top / bottom"), key("ctrl+d/u", "page"),
 		key("1-"+strconv.Itoa(max(1, len(m.filters))), "filters"), key("/", "filter palette"),
-		key("R", "refresh"), key("?", "help"), key("q", "quit"),
+		key("n", "first new comment"), key("R", "refresh"), key("?", "help"), key("q", "quit"),
 	}, w) {
 		line(l)
 	}

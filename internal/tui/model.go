@@ -98,6 +98,7 @@ type Model struct {
 	folders  map[string]string
 	vp       viewport.Model
 	vpKey    string
+	newAt    int // the PR view's line of the first new comment, review or reply; -1 if none
 
 	palette bool
 	pin     textinput.Model
@@ -148,7 +149,7 @@ func New(be Backend) Model {
 		detErr: map[string]string{}, folders: map[string]string{},
 		pin: pin, promptIn: pi, spin: sp, md: newMarkdown(),
 		vp:  viewport.New(80, 20),
-		seq: 1, loading: true,
+		seq: 1, loading: true, newAt: -1,
 	}
 	m.loadCached()
 	return m
@@ -301,6 +302,11 @@ func (m *Model) selectionCmds() tea.Cmd {
 		return nil
 	}
 	key := pr.Key()
+	for i := range m.prs {
+		if m.prs[i].Key() == key {
+			m.prs[i].Unread = false // shown now, so the core marks it seen
+		}
+	}
 	if d, fresh := m.be.CachedDetail(pr); d != nil {
 		if cur, ok := m.details[key]; !ok || cur.UpdatedAt.Before(d.UpdatedAt) {
 			m.details[key] = d
@@ -591,6 +597,21 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startCommand(&cmd, "")
 		}
 	}
+	if key == "n" { // after the commands, so one of yours on n still wins
+		return m.jumpToNew()
+	}
+	return m, nil
+}
+
+// jumpToNew scrolls the PR view to the first comment, review or reply that came after
+// your last visit.
+func (m Model) jumpToNew() (tea.Model, tea.Cmd) {
+	if m.newAt < 0 {
+		cmd := m.setFlash("Nothing new since you last looked")
+		return m, cmd
+	}
+	m.focus = paneDetail
+	m.vp.SetYOffset(m.newAt)
 	return m, nil
 }
 
