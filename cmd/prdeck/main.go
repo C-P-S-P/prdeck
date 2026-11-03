@@ -17,6 +17,7 @@ import (
 	"github.com/patelchaitany/prdeck/internal/cache"
 	"github.com/patelchaitany/prdeck/internal/config"
 	"github.com/patelchaitany/prdeck/internal/core"
+	"github.com/patelchaitany/prdeck/internal/demo"
 	"github.com/patelchaitany/prdeck/internal/github"
 	"github.com/patelchaitany/prdeck/internal/tui"
 )
@@ -28,6 +29,7 @@ const usage = `prdeck — pull requests you're involved in, with one-key git com
 Usage:
   prdeck                   open the dashboard
   prdeck list [query]      print open PRs (default: your first filter), e.g. prdeck list author:@me
+  prdeck demo              try the dashboard with sample PRs (no GitHub, commands don't run)
   prdeck config init       write a starter config file
   prdeck config path       print where the config file lives
   prdeck version
@@ -56,6 +58,13 @@ func run(args []string) error {
 		return nil
 	case "config":
 		return configCmd(args[1:])
+	case "demo":
+		cfg, err := config.Load(config.DefaultPath())
+		if err != nil {
+			return err
+		}
+		_, err = tea.NewProgram(tui.New(demo.New(cfg)), tea.WithAltScreen()).Run()
+		return err
 	}
 
 	cfg, err := config.Load(config.DefaultPath())

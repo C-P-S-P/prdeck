@@ -2,23 +2,16 @@
 
 A terminal dashboard for the pull requests you're involved in. Pick a PR, read it the way GitHub shows it, then fetch, rebase, push or open it in your editor with one key.
 
-```
- prdeck  ❯ is:open involves:@me                                            10 PRs · synced just now
-┌─ Repositories ─────────────────────┐┌─ #4821 · northwind/registry ──────────────────────────────────┐
-│▸ All repositories                10││Add streaming push source to the registry                      │
-│  northwind/registry               3││ OPEN  you → main ← feat/stream-push-source                    │
-│  northwind/operator               2││6 commits · 14 files · +412 −38  ·  checks ✓4 ✕1               │
-└────────────────────────────────────┘│failing: integration-redis                                     │
-┌─ Pull requests · Involves me ──────┐│folder   ~/prdeck/registry-4821                                │
-│ 1 Involves me  2 Authored  3 Revi… ││                                                               │
-│● #4821 registry Add stream… ✗ ✕ 18m││  ## Summary                                                   │
-│● #4807 registry Cache proj…   ✓  2h││                                                               │
-│◌ #4790 registry Fix TTL ha…   ●  1d││  Adds a StreamPushSource that accepts streaming writes        │
-│                                    ││  and lands them in the online store.                          │
-└────────────────────────────────────┘└───────────────────────────────────────────────────────────────┘
- f fetch  c checkout  u pull  r rebase  C continue  A abort  p push  o open in editor  / filter  ? help
-```
-(sample data)
+![prdeck: repos, the PRs that involve you, and the selected PR rendered like GitHub](docs/screenshots/main.png)
+
+| | |
+| --- | --- |
+| ![Filter palette](docs/screenshots/palette.png) | ![Review requested filter](docs/screenshots/review.png) |
+| **`/` filter palette**: pick a filter or type any GitHub qualifier | **`3` Review requested**: who is waiting on you |
+| ![Rebase preview](docs/screenshots/rebase.png) | ![Rebase output](docs/screenshots/conflict.png) |
+| **`r` rebase**: the exact command, run only on `enter` | **Output**: conflicts show right away; fix them, then `C` |
+
+Screenshots use sample data from `prdeck demo`. Regenerate them with `scripts/screenshots/capture.sh`.
 
 ## Install
 
@@ -33,6 +26,7 @@ go build -o ~/.local/bin/prdeck ./cmd/prdeck
 
 ```bash
 prdeck                     # the dashboard
+prdeck demo                # try it with sample PRs: no GitHub needed, commands don't run
 prdeck list                # print your PRs (first filter)
 prdeck list author:@me     # any GitHub search qualifier
 prdeck config init         # write a starter config
