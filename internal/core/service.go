@@ -91,14 +91,14 @@ var ErrNoClone = errors.New("no local clone")
 
 // Folder is where a PR's commands run and what state it is in.
 type Folder struct {
-	Path     string
-	Clone    string
-	Remote   string
-	Worktree bool     // Path is a worktree for this PR
-	Exists   bool     // false: the worktree is created first
-	Branch   string   // checked out now ("HEAD" when detached)
-	Changes  []string // uncommitted changes, `git status --porcelain` lines
-	Rebasing bool
+	Path     string   `json:"path"`
+	Clone    string   `json:"clone"`
+	Remote   string   `json:"remote"`
+	Worktree bool     `json:"worktree"` // Path is a worktree for this PR
+	Exists   bool     `json:"exists"`   // false: the worktree is created first
+	Branch   string   `json:"branch"`   // checked out now ("HEAD" when detached)
+	Changes  []string `json:"changes"`  // uncommitted changes, `git status --porcelain` lines
+	Rebasing bool     `json:"rebasing"`
 }
 
 // ResolveFolder finds where commands for pr run, without changing anything. Commands run

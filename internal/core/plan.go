@@ -16,16 +16,16 @@ import (
 
 // Plan is a command ready to show and run.
 type Plan struct {
-	Title    string
-	Pre      string // runs first: stash/drop changes, check out the PR branch
-	Script   string // the main command
-	Action   string // "", "open", "browse", "clone"
-	Folder   Folder
-	Confirm  bool
-	Terminal bool     // hand the terminal to the main command
-	Silent   bool     // don't show output unless it fails
-	Changes  []string // uncommitted changes that must be stashed or dropped first
-	PR       github.PR
+	Title    string    `json:"title"`
+	Pre      string    `json:"pre"`    // runs first: stash/drop changes, check out the PR branch
+	Script   string    `json:"script"` // the main command
+	Action   string    `json:"action"` // "", "open", "browse", "clone"
+	Folder   Folder    `json:"folder"`
+	Confirm  bool      `json:"confirm"`
+	Terminal bool      `json:"terminal"` // hand the terminal to the main command
+	Silent   bool      `json:"silent"`   // don't show output unless it fails
+	Changes  []string  `json:"changes"`  // uncommitted changes that must be stashed or dropped first
+	PR       github.PR `json:"pr"`
 }
 
 // Result is what running a Plan produced.

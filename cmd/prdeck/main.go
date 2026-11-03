@@ -20,6 +20,7 @@ import (
 	"github.com/patelchaitany/prdeck/internal/core"
 	"github.com/patelchaitany/prdeck/internal/demo"
 	"github.com/patelchaitany/prdeck/internal/github"
+	"github.com/patelchaitany/prdeck/internal/server"
 	"github.com/patelchaitany/prdeck/internal/termout"
 	"github.com/patelchaitany/prdeck/internal/tui"
 )
@@ -32,6 +33,7 @@ Usage:
   prdeck                   open the dashboard
   prdeck list [query]      print open PRs (default: your first filter), e.g. prdeck list author:@me
   prdeck demo              try the dashboard with sample PRs (no GitHub, commands don't run)
+  prdeck serve [--demo]    answer JSON requests on stdin/stdout (used by the desktop app)
   prdeck config init       write a starter config file
   prdeck config path       print where the config file lives
   prdeck version
@@ -86,6 +88,8 @@ func run(args []string) error {
 			return err
 		}
 		return runUI(tui.New(demo.New(cfg)), cfg)
+	case "serve":
+		return serve(args[1:])
 	}
 
 	cfg, err := config.Load(config.DefaultPath())
@@ -126,6 +130,26 @@ func runUI(model tea.Model, cfg *config.Config) error {
 		out.Close()
 	}
 	return err
+}
+
+// serve runs the JSON server the desktop app talks to. With --demo it serves the
+// sample PRs, and commands only print what they would do.
+func serve(args []string) error {
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		return err
+	}
+	info := server.Info{Version: version, ConfigPath: config.DefaultPath()}
+	if len(args) > 0 && args[0] == "--demo" {
+		info.Demo = true
+		return server.Serve(demo.New(cfg), info, os.Stdin, os.Stdout)
+	}
+	gh, err := github.NewClient()
+	if err != nil {
+		return err
+	}
+	svc := core.New(cfg, config.DefaultPath(), gh, cache.Open(cache.DefaultPath()))
+	return server.Serve(svc, info, os.Stdin, os.Stdout)
 }
 
 func list(svc *core.Service, cfg *config.Config, query string) error {

@@ -78,6 +78,29 @@ Commands run in **your existing clone** of the PR's repo. The PR view's `folder`
 
 The clone search (`L` or `p`) is fuzzy, like fzf: it lists every git clone under your home folder, with clones of this repo first, and narrows as you type (`odh fea` finds `~/projects/odh-feast/feast`). Pick with `↑↓` and `enter` or a click; `tab` copies the path into the box to edit; a typed path (`~/work/x`) can be used as is. Your choice is saved under `repos.paths` in the config, so you only do it once.
 
+## Desktop app (macOS)
+
+The same PRs and commands in a native window, built with [GPUI](https://www.gpui.rs), the Rust UI framework Zed is made with. The window is Rust; everything behind it (config, GitHub, clones, commands) is the same Go core, which the app runs in the background as `prdeck serve`. Your config file and custom commands work in both.
+
+![PR Deck desktop: repos and PRs on the left, the PR with its conversation on the right, commands along the bottom](docs/screenshots/desktop.png)
+
+| | |
+| --- | --- |
+| ![Desktop filter palette](docs/screenshots/desktop-palette.png) | ![Desktop uncommitted changes](docs/screenshots/desktop-changes.png) |
+| **`⌘K` filters**: saved filters, or any GitHub qualifier | **Uncommitted changes**: `s` stash or `d` drop, then the command runs |
+
+Needs Rust (`rustup`) and Go. From the repo:
+
+```bash
+cd desktop
+cargo run --release -- --demo   # sample data, nothing runs
+cargo run --release             # your PRs (uses your gh login)
+```
+
+`desktop/scripts/bundle.sh` builds `desktop/dist/PR Deck.app` to keep in Applications. Keys: `j`/`k` or arrows move through PRs, `1`–`9` switch filters, `⌘K` or `/` opens the filter palette, `⌘R` or `R` refreshes, and each command's key from your config runs it. `esc` closes the command bar.
+
+Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state palette|changes|noclone]`.
+
 ## Configuration
 
 `~/.config/prdeck/config.yaml` (or `$PRDECK_CONFIG`). Everything is optional. `prdeck config init` writes a commented starter file.
@@ -119,10 +142,16 @@ Keys `j k q ? / R 1-9` are kept for navigation.
 
 ## How it's built
 
-One Go core (`internal/core`, `config`, `github`, `cache`, `repos`, `runner`) behind a Bubble Tea front-end (`internal/tui`). GitHub data comes from the GraphQL API through [go-gh](https://github.com/cli/go-gh); PR text is parsed with [goldmark](https://github.com/yuin/goldmark) and drawn by `internal/mdrender`, which keeps every line inside the pane. The same core is meant to back a Mac app later.
+One Go core (`internal/core`, `config`, `github`, `cache`, `repos`, `runner`) with two front-ends:
+
+- **Terminal**: Bubble Tea (`internal/tui`). PR text is parsed with [goldmark](https://github.com/yuin/goldmark) and drawn by `internal/mdrender`, which keeps every line inside the pane.
+- **Desktop**: Rust and GPUI with [GPUI Kit](https://gpui-kit.com) components (`desktop/`). It talks to the core over `prdeck serve` (`internal/server`): one JSON request per line on stdin, one response per line on stdout.
+
+GitHub data comes from the GraphQL API through [go-gh](https://github.com/cli/go-gh).
 
 ```bash
 go test ./...
+cd desktop && cargo build
 ```
 
 ## Roadmap
@@ -130,4 +159,4 @@ go test ./...
 1. **Core** — config, GitHub search, cache, `prdeck list`. Done.
 2. **Terminal app** — panes, PR view, command bar, worktree per PR, open in editor. Done.
 3. **Conversations** — reply, review, resolve threads; repo-level `.prdeck.yaml` commands with a trust prompt.
-4. **Mac app** — native window from the same core, notifications, Homebrew.
+4. **Mac app** — native GPUI window over the same core. Started; next: notifications, a signed release, Homebrew.

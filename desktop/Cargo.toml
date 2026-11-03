@@ -1,0 +1,24 @@
+[package]
+name = "prdeck-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "PR Deck desktop app: a GPUI front-end over prdeck's Go core"
+publish = false
+
+[dependencies]
+gpui-kit = "0.9.0"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# `cargo run --features snapshot -- --demo --snapshot out.png [--state palette]` saves
+# the window as a PNG and quits. Used for the README screenshots.
+snapshot = ["dep:gpui_macos", "gpui_macos/test-support"]
+
+# Compile Metal shaders when the app starts, so building needs no Metal toolchain.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_apple = { package = "gpui-pre-apple", version = "=0.3.11", features = ["runtime_shaders"] }
+gpui_macos = { package = "gpui-pre-macos", version = "=0.3.11", optional = true }

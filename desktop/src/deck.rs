@@ -1,0 +1,2228 @@
+//! The main window: repositories and pull requests on the left, the selected PR on
+//! the right, the command bar at the bottom, and the ⌘K filter palette on top.
+
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::text::TextView;
+use gpui_kit::prelude::*;
+use gpui_kit::*;
+use serde_json::json;
+
+use crate::model::*;
+use crate::rpc::Rpc;
+use crate::theme::*;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Section {
+    Conversation,
+    Checks,
+    Commits,
+    Files,
+}
+
+enum FolderState {
+    Loading,
+    Ready(Folder),
+    NoClone,
+    Failed(String),
+}
+
+/// A command on its way from key press to output, shown above the bottom bar.
+struct Run {
+    pr: Pr,
+    cmd: Cmd,
+    input: String,
+    stage: Stage,
+    _sub: Option<Subscription>,
+}
+
+enum Stage {
+    /// The command asks for {input} first.
+    Prompt(Entity<InputState>),
+    Preparing,
+    /// Shown before running: the command asks to be confirmed, or uncommitted
+    /// changes must be stashed or dropped first.
+    Ready { plan: Plan, drop_armed: bool },
+    Running(Plan),
+    Done { title: String, ok: bool, output: String },
+    /// The PR's repo has no local clone: pick one found on disk, type a path, or clone.
+    NoClone { found: Option<Vec<String>>, path: Entity<InputState> },
+    Failed(String),
+}
+
+struct Palette {
+    input: Entity<InputState>,
+    hi: usize,
+    _sub: Subscription,
+}
+
+#[derive(Clone)]
+enum Apply {
+    Filter(usize),
+    Query(String),
+}
+
+struct PaletteItem {
+    group: &'static str,
+    label: String,
+    qual: String,
+    apply: Apply,
+    active: bool,
+}
+
+pub struct Deck {
+    rpc: Option<Rpc>,
+    focus: FocusHandle,
+    hello: Hello,
+    banner: Option<String>,
+    filter_ix: usize,
+    custom: Option<String>,
+    prs: Vec<Pr>,
+    synced: Option<Instant>,
+    loading: bool,
+    seq: u64,
+    repo: Option<String>,
+    selected: Option<String>,
+    tabs: Vec<Pr>,
+    details: HashMap<String, Detail>,
+    detail_loading: HashSet<String>,
+    detail_err: HashMap<String, String>,
+    folders: HashMap<String, FolderState>,
+    section: Section,
+    run: Option<Run>,
+    palette: Option<Palette>,
+    _timer: Option<Task<()>>,
+}
+
+impl Deck {
+    pub fn new(demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let mut this = Self {
+            rpc: None,
+            focus,
+            hello: Hello::default(),
+            banner: None,
+            filter_ix: 0,
+            custom: None,
+            prs: vec![],
+            synced: None,
+            loading: true,
+            seq: 0,
+            repo: None,
+            selected: None,
+            tabs: vec![],
+            details: HashMap::new(),
+            detail_loading: HashSet::new(),
+            detail_err: HashMap::new(),
+            folders: HashMap::new(),
+            section: Section::Conversation,
+            run: None,
+            palette: None,
+            _timer: None,
+        };
+        match Rpc::start(demo) {
+            Ok(rpc) => {
+                this.rpc = Some(rpc);
+                this.say_hello(cx);
+            }
+            Err(e) => {
+                this.loading = false;
+                this.banner = Some(format!("Could not start prdeck: {e:#}"));
+            }
+        }
+        this
+    }
+
+    // ── data ────────────────────────────────────────────────────────────────
+
+    fn say_hello(&mut self, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        let hello = rpc.call::<Hello>("hello", json!({}));
+        cx.spawn(async move |this, cx| {
+            let res = hello.await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(h) => {
+                        if !h.warnings.is_empty() {
+                            this.banner = Some(format!("Config: {}", h.warnings.join(" · ")));
+                        }
+                        this.hello = h;
+                        this.load(cx);
+                        this.start_timer(cx);
+                    }
+                    Err(e) => {
+                        this.loading = false;
+                        this.banner = Some(e.message);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Redraws every 30 seconds ("Synced 2m ago") and searches again every
+    /// `github.refresh`.
+    fn start_timer(&mut self, cx: &mut Context<Self>) {
+        let every = Duration::from_secs_f64(self.hello.refresh.max(30.0));
+        self._timer = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(30)).await;
+                let ok = this.update(cx, |this, cx| {
+                    if this.synced.is_some_and(|t| t.elapsed() >= every) && !this.loading {
+                        this.load(cx);
+                    }
+                    cx.notify();
+                });
+                if ok.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn query(&self) -> String {
+        self.custom
+            .clone()
+            .or_else(|| self.hello.filters.get(self.filter_ix).map(|f| f.query.clone()))
+            .unwrap_or_else(|| "involves:@me".into())
+    }
+
+    fn query_label(&self) -> String {
+        match &self.custom {
+            Some(q) => q.clone(),
+            None => self.hello.filters.get(self.filter_ix).map(|f| f.name.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Shows saved results at once, then asks GitHub.
+    fn load(&mut self, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        self.seq += 1;
+        let seq = self.seq;
+        let q = self.query();
+        self.loading = true;
+        let cached = rpc.call::<SearchResult>("cachedSearch", json!({ "query": q }));
+        let fresh = rpc.call::<SearchResult>("search", json!({ "query": q }));
+        cx.spawn(async move |this, cx| {
+            if let Ok(r) = cached.await {
+                if r.found {
+                    let _ = this.update(cx, |this, cx| {
+                        if this.seq == seq {
+                            this.set_prs(r.prs, cx);
+                            cx.notify();
+                        }
+                    });
+                }
+            }
+            let res = fresh.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.seq != seq {
+                    return;
+                }
+                this.loading = false;
+                match res {
+                    Ok(r) => {
+                        this.set_prs(r.prs, cx);
+                        this.synced = Some(Instant::now());
+                        if !r.viewer.is_empty() {
+                            this.hello.viewer = r.viewer;
+                        }
+                        if this.banner.as_deref().is_some_and(|b| b.starts_with("GitHub:")) {
+                            this.banner = None;
+                        }
+                    }
+                    Err(e) => this.banner = Some(format!("GitHub: {}", e.message)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_prs(&mut self, prs: Vec<Pr>, cx: &mut Context<Self>) {
+        for t in self.tabs.iter_mut() {
+            if let Some(p) = prs.iter().find(|p| p.key() == t.key()) {
+                *t = p.clone();
+            }
+        }
+        self.prs = prs;
+        if self.selected.is_none() {
+            if let Some(first) = self.visible().first().cloned() {
+                self.select(first, cx);
+            }
+        }
+    }
+
+    fn visible(&self) -> Vec<Pr> {
+        self.prs.iter().filter(|p| self.repo.as_ref().is_none_or(|r| &p.repo == r)).cloned().collect()
+    }
+
+    fn repos(&self) -> Vec<(String, usize)> {
+        let mut counts: Vec<(String, usize)> = vec![];
+        for p in &self.prs {
+            match counts.iter_mut().find(|(r, _)| r == &p.repo) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((p.repo.clone(), 1)),
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        counts
+    }
+
+    fn selected_pr(&self) -> Option<Pr> {
+        let key = self.selected.as_ref()?;
+        self.prs.iter().chain(self.tabs.iter()).find(|p| &p.key() == key).cloned()
+    }
+
+    fn select(&mut self, pr: Pr, cx: &mut Context<Self>) {
+        let key = pr.key();
+        self.selected = Some(key.clone());
+        match self.tabs.iter_mut().find(|t| t.key() == key) {
+            Some(t) => *t = pr.clone(),
+            None => {
+                self.tabs.push(pr.clone());
+                if self.tabs.len() > 6 {
+                    self.tabs.remove(0);
+                }
+            }
+        }
+        self.load_detail(pr.clone(), cx);
+        self.load_folder(pr, cx);
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(i) = self.tabs.iter().position(|t| t.key() == key) else { return };
+        self.tabs.remove(i);
+        if self.selected.as_deref() == Some(key) {
+            self.selected = None;
+            if let Some(next) = self.tabs.get(i.min(self.tabs.len().saturating_sub(1))).cloned() {
+                self.select(next, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let list = self.visible();
+        if list.is_empty() {
+            return;
+        }
+        let cur = self.selected.as_ref().and_then(|k| list.iter().position(|p| &p.key() == k));
+        let next = match cur {
+            Some(i) => (i as isize + delta).clamp(0, list.len() as isize - 1) as usize,
+            None => 0,
+        };
+        self.select(list[next].clone(), cx);
+    }
+
+    fn load_detail(&mut self, pr: Pr, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        let key = pr.key();
+        if !self.detail_loading.insert(key.clone()) {
+            return;
+        }
+        let cached = rpc.call::<CachedDetail>("cachedDetail", json!({ "pr": pr }));
+        cx.spawn(async move |this, cx| {
+            let fresh = match cached.await {
+                Ok(c) => {
+                    let fresh = c.fresh;
+                    if let Some(d) = c.detail {
+                        let _ = this.update(cx, |this, cx| {
+                            this.details.insert(d.pr.key(), d);
+                            cx.notify();
+                        });
+                    }
+                    fresh
+                }
+                Err(_) => false,
+            };
+            if !fresh {
+                let res = rpc.call::<Detail>("detail", json!({ "pr": pr })).await;
+                let _ = this.update(cx, |this, _| match res {
+                    Ok(d) => {
+                        this.detail_err.remove(&pr.key());
+                        this.details.insert(pr.key(), d);
+                    }
+                    Err(e) => {
+                        this.detail_err.insert(pr.key(), e.message);
+                    }
+                });
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.detail_loading.remove(&pr.key());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_folder(&mut self, pr: Pr, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        let key = pr.key();
+        self.folders.entry(key.clone()).or_insert(FolderState::Loading);
+        let res = rpc.call::<Folder>("folder", json!({ "pr": pr, "worktree": false }));
+        cx.spawn(async move |this, cx| {
+            let res = res.await;
+            let _ = this.update(cx, |this, cx| {
+                let st = match res {
+                    Ok(f) => FolderState::Ready(f),
+                    Err(e) if e.code == "no_clone" => FolderState::NoClone,
+                    Err(e) => FolderState::Failed(e.message),
+                };
+                this.folders.insert(key, st);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    // ── commands ────────────────────────────────────────────────────────────
+
+    fn find_cmd(&self, f: impl Fn(&Cmd) -> bool) -> Option<Cmd> {
+        self.hello.commands.iter().find(|c| f(c)).cloned()
+    }
+
+    fn start(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pr) = self.selected_pr() else {
+            self.banner = Some("Select a pull request first.".into());
+            cx.notify();
+            return;
+        };
+        if cmd.prompt.is_empty() {
+            self.prepare(pr, cmd, String::new(), window, cx);
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(cmd.prompt.clone()));
+        let sub = cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let value = input.read(cx).value().to_string();
+                if let Some(run) = this.run.take() {
+                    this.prepare(run.pr, run.cmd, value, window, cx);
+                }
+            }
+        });
+        input.update(cx, |s, cx| s.focus(window, cx));
+        self.run = Some(Run { pr, cmd, input: String::new(), stage: Stage::Prompt(input), _sub: Some(sub) });
+        cx.notify();
+    }
+
+    fn prepare(&mut self, pr: Pr, cmd: Cmd, input: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        let plan = rpc.call::<Plan>("prepare", json!({ "command": cmd.name, "pr": pr, "input": input }));
+        self.run = Some(Run { pr: pr.clone(), cmd, input, stage: Stage::Preparing, _sub: None });
+        self.focus.focus(window, cx);
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let res = plan.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match res {
+                    Ok(plan) if !plan.changes.is_empty() || plan.confirm => {
+                        this.set_stage(Stage::Ready { plan, drop_armed: false });
+                    }
+                    Ok(plan) => this.execute(plan, "", cx),
+                    Err(e) if e.code == "no_clone" => this.no_clone(pr, window, cx),
+                    Err(e) => this.set_stage(Stage::Failed(e.message)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_stage(&mut self, stage: Stage) {
+        if let Some(run) = self.run.as_mut() {
+            run.stage = stage;
+        }
+    }
+
+    fn execute(&mut self, plan: Plan, changes: &str, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        let res = rpc.call::<ExecResult>("execute", json!({ "plan": plan, "changes": changes }));
+        let pr = plan.pr.clone();
+        let reload = plan.action == "clone" || !plan.pre.is_empty() || plan.action.is_empty();
+        let silent = plan.silent;
+        self.set_stage(Stage::Running(plan));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let res = res.await;
+            let _ = this.update(cx, |this, cx| {
+                let stage = match res {
+                    Ok(r) => {
+                        let mut out = r.output.trim().to_string();
+                        if !r.ok && !r.error.is_empty() {
+                            out = if out.is_empty() { r.error } else { format!("{out}\n{}", r.error) };
+                        }
+                        if r.ok && silent {
+                            out.clear();
+                        }
+                        Stage::Done { title: r.title, ok: r.ok, output: out }
+                    }
+                    Err(e) => Stage::Done { title: "Command".into(), ok: false, output: e.message },
+                };
+                this.set_stage(stage);
+                if reload {
+                    this.load_folder(pr, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn no_clone(&mut self, pr: Pr, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rpc) = self.rpc.clone() else { return };
+        let path = cx.new(|cx| InputState::new(window, cx).placeholder(format!("Path to your clone of {}", pr.repo)));
+        let sub = cx.subscribe_in(&path, window, |this, input, ev: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                let value = input.read(cx).value().to_string();
+                this.set_clone_path(value, window, cx);
+            }
+        });
+        if let Some(run) = self.run.as_mut() {
+            run.stage = Stage::NoClone { found: None, path };
+            run._sub = Some(sub);
+        }
+        let found = rpc.call::<Vec<String>>("findClones", json!({ "repo": pr.repo }));
+        cx.spawn(async move |this, cx| {
+            let found = found.await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                if let Some(Run { stage: Stage::NoClone { found: f, .. }, .. }) = this.run.as_mut() {
+                    *f = Some(found);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_clone_path(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(rpc), Some(run)) = (self.rpc.clone(), self.run.as_ref()) else { return };
+        let (pr, cmd, input) = (run.pr.clone(), run.cmd.clone(), run.input.clone());
+        let res = rpc.call::<SetPath>("setClonePath", json!({ "repo": pr.repo, "path": path }));
+        cx.spawn_in(window, async move |this, cx| {
+            let res = res.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match res {
+                    Ok(r) => {
+                        if !r.note.is_empty() {
+                            this.banner = Some(r.note);
+                        }
+                        this.folders.remove(&pr.key());
+                        this.load_folder(pr.clone(), cx);
+                        this.prepare(pr, cmd, input, window, cx);
+                    }
+                    Err(e) => this.banner = Some(e.message),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn clone_repo(&mut self, cx: &mut Context<Self>) {
+        let (Some(rpc), Some(run)) = (self.rpc.clone(), self.run.as_ref()) else { return };
+        let plan = rpc.call::<Plan>("clonePlan", json!({ "pr": run.pr }));
+        cx.spawn(async move |this, cx| {
+            let res = plan.await;
+            let _ = this.update(cx, |this, cx| {
+                match res {
+                    Ok(plan) => this.set_stage(Stage::Ready { plan, drop_armed: false }),
+                    Err(e) => this.set_stage(Stage::Failed(e.message)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Runs the plan waiting for confirmation, stashing or dropping changes as asked.
+    fn confirm(&mut self, changes: &str, cx: &mut Context<Self>) {
+        let Some(Run { stage: Stage::Ready { plan, drop_armed }, .. }) = self.run.as_mut() else { return };
+        if changes == "drop" && !*drop_armed {
+            *drop_armed = true;
+            cx.notify();
+            return;
+        }
+        if plan.changes.is_empty() != changes.is_empty() {
+            return;
+        }
+        let plan = plan.clone();
+        self.execute(plan, changes, cx);
+    }
+
+    fn close_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.run.as_ref().map(|r| &r.stage), Some(Stage::Running(_))) {
+            return;
+        }
+        self.run = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    // ── palette ─────────────────────────────────────────────────────────────
+
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type a filter, or a qualifier like involves:@me"));
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Change => {
+                if let Some(p) = this.palette.as_mut() {
+                    p.hi = 0;
+                }
+                cx.notify();
+            }
+            InputEvent::PressEnter { .. } => {
+                let hi = this.palette.as_ref().map(|p| p.hi).unwrap_or(0);
+                if let Some(item) = this.palette_items(cx).into_iter().nth(hi) {
+                    this.apply(item.apply, window, cx);
+                }
+            }
+            _ => {}
+        });
+        input.update(cx, |s, cx| s.focus(window, cx));
+        self.palette = Some(Palette { input, hi: 0, _sub: sub });
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn palette_items(&self, cx: &App) -> Vec<PaletteItem> {
+        let q = self.palette.as_ref().map(|p| p.input.read(cx).value().to_string()).unwrap_or_default();
+        let needle = q.trim().to_lowercase();
+        let mut items: Vec<PaletteItem> = self
+            .hello
+            .filters
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                needle.is_empty() || f.name.to_lowercase().contains(&needle) || f.query.to_lowercase().contains(&needle)
+            })
+            .map(|(i, f)| PaletteItem {
+                group: "Filters",
+                label: f.name.clone(),
+                qual: f.query.clone(),
+                apply: Apply::Filter(i),
+                active: self.custom.is_none() && i == self.filter_ix,
+            })
+            .collect();
+        if needle.contains(':') {
+            items.push(PaletteItem {
+                group: "Search GitHub",
+                label: format!("Use “{}”", q.trim()),
+                qual: "custom query".into(),
+                apply: Apply::Query(q.trim().to_string()),
+                active: false,
+            });
+        }
+        items
+    }
+
+    fn apply(&mut self, apply: Apply, window: &mut Window, cx: &mut Context<Self>) {
+        match apply {
+            Apply::Filter(i) => {
+                self.filter_ix = i;
+                self.custom = None;
+            }
+            Apply::Query(q) => self.custom = Some(q),
+        }
+        self.repo = None;
+        self.close_palette(window, cx);
+        self.load(cx);
+    }
+
+    fn palette_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.palette_items(cx).len();
+        let Some(p) = self.palette.as_mut() else { return };
+        match ev.keystroke.key.as_str() {
+            "escape" => {
+                self.close_palette(window, cx);
+                cx.stop_propagation();
+            }
+            "down" => {
+                p.hi = if n == 0 { 0 } else { (p.hi + 1) % n };
+                cx.stop_propagation();
+                cx.notify();
+            }
+            "up" => {
+                p.hi = if n == 0 { 0 } else { (p.hi + n - 1) % n };
+                cx.stop_propagation();
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    // ── keys ────────────────────────────────────────────────────────────────
+
+    fn typing(&self, window: &Window, cx: &App) -> bool {
+        let focused = |s: &Entity<InputState>| s.read(cx).focus_handle(cx).is_focused(window);
+        match self.run.as_ref().map(|r| &r.stage) {
+            Some(Stage::Prompt(s)) => focused(s),
+            Some(Stage::NoClone { path, .. }) => focused(path),
+            _ => false,
+        }
+    }
+
+    fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        let m = &ks.modifiers;
+        if m.platform && ks.key == "k" {
+            if self.palette.is_some() {
+                self.close_palette(window, cx);
+            } else {
+                self.open_palette(window, cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if self.palette.is_some() {
+            return;
+        }
+        if self.typing(window, cx) {
+            if ks.key == "escape" {
+                self.close_run(window, cx);
+            }
+            return;
+        }
+        if m.platform && ks.key == "r" {
+            self.load(cx);
+            return;
+        }
+        if m.control || m.platform || m.alt || m.function {
+            return;
+        }
+        match ks.key.as_str() {
+            "escape" => return self.close_run(window, cx),
+            "enter" => return self.confirm("", cx),
+            "down" => return self.move_selection(1, cx),
+            "up" => return self.move_selection(-1, cx),
+            _ => {}
+        }
+        let ch = ks.key_char.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| ks.key.clone());
+        // Waiting on uncommitted changes: s stashes, d drops (press twice).
+        if let Some(Run { stage: Stage::Ready { plan, .. }, .. }) = self.run.as_ref() {
+            if !plan.changes.is_empty() {
+                match ch.as_str() {
+                    "s" => return self.confirm("stash", cx),
+                    "d" => return self.confirm("drop", cx),
+                    _ => {}
+                }
+            }
+        }
+        match ch.as_str() {
+            "j" => return self.move_selection(1, cx),
+            "k" => return self.move_selection(-1, cx),
+            "R" => return self.load(cx),
+            "/" => return self.open_palette(window, cx),
+            d if d.len() == 1 && ('1'..='9').contains(&d.chars().next().unwrap()) => {
+                let i = d.parse::<usize>().unwrap() - 1;
+                if i < self.hello.filters.len() {
+                    self.apply(Apply::Filter(i), window, cx);
+                }
+                return;
+            }
+            _ => {}
+        }
+        if let Some(cmd) = self.find_cmd(|c| !c.key.is_empty() && c.key == ch) {
+            self.start(cmd, window, cx);
+        }
+    }
+}
+
+// ── view ────────────────────────────────────────────────────────────────────
+
+fn state_color(p: &Pr) -> u32 {
+    if p.is_draft {
+        DIM
+    } else if p.conflict() {
+        YELLOW
+    } else {
+        GREEN
+    }
+}
+
+fn review(p: &Pr) -> Option<(&'static str, u32)> {
+    if p.conflict() {
+        return Some(("conflict", YELLOW));
+    }
+    match p.review_decision.as_str() {
+        "APPROVED" => Some(("approved", GREEN)),
+        "CHANGES_REQUESTED" => Some(("changes requested", RED)),
+        "REVIEW_REQUIRED" => Some(("review required", SOFT)),
+        _ => None,
+    }
+}
+
+fn ci(state: &str) -> Option<(&'static str, u32, &'static str)> {
+    match state {
+        "SUCCESS" => Some(("✓", GREEN, "Checks passed")),
+        "FAILURE" | "ERROR" => Some(("✕", RED, "Checks failed")),
+        "PENDING" | "EXPECTED" => Some(("●", YELLOW, "Checks running")),
+        _ => None,
+    }
+}
+
+fn code_chip(text: impl Into<SharedString>, color: u32) -> Div {
+    div()
+        .px(px(6.))
+        .bg(rgb(BG_HOVER))
+        .border_1()
+        .border_color(rgb(BORDER_2))
+        .text_color(rgb(color))
+        .text_size(px(11.5))
+        .font_family(MONO)
+        .child(text.into())
+}
+
+fn card() -> Div {
+    div().flex().flex_col().border_1().border_color(rgb(BORDER_2)).bg(rgb(BG_SIDE))
+}
+
+fn card_head() -> Div {
+    div()
+        .h(px(36.))
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .bg(rgb(BG_HEAD))
+        .border_b_1()
+        .border_color(rgb(BORDER_2))
+        .text_size(px(12.))
+        .text_color(rgb(SOFT))
+}
+
+fn markdown(id: String, body: &str) -> AnyElement {
+    if body.trim().is_empty() {
+        return div().italic().text_color(rgb(DIM)).child("No description provided.").into_any_element();
+    }
+    TextView::markdown(SharedString::from(id), body.to_string()).selectable(true).into_any_element()
+}
+
+impl Deck {
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let synced = if self.loading {
+            "Syncing…".to_string()
+        } else {
+            match self.synced {
+                Some(t) => format!("Synced {} ago", ago_secs(t.elapsed().as_secs() as i64).replace("now", "just now"))
+                    .replace("just now ago", "just now"),
+                None => String::new(),
+            }
+        };
+        let stop = |_: &MouseDownEvent, _: &mut Window, cx: &mut App| cx.stop_propagation();
+        div()
+            .id("header")
+            .h(px(38.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(84.))
+            .pr(px(10.))
+            .bg(rgb(BG_DEEP))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                if ev.click_count == 2 {
+                    window.titlebar_double_click();
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .child(div().text_size(px(12.)).text_color(rgb(SOFT)).font_family(MONO).child("prdeck"))
+            .child(
+                div().flex_1().flex().justify_center().child(
+                    div()
+                        .id("query")
+                        .w_full()
+                        .max_w(px(520.))
+                        .h(px(26.))
+                        .px(px(8.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .bg(rgb(BG_INPUT))
+                        .border_1()
+                        .border_color(rgb(BORDER_2))
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(rgb(BORDER_3)))
+                        .on_mouse_down(MouseButton::Left, stop)
+                        .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                        .child(icon("search", 13., DIM))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .font_family(MONO)
+                                .text_size(px(12.))
+                                .text_color(rgb(TEXT_SOFT))
+                                .child(self.query()),
+                        )
+                        .child(kbd("⌘K")),
+                ),
+            )
+            .child(div().text_size(px(12.)).text_color(rgb(DIM)).child(synced))
+            .child(
+                div()
+                    .id("refresh")
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .on_mouse_down(MouseButton::Left, stop)
+                    .on_click(cx.listener(|this, _, _, cx| this.load(cx)))
+                    .child(icon("refresh-cw", 14., SOFT)),
+            )
+            .when(!self.hello.viewer.is_empty(), |d| d.child(avatar(&self.hello.viewer, 24.)))
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let repos = self.repos();
+        let visible = self.visible();
+        let mut repo_rows: Vec<AnyElement> = vec![];
+        let all = std::iter::once((None, "All repositories".to_string(), self.prs.len()))
+            .chain(repos.iter().map(|(r, n)| (Some(r.clone()), r.clone(), *n)));
+        for (i, (id, label, n)) in all.enumerate() {
+            let selected = self.repo == id;
+            let (owner, name) = match label.split_once('/') {
+                Some((o, n)) if id.is_some() => (format!("{o}/"), n.to_string()),
+                _ => (String::new(), label.clone()),
+            };
+            repo_rows.push(
+                div()
+                    .id(("repo", i))
+                    .h(px(30.))
+                    .flex_none()
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(rgb(BG_SEL)))
+                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.repo = id.clone();
+                        cx.notify();
+                    }))
+                    .child(icon("folder-git-2", 14., if selected { BLUE } else { DIM }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(div().flex().child(div().text_color(rgb(DIM)).child(owner)).child(name)),
+                    )
+                    .child(
+                        div().text_size(px(11.)).text_color(rgb(if selected { BLUE } else { DIM })).child(n.to_string()),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let chips: Vec<AnyElement> = self
+            .hello
+            .filters
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let active = self.custom.is_none() && i == self.filter_ix;
+                div()
+                    .id(("chip", i))
+                    .h(px(24.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.))
+                    .border_1()
+                    .border_color(rgb(if active { RING_ACTIVE } else { BORDER_2 }))
+                    .when(active, |d| d.bg(rgb(BG_ACTIVE)))
+                    .text_color(rgb(if active { TEXT } else { SOFT }))
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(rgb(BORDER_POP)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.apply(Apply::Filter(i), window, cx)))
+                    .child(f.name.clone())
+                    .into_any_element()
+            })
+            .collect();
+
+        let rows: Vec<AnyElement> = visible.iter().enumerate().map(|(i, p)| self.pr_row(i, p, cx)).collect();
+        let empty = rows.is_empty();
+
+        div()
+            .w(px(320.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(rgb(BG_SIDE))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(section_head("Repositories", None))
+                    .child(div().id("repos").max_h(px(30. * 7. + 8.)).py(px(4.)).overflow_y_scroll().children(repo_rows)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        section_head("Pull requests", Some(visible.len())).child(
+                            div()
+                                .id("scope")
+                                .h(px(24.))
+                                .px(px(6.))
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .text_size(px(12.))
+                                .text_color(rgb(TEXT_SOFT))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(BG_HOVER)))
+                                .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                                .child(div().max_w(px(150.)).truncate().child(self.query_label()))
+                                .child(icon("chevron-down", 12., SOFT)),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(6.))
+                            .px(px(10.))
+                            .py(px(8.))
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .children(chips),
+                    )
+                    .child(
+                        div()
+                            .id("prs")
+                            .flex_1()
+                            .min_h(px(0.))
+                            .py(px(4.))
+                            .overflow_y_scroll()
+                            .children(rows)
+                            .when(empty, |d| {
+                                d.child(
+                                    div().p(px(16.)).text_size(px(12.)).text_color(rgb(DIM)).child(if self.loading {
+                                        "Loading pull requests…"
+                                    } else {
+                                        "No open pull requests match this filter."
+                                    }),
+                                )
+                            }),
+                    ),
+            )
+    }
+
+    fn pr_row(&self, i: usize, p: &Pr, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.selected.as_ref() == Some(&p.key());
+        let pr = p.clone();
+        div()
+            .id(("pr", i))
+            .flex_none()
+            .px(px(12.))
+            .py(px(8.))
+            .flex()
+            .gap(px(8.))
+            .border_l_2()
+            .border_color(rgb(if selected { BLUE } else { BG_SIDE }))
+            .when(selected, |d| d.bg(rgb(BG_SEL)))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(BG_HOVER)))
+            .on_click(cx.listener(move |this, _, _, cx| this.select(pr.clone(), cx)))
+            .child(
+                div()
+                    .pt(px(2.))
+                    .child(icon(if p.is_draft { "git-pull-request-draft" } else { "git-pull-request" }, 14., state_color(p))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(p.title.clone()))
+                            .child(div().flex_none().text_size(px(11.)).text_color(rgb(DIM)).child(ago(&p.updated_at))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_size(px(11.5))
+                            .text_color(rgb(DIM))
+                            .child(div().min_w(px(0.)).truncate().child(format!("#{} · {}", p.number, p.name())))
+                            .children(review(p).map(|(t, c)| div().flex_none().text_size(px(11.)).text_color(rgb(c)).child(t)))
+                            .children(ci(&p.check_state).map(|(g, c, _)| div().flex_none().text_color(rgb(c)).child(g)))
+                            .when(p.comments > 0, |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.))
+                                        .child(icon("message-square", 11., DIM))
+                                        .child(p.comments.to_string()),
+                                )
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("tabs")
+            .h(px(34.))
+            .flex_none()
+            .flex()
+            .bg(rgb(BG_DEEP))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .overflow_x_scroll()
+            .children(self.tabs.iter().enumerate().map(|(i, t)| {
+                let active = self.selected.as_ref() == Some(&t.key());
+                let (pr, key) = (t.clone(), t.key());
+                div()
+                    .id(("tab", i))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pl(px(12.))
+                    .pr(px(4.))
+                    .max_w(px(280.))
+                    .border_r_1()
+                    .border_color(rgb(BORDER))
+                    .relative()
+                    .when(active, |d| {
+                        d.bg(rgb(BG)).child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(rgb(BLUE)))
+                    })
+                    .text_color(rgb(if active { TEXT } else { SOFT }))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(pr.clone(), cx)))
+                    .child(icon(if t.is_draft { "git-pull-request-draft" } else { "git-pull-request" }, 13., state_color(t)))
+                    .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(format!("#{}", t.number)))
+                    .child(div().min_w(px(0.)).truncate().text_size(px(12.)).child(t.title.clone()))
+                    .child(
+                        div()
+                            .id(("close", i))
+                            .size(px(22.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|s| s.bg(rgb(BG_HOVER)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(&key, cx);
+                            }))
+                            .child(icon("close", 12., DIM)),
+                    )
+            }))
+    }
+
+    fn main_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = match self.selected_pr() {
+            None => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(DIM))
+                .child("Select a pull request from the list.")
+                .into_any_element(),
+            Some(pr) => self.pr_view(pr, cx).into_any_element(),
+        };
+        div().flex_1().min_w(px(0.)).flex().flex_col().bg(rgb(BG)).child(self.tabs(cx)).child(body)
+    }
+
+    fn pr_view(&self, pr: Pr, cx: &mut Context<Self>) -> impl IntoElement {
+        let key = pr.key();
+        let detail = self.details.get(&key);
+        let editor = if self.hello.editor.is_empty() { "editor".to_string() } else { self.hello.editor.clone() };
+        let commits = detail.map(|d| d.commits).unwrap_or(0);
+        let (state_label, state_bg) = if pr.is_draft {
+            ("Draft", BG_HOVER)
+        } else if pr.conflict() {
+            ("Conflict", 0x2a2418)
+        } else {
+            ("Open", 0x1c2a1f)
+        };
+
+        let header = div()
+            .flex_none()
+            .px(px(20.))
+            .pt(px(16.))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(
+                                div().text_size(px(12.)).text_color(rgb(DIM)).child(format!("{} · #{}", pr.repo, pr.number)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(TEXT_BRIGHT))
+                                    .child(pr.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(SOFT))
+                                    .child(
+                                        div()
+                                            .h(px(22.))
+                                            .px(px(8.))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.))
+                                            .bg(rgb(state_bg))
+                                            .border_1()
+                                            .border_color(rgb(state_color(&pr)))
+                                            .text_color(rgb(state_color(&pr)))
+                                            .child(icon(
+                                                if pr.is_draft { "git-pull-request-draft" } else { "git-pull-request" },
+                                                12.,
+                                                state_color(&pr),
+                                            ))
+                                            .child(state_label),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .gap(px(4.))
+                                            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(pr.author.clone()))
+                                            .child(if commits > 0 {
+                                                format!("wants to merge {commits} commit{} into", if commits == 1 { "" } else { "s" })
+                                            } else {
+                                                "wants to merge into".to_string()
+                                            }),
+                                    )
+                                    .child(code_chip(pr.base.clone(), TEXT_SOFT))
+                                    .child("from")
+                                    .child(code_chip(pr.head.clone(), BLUE_LIGHT)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                primary_look("open")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
+                                            this.start(c, window, cx);
+                                        }
+                                    }))
+                                    .child(format!("Open in {editor}")),
+                            )
+                            .when(self.find_cmd(|c| c.action == "open" && c.worktree).is_some(), |d| {
+                                d.child(
+                                    button_look("worktree")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            if let Some(c) = this.find_cmd(|c| c.action == "open" && c.worktree) {
+                                                this.start(c, window, cx);
+                                            }
+                                        }))
+                                        .child(icon("folder-git-2", 13., SOFT))
+                                        .child("Worktree"),
+                                )
+                            })
+                            .when_some(self.find_cmd(|c| c.branch && c.run.is_empty() && c.action.is_empty()), |d, c| {
+                                d.child(
+                                    button_look("checkout")
+                                        .on_click(cx.listener(move |this, _, window, cx| this.start(c.clone(), window, cx)))
+                                        .child(icon("git-branch", 13., SOFT))
+                                        .child("Checkout"),
+                                )
+                            })
+                            .when_some(self.find_cmd(|c| c.action == "browse"), |d, c| {
+                                d.child(
+                                    button_look("github")
+                                        .on_click(cx.listener(move |this, _, window, cx| this.start(c.clone(), window, cx)))
+                                        .child("GitHub")
+                                        .child(icon("external-link", 12., SOFT)),
+                                )
+                            }),
+                    ),
+            )
+            .child(self.section_tabs(detail, cx));
+
+        let content = match (detail, self.detail_err.get(&key)) {
+            (Some(d), _) => div()
+                .flex()
+                .items_start()
+                .gap(px(20.))
+                .px(px(20.))
+                .pt(px(20.))
+                .pb(px(64.))
+                .child(div().flex_1().min_w(px(0.)).max_w(px(900.)).flex().flex_col().gap(px(16.)).child(self.section_body(d, cx)))
+                .child(self.aside(d, cx))
+                .into_any_element(),
+            (None, Some(err)) => div().p(px(20.)).text_color(rgb(RED)).child(err.clone()).into_any_element(),
+            (None, None) => div().p(px(20.)).text_color(rgb(DIM)).child("Loading…").into_any_element(),
+        };
+
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(div().id(SharedString::from(format!("scroll-{key}"))).flex_1().min_h(px(0.)).overflow_y_scroll().child(content))
+    }
+
+    fn section_tabs(&self, d: Option<&Detail>, cx: &mut Context<Self>) -> impl IntoElement {
+        let items = [
+            (Section::Conversation, "Conversation", d.map(|d| d.timeline.len() as u64)),
+            (Section::Checks, "Checks", d.map(|d| d.checks.len() as u64)),
+            (Section::Commits, "Commits", d.map(|d| d.commits)),
+            (Section::Files, "Files changed", d.map(|d| d.changed_files)),
+        ];
+        div().flex().children(items.into_iter().enumerate().map(|(i, (s, label, n))| {
+            let active = self.section == s;
+            div()
+                .id(("section", i))
+                .h(px(34.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .border_b_2()
+                .border_color(rgb(if active { BLUE } else { BG }))
+                .text_color(rgb(if active { TEXT } else { SOFT }))
+                .cursor_pointer()
+                .hover(|st| st.text_color(rgb(TEXT)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.section = s;
+                    cx.notify();
+                }))
+                .child(label)
+                .children(n.map(|n| {
+                    div().px(px(5.)).bg(rgb(BG_BADGE)).text_size(px(11.)).text_color(rgb(SOFT)).child(n.to_string())
+                }))
+        }))
+    }
+
+    fn section_body(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
+        match self.section {
+            Section::Conversation => self.conversation(d).into_any_element(),
+            Section::Checks => checks_view(d).into_any_element(),
+            Section::Commits | Section::Files => {
+                let what = if self.section == Section::Commits {
+                    format!("{} commits", d.commits)
+                } else {
+                    format!("{} changed files (+{} −{})", d.changed_files, d.additions, d.deletions)
+                };
+                let editor = self.hello.editor.clone();
+                card()
+                    .border_dashed()
+                    .border_color(rgb(BORDER_3))
+                    .bg(rgb(BG))
+                    .px(px(24.))
+                    .py(px(28.))
+                    .gap(px(10.))
+                    .items_start()
+                    .child(div().text_size(px(15.)).text_color(rgb(TEXT_BRIGHT)).child(format!("Review {what} in your editor")))
+                    .child(div().text_color(rgb(SOFT)).child(format!(
+                        "PR Deck stays out of diff review. Open the branch in {editor} to read the changes with your own tools."
+                    )))
+                    .child(
+                        primary_look("handoff")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
+                                    this.start(c, window, cx);
+                                }
+                            }))
+                            .child(format!("Open in {editor}")),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn conversation(&self, d: &Detail) -> impl IntoElement {
+        let key = d.pr.key();
+        let mut items: Vec<AnyElement> = vec![
+            card()
+                .child(
+                    card_head()
+                        .child(avatar(&d.pr.author, 20.))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(d.pr.author.clone()))
+                        .child(format!("opened this {} ago", ago(&d.pr.created_at)))
+                        .child(div().px(px(6.)).border_1().border_color(rgb(BORDER_3)).text_size(px(11.)).child("Author")),
+                )
+                .child(
+                    div()
+                        .px(px(18.))
+                        .pt(px(8.))
+                        .pb(px(16.))
+                        .text_size(px(14.))
+                        .text_color(rgb(TEXT_BODY))
+                        .child(markdown(format!("body-{key}"), &d.body)),
+                )
+                .into_any_element(),
+        ];
+        for (i, e) in d.timeline.iter().enumerate() {
+            items.push(event_view(&key, i, e));
+        }
+        div().flex().flex_col().gap(px(14.)).children(items)
+    }
+
+    fn aside(&self, d: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
+        let pr = &d.pr;
+        let (pass, fail, pend) = d.check_counts();
+        let (glyph, color, summary) = if d.checks.is_empty() {
+            ("–", DIM, "No checks".to_string())
+        } else if fail > 0 {
+            ("✕", RED, format!("{fail} failing, {pass} passed"))
+        } else if pend > 0 {
+            ("●", YELLOW, format!("{pend} running, {pass} passed"))
+        } else {
+            ("✓", GREEN, format!("All {pass} checks passed"))
+        };
+        let local = match self.folders.get(&pr.key()) {
+            Some(FolderState::Ready(f)) => {
+                let on = if f.branch == pr.head { "on this branch".to_string() } else { format!("on {}", f.branch) };
+                let mut lines = vec![
+                    div().text_color(rgb(TEXT_SOFT)).truncate().child(short_home(&f.path)).into_any_element(),
+                    div().text_color(rgb(SOFT)).child(on).into_any_element(),
+                ];
+                if f.rebasing {
+                    lines.push(div().text_color(rgb(YELLOW)).child("Rebase in progress").into_any_element());
+                }
+                if !f.changes.is_empty() {
+                    lines.push(
+                        div().text_color(rgb(YELLOW)).child(format!("{} uncommitted changes", f.changes.len())).into_any_element(),
+                    );
+                }
+                lines
+            }
+            Some(FolderState::NoClone) => vec![div().text_color(rgb(DIM)).child("No local clone").into_any_element()],
+            Some(FolderState::Failed(e)) => vec![div().text_color(rgb(RED)).child(e.clone()).into_any_element()],
+            _ => vec![div().text_color(rgb(DIM)).child("Looking for a clone…").into_any_element()],
+        };
+        let rebase = self.find_cmd(|c| c.name.eq_ignore_ascii_case("rebase"));
+        let base = pr.base.clone();
+
+        div()
+            .w(px(250.))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .text_size(px(12.))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(BG_SIDE))
+            .child(
+                aside_section("Branch")
+                    .child(div().font_family(MONO).text_color(rgb(BLUE_LIGHT)).truncate().child(pr.head.clone()))
+                    .child(div().text_color(rgb(SOFT)).child(format!("into {}", pr.base)))
+                    .when(pr.conflict(), |s| {
+                        s.child(
+                            div()
+                                .px(px(8.))
+                                .py(px(6.))
+                                .border_1()
+                                .border_color(rgb(0x5a4a26))
+                                .bg(rgb(0x2a2418))
+                                .text_color(rgb(YELLOW))
+                                .child(format!("Merge conflict with {}", pr.base)),
+                        )
+                    })
+                    .when_some(rebase, |s, c| {
+                        s.child(
+                            button_look("rebase")
+                                .h(px(28.))
+                                .justify_center()
+                                .on_click(cx.listener(move |this, _, window, cx| this.start(c.clone(), window, cx)))
+                                .child(format!("Rebase on {base}")),
+                        )
+                    }),
+            )
+            .child(aside_section("Local clone").children(local))
+            .child(aside_section("Reviewers").children(if d.reviewers.is_empty() {
+                vec![div().text_color(rgb(DIM)).child("No reviewers yet").into_any_element()]
+            } else {
+                d.reviewers
+                    .iter()
+                    .map(|r| {
+                        let (label, color) = match r.state.as_str() {
+                            "APPROVED" => ("approved", GREEN),
+                            "CHANGES_REQUESTED" => ("changes", RED),
+                            "COMMENTED" => ("commented", SOFT),
+                            "DISMISSED" => ("dismissed", DIM),
+                            _ => ("requested", DIM),
+                        };
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(avatar(&r.login, 18.))
+                            .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(r.login.clone()))
+                            .child(div().text_color(rgb(color)).child(label))
+                            .into_any_element()
+                    })
+                    .collect()
+            }))
+            .child(
+                aside_section("Checks").child(
+                    div()
+                        .id("checks-link")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .py(px(4.))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.section = Section::Checks;
+                            cx.notify();
+                        }))
+                        .child(div().text_color(rgb(color)).child(glyph))
+                        .child(div().flex_1().text_color(rgb(TEXT)).child(summary))
+                        .child(div().text_color(rgb(DIM)).child("View")),
+                ),
+            )
+            .child(
+                aside_section("Changes").child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(div().text_color(rgb(GREEN)).child(format!("+{}", d.additions)))
+                        .child(div().text_color(rgb(RED)).child(format!("−{}", d.deletions)))
+                        .child(div().text_color(rgb(SOFT)).child(format!("{} files", d.changed_files))),
+                ),
+            )
+            .when(!d.labels.is_empty(), |a| {
+                a.child(aside_section("Labels").child(div().flex().flex_wrap().gap(px(6.)).children(d.labels.iter().map(|l| {
+                    div().px(px(6.)).border_1().border_color(rgb(BORDER_3)).text_size(px(11.)).text_color(rgb(TEXT_SOFT)).child(l.clone())
+                }))))
+            })
+    }
+
+    fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let pr = self.selected_pr();
+        let branch = match pr.as_ref().and_then(|p| self.folders.get(&p.key())) {
+            Some(FolderState::Ready(f)) => {
+                let mut row = div().flex().items_center().gap(px(6.)).child(div().max_w(px(220.)).truncate().child(f.branch.clone()));
+                if !f.changes.is_empty() {
+                    row = row.child(div().text_color(rgb(YELLOW)).child(format!("±{}", f.changes.len())));
+                }
+                row.into_any_element()
+            }
+            Some(FolderState::NoClone) => div().text_color(rgb(DIM)).child("no local clone").into_any_element(),
+            _ => div().text_color(rgb(DIM)).child("–").into_any_element(),
+        };
+        let buttons: Vec<AnyElement> = self
+            .hello
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.bar)
+            .map(|(i, c)| {
+                let cmd = c.clone();
+                let active = self.run.as_ref().is_some_and(|r| r.cmd.name == c.name);
+                div()
+                    .id(("cmd", i))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .border_1()
+                    .border_color(rgb(if active { RING_ACTIVE } else { BG_DEEP }))
+                    .when(active, |d| d.bg(rgb(BG_ACTIVE)))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(BG_HOVER)).border_color(rgb(BORDER_2)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.start(cmd.clone(), window, cx)))
+                    .when(!c.key.is_empty(), |d| d.child(kbd(c.key.clone())))
+                    .child(div().text_color(rgb(TEXT)).child(c.name.clone()))
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(8.))
+            .py(px(5.))
+            .bg(rgb(BG_DEEP))
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .text_size(px(12.))
+            .child(
+                div()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pl(px(4.))
+                    .pr(px(10.))
+                    .mr(px(4.))
+                    .border_r_1()
+                    .border_color(rgb(BORDER))
+                    .text_size(px(11.5))
+                    .text_color(rgb(TEXT_SOFT))
+                    .font_family(MONO)
+                    .child(icon("git-branch", 13., DIM))
+                    .child(branch),
+            )
+            .child(div().id("bar").flex_1().min_w(px(0.)).flex().gap(px(4.)).overflow_x_scroll().children(buttons))
+            .child(
+                div()
+                    .id("filters")
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .border_1()
+                    .border_color(rgb(BORDER_2))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                    .child(kbd("⌘K"))
+                    .child(div().text_color(rgb(TEXT)).child("Filters")),
+            )
+    }
+
+    fn run_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let run = self.run.as_ref()?;
+        let label = |t: String| div().flex_none().text_size(px(11.)).text_color(rgb(DIM)).child(t.to_uppercase());
+        let close = div()
+            .id("run-close")
+            .size(px(26.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(BG_HOVER)))
+            .on_click(cx.listener(|this, _, window, cx| this.close_run(window, cx)))
+            .child(icon("close", 13., DIM));
+        let row = || div().flex().items_center().gap(px(10.)).px(px(12.)).py(px(8.));
+        let script = |s: String| {
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .font_family(MONO)
+                .text_size(px(12.5))
+                .text_color(rgb(TEXT))
+                .child(div().flex().child(div().text_color(rgb(GREEN)).child("$ ")).child(s))
+        };
+
+        let body: Vec<AnyElement> = match &run.stage {
+            Stage::Prompt(input) => vec![
+                row()
+                    .child(label(run.cmd.name.clone()))
+                    .child(div().flex_1().child(Input::new(input)))
+                    .child(div().text_size(px(11.)).text_color(rgb(DIM)).child("↵ continue · esc cancel"))
+                    .child(close)
+                    .into_any_element(),
+            ],
+            Stage::Preparing => vec![
+                row()
+                    .child(label(run.cmd.name.clone()))
+                    .child(div().flex_1().text_color(rgb(SOFT)).child("Preparing…"))
+                    .child(close)
+                    .into_any_element(),
+            ],
+            Stage::Ready { plan, drop_armed } => {
+                let full = plan.full_script();
+                let copy = full.clone();
+                let mut rows = vec![
+                    row()
+                        .child(label(plan.title.clone()))
+                        .child(script(full))
+                        .child(div().flex_none().text_size(px(11.)).text_color(rgb(DIM)).child(plan.dir()))
+                        .child(
+                            button_look("copy")
+                                .h(px(26.))
+                                .text_size(px(12.))
+                                .on_click(cx.listener(move |_, _, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))))
+                                .child("Copy"),
+                        )
+                        .when(plan.changes.is_empty(), |r| {
+                            r.child(
+                                primary_look("run").h(px(26.)).text_size(px(12.)).on_click(cx.listener(|this, _, _, cx| this.confirm("", cx))).child("Run ↵"),
+                            )
+                        })
+                        .child(close)
+                        .into_any_element(),
+                ];
+                if !plan.changes.is_empty() {
+                    let n = plan.changes.len();
+                    let shown: Vec<String> = plan.changes.iter().take(4).map(|c| c.trim().to_string()).collect();
+                    let more = if n > 4 { format!(" and {} more", n - 4) } else { String::new() };
+                    rows.push(
+                        row()
+                            .pt(px(0.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.))
+                                    .text_size(px(12.))
+                                    .child(div().text_color(rgb(YELLOW)).child(format!(
+                                        "{} has {n} uncommitted change{}. Stash or drop them first.",
+                                        short_home(&plan.folder.path),
+                                        if n == 1 { "" } else { "s" }
+                                    )))
+                                    .child(div().truncate().font_family(MONO).text_color(rgb(DIM)).child(format!("{}{more}", shown.join("  ")))),
+                            )
+                            .child(
+                                button_look("stash")
+                                    .h(px(26.))
+                                    .text_size(px(12.))
+                                    .on_click(cx.listener(|this, _, _, cx| this.confirm("stash", cx)))
+                                    .child(kbd("s"))
+                                    .child("Stash & run"),
+                            )
+                            .child(
+                                button_look("drop")
+                                    .h(px(26.))
+                                    .text_size(px(12.))
+                                    .when(*drop_armed, |b| b.border_color(rgb(RED)).text_color(rgb(RED)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.confirm("drop", cx)))
+                                    .child(kbd("d"))
+                                    .child(if *drop_armed { format!("Drop {n} changes for good") } else { "Drop & run".to_string() }),
+                            )
+                            .into_any_element(),
+                    );
+                }
+                rows
+            }
+            Stage::Running(plan) => vec![
+                row()
+                    .child(label(plan.title.clone()))
+                    .child(script(plan.full_script()))
+                    .child(div().flex_none().text_color(rgb(SOFT)).child("Running…"))
+                    .into_any_element(),
+            ],
+            Stage::Done { title, ok, output } => {
+                let (g, c) = if *ok { ("✓", GREEN) } else { ("✕", RED) };
+                let mut rows = vec![
+                    row()
+                        .child(div().text_color(rgb(c)).child(g))
+                        .child(div().flex_1().text_color(rgb(TEXT)).child(if *ok { format!("{title} finished") } else { format!("{title} failed") }))
+                        .child(close)
+                        .into_any_element(),
+                ];
+                if !output.is_empty() {
+                    rows.push(
+                        div()
+                            .id("run-output")
+                            .max_h(px(180.))
+                            .overflow_y_scroll()
+                            .px(px(12.))
+                            .pb(px(10.))
+                            .font_family(MONO)
+                            .text_size(px(12.))
+                            .text_color(rgb(if *ok { TEXT_SOFT } else { 0xf2b0b0 }))
+                            .children(output.lines().map(|l| div().child(l.to_string())))
+                            .into_any_element(),
+                    );
+                }
+                rows
+            }
+            Stage::NoClone { found, path } => {
+                let mut rows = vec![
+                    row()
+                        .child(label(run.cmd.name.clone()))
+                        .child(div().flex_1().text_color(rgb(YELLOW)).child(format!("No local clone of {} found.", run.pr.repo)))
+                        .child(
+                            button_look("clone")
+                                .h(px(26.))
+                                .text_size(px(12.))
+                                .on_click(cx.listener(|this, _, _, cx| this.clone_repo(cx)))
+                                .child(format!("Clone {}", run.pr.repo)),
+                        )
+                        .child(close)
+                        .into_any_element(),
+                ];
+                match found {
+                    None => rows.push(row().pt(px(0.)).text_color(rgb(DIM)).child("Searching your disk for clones…").into_any_element()),
+                    Some(list) => {
+                        for (i, p) in list.iter().enumerate() {
+                            let path = p.clone();
+                            rows.push(
+                                div()
+                                    .id(("found", i))
+                                    .mx(px(12.))
+                                    .px(px(8.))
+                                    .h(px(28.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                                    .on_click(cx.listener(move |this, _, window, cx| this.set_clone_path(path.clone(), window, cx)))
+                                    .child(icon("folder-git-2", 13., BLUE))
+                                    .child(div().font_family(MONO).text_color(rgb(TEXT)).child(short_home(p)))
+                                    .child(div().text_color(rgb(DIM)).child("use this clone"))
+                                    .into_any_element(),
+                            );
+                        }
+                    }
+                }
+                rows.push(
+                    row()
+                        .child(div().flex_none().text_size(px(12.)).text_color(rgb(SOFT)).child("Or type a path"))
+                        .child(div().flex_1().child(Input::new(path)))
+                        .into_any_element(),
+                );
+                rows
+            }
+            Stage::Failed(msg) => vec![
+                row()
+                    .child(div().text_color(rgb(RED)).child("✕"))
+                    .child(div().flex_1().text_color(rgb(0xf2b0b0)).child(msg.clone()))
+                    .child(close)
+                    .into_any_element(),
+            ],
+        };
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .bg(rgb(BG_INPUT))
+                .border_t_1()
+                .border_color(rgb(BORDER_POP))
+                .children(body)
+                .into_any_element(),
+        )
+    }
+
+    fn palette_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.palette.as_ref()?;
+        let items = self.palette_items(cx);
+        let mut list: Vec<AnyElement> = vec![];
+        let mut group = "";
+        for (i, it) in items.iter().enumerate() {
+            if it.group != group {
+                group = it.group;
+                list.push(div().px(px(14.)).pt(px(8.)).pb(px(4.)).child(caption(group)).into_any_element());
+            }
+            let hi = i == p.hi;
+            let apply = it.apply.clone();
+            list.push(
+                div()
+                    .id(("item", i))
+                    .h(px(34.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .when(hi, |d| d.bg(rgb(0x2a3140)))
+                    .cursor_pointer()
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if let Some(p) = this.palette.as_mut() {
+                            if p.hi != i {
+                                p.hi = i;
+                                cx.notify();
+                            }
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| this.apply(apply.clone(), window, cx)))
+                    .child(div().w(px(12.)).text_color(rgb(BLUE)).child(if it.active { "✓" } else { "" }))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(it.label.clone()))
+                    .child(div().font_family(MONO).text_size(px(12.)).text_color(rgb(SOFT)).child(it.qual.clone()))
+                    .into_any_element(),
+            );
+        }
+        if items.is_empty() {
+            list.push(
+                div()
+                    .px(px(14.))
+                    .py(px(18.))
+                    .text_color(rgb(SOFT))
+                    .child("No saved filter matches. Add a qualifier such as label:bug to search GitHub directly.")
+                    .into_any_element(),
+            );
+        }
+        let hint = |k: &str, t: &str| div().flex().gap(px(4.)).child(kbd(k.to_string())).child(t.to_string());
+        Some(
+            div()
+                .id("palette-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x0a0b0d99))
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(px(56.))
+                .on_click(cx.listener(|this, _, window, cx| this.close_palette(window, cx)))
+                .capture_key_down(cx.listener(Self::palette_key))
+                .child(
+                    div()
+                        .id("palette")
+                        .w(px(640.))
+                        .flex()
+                        .flex_col()
+                        .bg(rgb(0x202328))
+                        .border_1()
+                        .border_color(rgb(BORDER_POP))
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .h(px(46.))
+                                .pl(px(14.))
+                                .pr(px(10.))
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .border_b_1()
+                                .border_color(rgb(BORDER_2))
+                                .child(icon("search", 15., SOFT))
+                                .child(div().flex_1().child(Input::new(&p.input).appearance(false)))
+                                .child(kbd("esc")),
+                        )
+                        .child(div().id("palette-list").max_h(px(340.)).overflow_y_scroll().py(px(4.)).children(list))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(14.))
+                                .px(px(14.))
+                                .py(px(6.))
+                                .bg(rgb(0x1c1e23))
+                                .border_t_1()
+                                .border_color(rgb(BORDER_2))
+                                .text_size(px(11.))
+                                .text_color(rgb(DIM))
+                                .child(hint("↑↓", "move"))
+                                .child(hint("↵", "apply"))
+                                .child(div().ml_auto().font_family(MONO).text_color(rgb(SOFT)).child("author: involves: review-requested: label: repo:")),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn banner_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let msg = self.banner.clone()?;
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(14.))
+                .py(px(6.))
+                .bg(rgb(0x2a2418))
+                .border_b_1()
+                .border_color(rgb(0x5a4a26))
+                .text_size(px(12.))
+                .text_color(rgb(YELLOW))
+                .child(div().flex_1().child(msg))
+                .child(
+                    div()
+                        .id("banner-close")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.banner = None;
+                            cx.notify();
+                        }))
+                        .child(icon("close", 12., YELLOW)),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+fn section_head(title: &str, count: Option<usize>) -> Div {
+    div()
+        .h(px(30.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_between()
+        .pl(px(12.))
+        .pr(px(6.))
+        .border_b_1()
+        .border_color(rgb(BORDER))
+        .child(
+            div()
+                .flex()
+                .gap(px(6.))
+                .child(caption(title.to_string()))
+                .children(count.map(|n| div().text_size(px(11.)).text_color(rgb(TEXT_SOFT)).child(n.to_string()))),
+        )
+}
+
+fn aside_section(title: &str) -> Div {
+    div()
+        .p(px(12.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .border_b_1()
+        .border_color(rgb(BORDER))
+        .child(caption(title.to_string()))
+}
+
+fn checks_view(d: &Detail) -> impl IntoElement {
+    let (pass, fail, pend) = d.check_counts();
+    let (glyph, color) = if fail > 0 { ("✕", RED) } else if pend > 0 { ("●", YELLOW) } else { ("✓", GREEN) };
+    card()
+        .child(
+            card_head()
+                .child(div().text_color(rgb(color)).child(glyph))
+                .child(div().text_color(rgb(TEXT)).child(format!("{pass} passed · {fail} failing · {pend} running"))),
+        )
+        .children(d.checks.iter().map(|c| {
+            let (g, col, status) = match check_kind(&c.state) {
+                CheckKind::Pass => ("✓", GREEN, c.state.to_lowercase()),
+                CheckKind::Fail => ("✕", RED, c.state.to_lowercase()),
+                CheckKind::Pending => ("●", YELLOW, c.state.to_lowercase()),
+            };
+            div()
+                .h(px(36.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .border_t_1()
+                .border_color(rgb(BORDER))
+                .text_size(px(12.5))
+                .child(div().w(px(14.)).text_color(rgb(col)).child(g))
+                .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(c.name.clone()))
+                .child(div().text_size(px(12.)).text_color(rgb(col)).child(status))
+        }))
+        .when(d.checks.is_empty(), |c| c.child(div().p(px(12.)).text_color(rgb(DIM)).child("No checks reported.")))
+}
+
+fn event_view(key: &str, i: usize, e: &Event) -> AnyElement {
+    let (verb, verb_color, border) = match (e.kind.as_str(), e.state.as_str()) {
+        ("review", "APPROVED") => ("approved these changes".to_string(), GREEN, 0x2f4a2c),
+        ("review", "CHANGES_REQUESTED") => ("requested changes".to_string(), RED, 0x5a3236),
+        ("review", _) => ("reviewed".to_string(), SOFT, BORDER_2),
+        ("thread", _) => {
+            let at = if e.line > 0 { format!("{}:{}", e.path, e.line) } else { e.path.clone() };
+            (format!("commented on {at}"), SOFT, BORDER_2)
+        }
+        _ => ("commented".to_string(), SOFT, BORDER_2),
+    };
+    // A review with no text is a one-line event, not a card.
+    if e.kind == "review" && e.body.trim().is_empty() {
+        let glyph = match e.state.as_str() {
+            "APPROVED" => "✓",
+            "CHANGES_REQUESTED" => "✕",
+            _ => "•",
+        };
+        return div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(4.))
+            .text_size(px(12.))
+            .text_color(rgb(SOFT))
+            .child(
+                div()
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_1()
+                    .border_color(rgb(verb_color))
+                    .text_color(rgb(verb_color))
+                    .text_size(px(11.))
+                    .child(glyph),
+            )
+            .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
+            .child(verb)
+            .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at))))
+            .into_any_element();
+    }
+
+    let mut body = div().px(px(14.)).py(px(12.)).flex().flex_col().gap(px(10.)).text_size(px(13.5)).text_color(rgb(TEXT_BODY));
+    if e.kind == "thread" && !e.diff_hunk.is_empty() {
+        let lines: Vec<&str> = e.diff_hunk.lines().collect();
+        let tail = &lines[lines.len().saturating_sub(8)..];
+        body = body.child(
+            div()
+                .border_1()
+                .border_color(rgb(BORDER_2))
+                .child(
+                    div()
+                        .h(px(28.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .bg(rgb(BG_HEAD))
+                        .border_b_1()
+                        .border_color(rgb(BORDER_2))
+                        .text_size(px(11.5))
+                        .text_color(rgb(TEXT_SOFT))
+                        .font_family(MONO)
+                        .child(icon("file-diff", 12., DIM))
+                        .child(e.path.clone())
+                        .when(e.resolved, |d| d.child(div().ml_auto().text_color(rgb(GREEN)).child("resolved")))
+                        .when(e.outdated, |d| d.child(div().ml_auto().text_color(rgb(DIM)).child("outdated"))),
+                )
+                .child(div().font_family(MONO).text_size(px(12.)).children(tail.iter().map(|l| {
+                    let (bg, fg) = if l.starts_with("@@") {
+                        (0x1f2633, BLUE)
+                    } else if l.starts_with('+') {
+                        (0x1d2f22, 0xb5dca8)
+                    } else if l.starts_with('-') {
+                        (0x36202a, 0xf2b0b0)
+                    } else {
+                        (BG_SIDE, TEXT_SOFT)
+                    };
+                    div().px(px(10.)).bg(rgb(bg)).text_color(rgb(fg)).truncate().child(l.to_string())
+                }))),
+        );
+    }
+    body = body.child(markdown(format!("ev-{key}-{i}"), &e.body));
+    for (j, r) in e.replies.iter().enumerate() {
+        body = body.child(
+            div()
+                .pt(px(10.))
+                .border_t_1()
+                .border_color(rgb(BORDER))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(12.))
+                        .text_color(rgb(SOFT))
+                        .child(avatar(&r.author, 18.))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(r.author.clone()))
+                        .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&r.at)))),
+                )
+                .child(markdown(format!("ev-{key}-{i}-{j}"), &r.body)),
+        );
+    }
+    card()
+        .border_color(rgb(border))
+        .child(
+            card_head()
+                .h(px(34.))
+                .child(avatar(&e.author, 20.))
+                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
+                .child(div().min_w(px(0.)).truncate().text_color(rgb(verb_color)).child(verb))
+                .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at)))),
+        )
+        .child(body)
+        .into_any_element()
+}
+
+impl Render for Deck {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("deck")
+            .key_context("Deck")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .bg(rgb(BG))
+            .text_color(rgb(TEXT))
+            .text_size(px(13.))
+            .child(self.header(cx))
+            .children(self.banner_view(cx))
+            .child(div().flex_1().min_h(px(0.)).flex().child(self.sidebar(cx)).child(self.main_area(cx)))
+            .children(self.run_bar(cx))
+            .child(self.footer(cx))
+            .children(self.palette_view(cx))
+    }
+}
+
+/// Puts the window in a known state for README screenshots (demo data only).
+#[cfg(feature = "snapshot")]
+impl Deck {
+    pub fn show_state(&mut self, state: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let pick = |this: &Self, n: u64| this.prs.iter().find(|p| p.number == n).cloned();
+        match state {
+            "palette" => {
+                self.open_palette(window, cx);
+                if let Some(p) = self.palette.as_ref() {
+                    p.input.update(cx, |s, cx| s.set_value("re", window, cx));
+                }
+            }
+            "changes" => {
+                if let Some(pr) = pick(self, 4821) {
+                    self.select(pr, cx);
+                }
+                if let Some(c) = self.find_cmd(|c| c.name == "Rebase") {
+                    self.start(c, window, cx);
+                }
+            }
+            "checks" => {
+                self.section = Section::Checks;
+            }
+            "noclone" => {
+                if let Some(pr) = self.prs.iter().find(|p| p.repo == "upstream/datakit").cloned() {
+                    self.select(pr, cx);
+                }
+                if let Some(c) = self.find_cmd(|c| c.name == "Fetch") {
+                    self.start(c, window, cx);
+                }
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+}

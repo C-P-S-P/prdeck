@@ -83,8 +83,8 @@ func FindClones(ctx context.Context, repo string, roots []string, depth int) []s
 
 // DiskClone is a git clone found on disk and the GitHub repos its remotes point at.
 type DiskClone struct {
-	Path  string
-	Repos []string
+	Path  string   `json:"path"`
+	Repos []string `json:"repos"`
 }
 
 // ListClones walks roots (depth levels deep) for every git clone. It stops when ctx
