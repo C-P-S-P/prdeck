@@ -177,6 +177,18 @@ pub struct Reviewer {
 pub struct Check {
     pub name: String,
     pub state: String,
+    /// Its log or details page; empty when the CI service gave none.
+    pub url: String,
+    /// Its GitHub Actions run; 0 for other CI services and commit statuses.
+    #[serde(rename = "runId")]
+    pub run_id: i64,
+}
+
+impl Check {
+    /// Its log link, when it is one to open in the browser (http or https only).
+    pub fn log_url(&self) -> Option<&str> {
+        (self.url.starts_with("https://") || self.url.starts_with("http://")).then_some(self.url.as_str())
+    }
 }
 
 pub enum CheckKind {
@@ -413,4 +425,27 @@ pub struct DraftThread {
     /// RIGHT: added or unchanged lines (new numbers); LEFT: removed lines (old numbers).
     pub side: &'static str,
     pub body: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Check, Detail};
+
+    #[test]
+    fn checks_read_links_and_runs() {
+        let d: Detail = serde_json::from_str(
+            r#"{"checks": [
+                {"name": "unit", "state": "FAILURE", "url": "https://github.com/a/b/actions/runs/5/job/9", "runId": 5},
+                {"name": "codecov/patch", "state": "FAILURE", "url": "javascript:alert(1)"},
+                {"name": "lint", "state": "SUCCESS"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.checks[0].run_id, 5);
+        assert_eq!(d.checks[0].log_url(), Some("https://github.com/a/b/actions/runs/5/job/9"));
+        assert_eq!(d.checks[1].log_url(), None);
+        // Saved before checks had links: still reads, nothing to open.
+        assert_eq!(d.checks[2].log_url(), None);
+        assert_eq!(Check::default().run_id, 0);
+    }
 }

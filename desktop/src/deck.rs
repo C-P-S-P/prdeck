@@ -568,6 +568,7 @@ impl Deck {
         let res = rpc.call::<ExecResult>("execute", json!({ "plan": plan, "changes": changes }));
         let pr = plan.pr.clone();
         let reload = plan.action == "clone" || !plan.pre.is_empty() || plan.action.is_empty();
+        let rerun = plan.action == "rerun";
         let silent = plan.silent;
         self.set_stage(Stage::Running(plan));
         cx.notify();
@@ -588,6 +589,10 @@ impl Deck {
                     Err(e) => Stage::Done { title: "Command".into(), ok: false, output: e.message },
                 };
                 this.set_stage(stage);
+                if rerun {
+                    // Show the re-run jobs as queued.
+                    this.refresh_detail(pr.clone(), cx);
+                }
                 if reload {
                     this.load_folder(pr, cx);
                 }
@@ -1713,10 +1718,26 @@ impl Deck {
     fn section_body(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
         match self.section {
             Section::Conversation => self.conversation(d, cx).into_any_element(),
-            Section::Checks => checks_view(d).into_any_element(),
+            Section::Checks => checks_view(d, self.rerun_button("rerun-checks", d, cx)).into_any_element(),
             Section::Commits => self.commits_view(d, cx),
             Section::Files => self.files_view(d, cx),
         }
+    }
+
+    /// The Re-run failed button, when checks failed and the command is set up.
+    fn rerun_button(&self, id: &'static str, d: &Detail, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let cmd = self.find_cmd(|c| c.action == "rerun")?;
+        if d.check_counts().1 == 0 {
+            return None;
+        }
+        let (name, key) = (cmd.name.clone(), cmd.key.clone());
+        Some(
+            button_look(id)
+                .on_click(cx.listener(move |this, _, window, cx| this.start(cmd.clone(), window, cx)))
+                .child(icon("refresh-cw", 12., SOFT))
+                .child(name)
+                .when(!key.is_empty(), |b| b.child(kbd(key))),
+        )
     }
 
     fn handoff(&self, what: String, cx: &mut Context<Self>) -> AnyElement {
@@ -1871,22 +1892,36 @@ impl Deck {
                     .collect()
             }))
             .child(
-                aside_section("Checks").child(
-                    div()
-                        .id("checks-link")
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .py(px(4.))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.section = Section::Checks;
-                            cx.notify();
-                        }))
-                        .child(div().text_color(rgb(color)).child(glyph))
-                        .child(div().flex_1().text_color(rgb(TEXT)).child(summary))
-                        .child(div().text_color(rgb(DIM)).child("View")),
-                ),
+                aside_section("Checks")
+                    .child(
+                        div()
+                            .id("checks-link")
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .py(px(4.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.section = Section::Checks;
+                                cx.notify();
+                            }))
+                            .child(div().text_color(rgb(color)).child(glyph))
+                            .child(div().flex_1().text_color(rgb(TEXT)).child(summary))
+                            .child(div().text_color(rgb(DIM)).child("View")),
+                    )
+                    .children(d.checks.iter().enumerate().filter(|(_, c)| matches!(check_kind(&c.state), CheckKind::Fail)).map(|(i, c)| {
+                        let row = div()
+                            .id(("failed-check", i))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(4.))
+                            .py(px(2.))
+                            .child(div().text_color(rgb(RED)).child("✕"))
+                            .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT_SOFT)).child(c.name.clone()));
+                        opens_log(row, c, 11.)
+                    }))
+                    .children(self.rerun_button("rerun-aside", d, cx).map(|b| b.h(px(28.)).justify_center())),
             )
             .child(
                 aside_section("Changes").child(
@@ -2397,22 +2432,24 @@ fn aside_section(title: &str) -> Div {
         .child(caption(title.to_string()))
 }
 
-fn checks_view(d: &Detail) -> impl IntoElement {
+fn checks_view(d: &Detail, rerun: Option<Stateful<Div>>) -> impl IntoElement {
     let (pass, fail, pend) = d.check_counts();
     let (glyph, color) = if fail > 0 { ("✕", RED) } else if pend > 0 { ("●", YELLOW) } else { ("✓", GREEN) };
     card()
         .child(
             card_head()
                 .child(div().text_color(rgb(color)).child(glyph))
-                .child(div().text_color(rgb(TEXT)).child(format!("{pass} passed · {fail} failing · {pend} running"))),
+                .child(div().flex_1().text_color(rgb(TEXT)).child(format!("{pass} passed · {fail} failing · {pend} running")))
+                .children(rerun.map(|b| b.h(px(26.)).text_size(px(12.)))),
         )
-        .children(d.checks.iter().map(|c| {
+        .children(d.checks.iter().enumerate().map(|(i, c)| {
             let (g, col, status) = match check_kind(&c.state) {
                 CheckKind::Pass => ("✓", GREEN, c.state.to_lowercase()),
                 CheckKind::Fail => ("✕", RED, c.state.to_lowercase()),
                 CheckKind::Pending => ("●", YELLOW, c.state.to_lowercase()),
             };
-            div()
+            let row = div()
+                .id(("check", i))
                 .h(px(36.))
                 .px(px(12.))
                 .flex()
@@ -2423,9 +2460,22 @@ fn checks_view(d: &Detail) -> impl IntoElement {
                 .text_size(px(12.5))
                 .child(div().w(px(14.)).text_color(rgb(col)).child(g))
                 .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(c.name.clone()))
-                .child(div().text_size(px(12.)).text_color(rgb(col)).child(status))
+                .child(div().text_size(px(12.)).text_color(rgb(col)).child(status));
+            opens_log(row, c, 12.)
         }))
         .when(d.checks.is_empty(), |c| c.child(div().p(px(12.)).text_color(rgb(DIM)).child("No checks reported.")))
+}
+
+/// Makes a check's row open its log in the browser, when it has a link.
+fn opens_log(row: Stateful<Div>, c: &Check, size: f32) -> Stateful<Div> {
+    match c.log_url().map(str::to_string) {
+        Some(url) => row
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(BG_HOVER)))
+            .on_click(move |_, _, cx| cx.open_url(&url))
+            .child(icon("external-link", size, DIM)),
+        None => row.child(div().w(px(size)).flex_none()),
+    }
 }
 
 fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<AnyElement>) -> AnyElement {
@@ -2717,6 +2767,11 @@ impl Deck {
             }
             "checks" => {
                 self.section = Section::Checks;
+            }
+            "rerun" => {
+                if let Some(c) = self.find_cmd(|c| c.action == "rerun") {
+                    self.start(c, window, cx);
+                }
             }
             "noclone" => {
                 if let Some(pr) = self.prs.iter().find(|p| p.repo == "upstream/datakit").cloned() {
