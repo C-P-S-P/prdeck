@@ -80,3 +80,16 @@ func TestOpenInClone(t *testing.T) {
 		t.Errorf("plan = %+v, err = %v", p, err)
 	}
 }
+
+func TestOpenCommand(t *testing.T) {
+	for goos, want := range map[string]string{
+		"darwin":  "open",
+		"linux":   "xdg-open",
+		"freebsd": "xdg-open",
+		"windows": "rundll32 url.dll,FileProtocolHandler",
+	} {
+		if got := openCommand(goos); got != want {
+			t.Errorf("%s: %q, want %q", goos, got, want)
+		}
+	}
+}

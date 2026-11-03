@@ -105,7 +105,7 @@ func (s *Service) Prepare(c config.Command, pr github.PR, input string) (Plan, e
 		return Plan{}, errors.New(why)
 	}
 	if c.Action == "browse" {
-		return Plan{Title: c.Name, Action: "browse", Script: openURLCommand() + " " + runner.Quote(pr.URL), PR: pr}, nil
+		return Plan{Title: c.Name, Action: "browse", Script: openCommand(runtime.GOOS) + " " + runner.Quote(pr.URL), PR: pr}, nil
 	}
 	f, err := s.ResolveFolder(pr, c.Worktree)
 	if err != nil {
@@ -193,9 +193,15 @@ func values(pr github.PR, f Folder, input string) map[string]string {
 	}
 }
 
-func openURLCommand() string {
-	if runtime.GOOS == "darwin" {
+// openCommand is the shell command that opens a URL in the browser on goos. On Windows
+// it runs from Git's sh, where `start` (a cmd.exe built-in) is not there, and explorer
+// exits with 1 even when it worked.
+func openCommand(goos string) string {
+	switch goos {
+	case "darwin":
 		return "open"
+	case "windows":
+		return "rundll32 url.dll,FileProtocolHandler"
 	}
 	return "xdg-open"
 }
