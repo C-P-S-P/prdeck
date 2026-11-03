@@ -328,6 +328,10 @@ impl Deck {
                                     this.layout.onboarded = true;
                                     this.layout.save();
                                     this.focus.focus(window, cx);
+                                    // Nobody was signed in at launch, so the list was never loaded.
+                                    if this.synced.is_none() && !this.loading {
+                                        this.load(cx);
+                                    }
                                     cx.notify();
                                 }))
                                 .child("Skip and keep my current settings"),
@@ -346,9 +350,11 @@ impl Deck {
             return div().flex().flex_col().gap(px(12.)).child(title).child(blurb).child(div().text_color(rgb(DIM)).child("Checking…")).into_any_element();
         };
         let mut col = div().flex().flex_col().gap(px(14.)).child(title).child(blurb);
+        let failed = if let LoginState::Failed(e) = &s.login { Some(e.clone()) } else { None };
 
         if !st.gh_installed {
             col = col.child(div().text_color(rgb(YELLOW)).child("The GitHub CLI (gh) is not installed."));
+            col = col.when_some(failed, |c, e| c.child(div().text_color(rgb(RED)).child(e)));
             col = match &s.login {
                 LoginState::Installing => col.child(div().text_color(rgb(SOFT)).child("Installing gh with Homebrew…")),
                 _ => col.child(
@@ -373,7 +379,8 @@ impl Deck {
                         .child(button_look("check-gh").on_click(cx.listener(|this, _, _, cx| this.refresh_setup(cx))).child("Check again")),
                 ),
             };
-        } else if st.signed_in {
+        } else if st.signed_in && !matches!(s.login, LoginState::Starting | LoginState::Code(_)) {
+            // Signing in to another account shows its code below, as when signed out.
             col = col
                 .child(
                     div()
@@ -394,6 +401,7 @@ impl Deck {
                         )
                         .child(div().ml_auto().text_color(rgb(GREEN)).child("✓")),
                 )
+                .when_some(failed, |c, e| c.child(div().text_color(rgb(RED)).child(e)))
                 .child(
                     div()
                         .flex()
@@ -408,7 +416,6 @@ impl Deck {
         } else {
             col = match &s.login {
                 LoginState::Idle | LoginState::Failed(_) => {
-                    let failed = if let LoginState::Failed(e) = &s.login { Some(e.clone()) } else { None };
                     col.when_some(failed, |c, e| c.child(div().text_color(rgb(RED)).child(e))).child(
                         div().flex().child(
                             primary_look("sign-in")
