@@ -129,6 +129,9 @@ pub struct Deck {
     want: Option<String>,
     /// Scroll position of the PR's conversation; back to the top on a new PR.
     detail_scroll: ScrollHandle,
+    /// Set by n or Jump to first new: the first new item in the conversation scrolls
+    /// itself to the top the next time it is laid out.
+    jump_new: std::rc::Rc<std::cell::Cell<bool>>,
     /// Diffs loaded from GitHub (by "pr:…" or "commit:…"), the commit open in
     /// Commits, and files opened or closed by hand in a diff.
     diffs: HashMap<String, DiffState>,
@@ -181,6 +184,7 @@ impl Deck {
             closed: vec![],
             want: None,
             detail_scroll: ScrollHandle::new(),
+            jump_new: Default::default(),
             setup: None,
             diffs: HashMap::new(),
             commit: None,
@@ -401,6 +405,7 @@ impl Deck {
         if self.selected.as_ref() != Some(&key) {
             self.detail_scroll.set_offset(point(px(0.), px(0.)));
             self.commit = None;
+            self.jump_new.set(false);
         }
         self.selected = Some(key.clone());
         match self.tabs.iter_mut().find(|t| t.key() == key) {
@@ -458,7 +463,7 @@ impl Deck {
                     let fresh = c.fresh;
                     if let Some(d) = c.detail {
                         let _ = this.update(cx, |this, cx| {
-                            this.details.insert(d.pr.key(), d);
+                            this.put_detail(d);
                             cx.notify();
                         });
                     }
@@ -471,7 +476,7 @@ impl Deck {
                 let _ = this.update(cx, |this, _| match res {
                     Ok(d) => {
                         this.detail_err.remove(&pr.key());
-                        this.details.insert(pr.key(), d);
+                        this.put_detail(d);
                     }
                     Err(e) => {
                         this.detail_err.insert(pr.key(), e.message);
@@ -484,6 +489,28 @@ impl Deck {
             });
         })
         .detach();
+    }
+
+    /// Shows a PR's detail. The core counts that as opening the PR, so its dot goes.
+    fn put_detail(&mut self, d: Detail) {
+        let key = d.pr.key();
+        for p in self.prs.iter_mut().chain(self.tabs.iter_mut()) {
+            if p.key() == key {
+                p.unread = false;
+            }
+        }
+        self.details.insert(key, d);
+    }
+
+    /// Scrolls to the first comment, review or reply after your last visit (n, or
+    /// Jump to first new), in Conversation.
+    fn jump_to_new(&mut self, cx: &mut Context<Self>) {
+        if !self.selected.as_ref().and_then(|k| self.details.get(k)).is_some_and(|d| d.new_count() > 0) {
+            return self.say_done("Nothing new since you last looked", cx);
+        }
+        self.section = Section::Conversation;
+        self.jump_new.set(true);
+        cx.notify();
     }
 
     fn load_folder(&mut self, pr: Pr, cx: &mut Context<Self>) {
@@ -1030,6 +1057,9 @@ impl Deck {
         }
         if let Some(cmd) = self.find_cmd(|c| !c.key.is_empty() && c.key == ch) {
             self.start(cmd, window, cx);
+        } else if ch == "n" {
+            // After the commands, so one of yours on n still wins.
+            self.jump_to_new(cx);
         }
     }
 }
@@ -1344,6 +1374,7 @@ impl Deck {
         let pr = p.clone();
         div()
             .id(("pr", i))
+            .relative()
             .flex_none()
             .px(px(12.))
             .py(px(8.))
@@ -1355,6 +1386,8 @@ impl Deck {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(BG_HOVER)))
             .on_click(cx.listener(move |this, _, _, cx| this.select(pr.clone(), cx)))
+            // Unread: a blue dot in the left margin, as in Mail.
+            .when(p.unread, |d| d.child(div().absolute().left(px(2.)).top(px(13.)).size(px(6.)).rounded(px(3.)).bg(rgb(BLUE))))
             .child(
                 div()
                     .pt(px(2.))
@@ -1371,8 +1404,16 @@ impl Deck {
                         div()
                             .flex()
                             .gap(px(8.))
-                            .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(p.title.clone()))
-                            .child(div().flex_none().text_size(px(11.)).text_color(rgb(DIM)).child(ago(&p.updated_at))),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_color(rgb(if p.unread { TEXT_BRIGHT } else { TEXT }))
+                                    .when(p.unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                    .child(p.title.clone()),
+                            )
+                            .child(div().flex_none().text_size(px(11.)).text_color(rgb(if p.unread { BLUE } else { DIM })).child(ago(&p.updated_at))),
                     )
                     .child(
                         div()
@@ -1802,12 +1843,61 @@ impl Deck {
                 )
                 .into_any_element(),
         ];
+        let first_new = d.timeline.iter().position(|e| e.has_new());
         for (i, e) in d.timeline.iter().enumerate() {
             let reply = self.thread_reply_view(&key, e, cx);
-            items.push(event_view(&key, i, e, &self.images, reply));
+            let ev = event_view(&key, i, e, &self.images, reply);
+            items.push(if first_new == Some(i) { self.jump_target(ev) } else { ev });
+        }
+        if first_new.is_some() {
+            items.insert(0, self.new_bar(d.new_count(), cx));
         }
         items.push(self.composer(d, cx));
         div().flex().flex_col().gap(px(14.)).children(items)
+    }
+
+    /// "2 new since you last looked", with a button to the first of them.
+    fn new_bar(&self, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(12.))
+            .pr(px(6.))
+            .py(px(5.))
+            .bg(rgb(BG_ACTIVE))
+            .border_1()
+            .border_color(rgb(RING_ACTIVE))
+            .text_size(px(12.5))
+            .text_color(rgb(BLUE_LIGHT))
+            .child(div().size(px(6.)).rounded(px(3.)).bg(rgb(BLUE)))
+            .child(div().flex_1().child(format!("{n} new since you last looked")))
+            .child(
+                button_look("jump-new")
+                    .h(px(26.))
+                    .on_click(cx.listener(|this, _, _, cx| this.jump_to_new(cx)))
+                    .child("Jump to first new")
+                    .child(kbd("n")),
+            )
+            .into_any_element()
+    }
+
+    /// The first new item: when a jump is asked for, it scrolls the conversation so it
+    /// sits at the top, from where it was laid out.
+    fn jump_target(&self, item: AnyElement) -> AnyElement {
+        let (jump, scroll) = (self.jump_new.clone(), self.detail_scroll.clone());
+        let at = canvas(
+            move |b, window, _| {
+                if jump.replace(false) {
+                    let (off, max) = (scroll.offset(), scroll.max_offset());
+                    let y = off.y - (b.top() - scroll.bounds().top()) + px(12.);
+                    scroll.set_offset(point(off.x, y.clamp(-max.y, px(0.))));
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        );
+        div().relative().child(item).child(at.absolute().top_0().left_0().size_full()).into_any_element()
     }
 
     fn aside(&self, d: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2561,6 +2651,7 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<Any
             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
             .child(verb)
             .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at))))
+            .when(e.new, |d| d.child(new_tag()))
             .into_any_element();
     }
 
@@ -2623,7 +2714,8 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<Any
                         .text_color(rgb(SOFT))
                         .child(images.face(&r.author, 18.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(r.author.clone()))
-                        .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&r.at)))),
+                        .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&r.at))))
+                        .when(r.new, |d| d.child(new_tag())),
                 )
                 .child(md_body(format!("ev-{key}-{i}-{j}"), &r.body, images)),
         );
@@ -2639,10 +2731,16 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<Any
                 .child(images.face(&e.author, 20.))
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
                 .child(div().min_w(px(0.)).truncate().text_color(rgb(verb_color)).child(verb))
-                .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at)))),
+                .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at))))
+                .when(e.new, |d| d.child(new_tag())),
         )
         .child(body)
         .into_any_element()
+}
+
+/// Marks a comment, review or reply that came after your last visit.
+fn new_tag() -> Div {
+    div().flex_none().px(px(6.)).border_1().border_color(rgb(RING_ACTIVE)).text_color(rgb(BLUE)).text_size(px(11.)).child("New")
 }
 
 impl Render for Deck {
@@ -2832,6 +2930,7 @@ impl Deck {
             "checks" => {
                 self.section = Section::Checks;
             }
+            "new" => self.jump_to_new(cx),
             "rerun" => {
                 if let Some(c) = self.find_cmd(|c| c.action == "rerun") {
                     self.start(c, window, cx);

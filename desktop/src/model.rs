@@ -86,6 +86,8 @@ pub struct Pr {
     pub comments: u64,
     #[serde(rename = "checkState")]
     pub check_state: String,
+    /// Updated since you last opened it.
+    pub unread: bool,
 }
 
 impl Pr {
@@ -126,6 +128,8 @@ pub struct Detail {
     pub files: Vec<ChangedFile>,
     /// Set while auto-merge is on: GitHub merges the PR once checks and reviews pass.
     pub auto_merge: Option<AutoMerge>,
+    /// When you opened the PR before this; what came after is marked `new`.
+    pub last_seen: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -192,6 +196,11 @@ impl Detail {
         }
         (pass, fail, pend)
     }
+
+    /// Comments, reviews and replies that came after your last visit.
+    pub fn new_count(&self) -> usize {
+        self.timeline.iter().map(|e| e.new as usize + e.replies.iter().filter(|r| r.new).count()).sum()
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -257,6 +266,15 @@ pub struct Event {
     pub outdated: bool,
     #[serde(deserialize_with = "null_vec")]
     pub replies: Vec<Reply>,
+    /// After your last visit, and not yours.
+    pub new: bool,
+}
+
+impl Event {
+    /// It, or a reply to it, came after your last visit.
+    pub fn has_new(&self) -> bool {
+        self.new || self.replies.iter().any(|r| r.new)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -265,6 +283,7 @@ pub struct Reply {
     pub author: String,
     pub body: String,
     pub at: String,
+    pub new: bool,
 }
 
 /// Where a PR's commands run, and what state that checkout is in.
@@ -468,7 +487,7 @@ pub struct DraftThread {
 
 #[cfg(test)]
 mod tests {
-    use super::{Check, Cmd, Detail};
+    use super::{Check, Cmd, Detail, Pr};
 
     #[test]
     fn checks_read_links_and_runs() {
@@ -498,5 +517,25 @@ mod tests {
         let cmds: Vec<Cmd> = serde_json::from_str(r#"[{"name": "Approve", "action": "approve"}, {"name": "Merge when ready", "action": "automerge"}, {"name": "Push", "run": "git push"}]"#).unwrap();
         let reviews: Vec<&str> = cmds.iter().filter(|c| c.reviews()).map(|c| c.name.as_str()).collect();
         assert_eq!(reviews, ["Approve"]);
+    }
+
+    #[test]
+    fn unread_and_new() {
+        let p: Pr = serde_json::from_str(r#"{"number": 312, "unread": true}"#).unwrap();
+        assert!(p.unread);
+        let d: Detail = serde_json::from_str(
+            r#"{"lastSeen": "2026-11-04T09:00:00Z", "timeline": [
+                {"kind": "thread", "replies": [{"author": "you"}, {"author": "mlin", "new": true}]},
+                {"kind": "comment", "new": true},
+                {"kind": "review"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.new_count(), 2);
+        assert_eq!(d.timeline.iter().position(|e| e.has_new()), Some(0));
+        // Saved, or sent by an older core, before PR Deck kept track: nothing is new.
+        let old: Detail = serde_json::from_str(r#"{"timeline": [{"kind": "comment"}]}"#).unwrap();
+        assert_eq!((old.new_count(), old.last_seen.as_str()), (0, ""));
+        assert!(!serde_json::from_str::<Pr>("{}").unwrap().unread);
     }
 }

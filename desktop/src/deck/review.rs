@@ -203,7 +203,7 @@ impl Deck {
         cx.spawn(async move |this, cx| {
             if let Ok(d) = res.await {
                 let _ = this.update(cx, |this, cx| {
-                    this.details.insert(d.pr.key(), d);
+                    this.put_detail(d);
                     cx.notify();
                 });
             }
