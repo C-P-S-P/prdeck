@@ -1,8 +1,8 @@
 # prdeck
 
-A dashboard for the pull requests you're involved in, in the terminal and on the Mac. Pick a PR, read it the way GitHub shows it, then fetch, rebase, push or open it in your editor with one key.
+A dashboard for the pull requests you're involved in, in the terminal and as a desktop app (Mac, Windows, Linux). Pick a PR, read it the way GitHub shows it, then fetch, rebase, push or open it in your editor with one key.
 
-**On the Mac** ([details](#desktop-app-macos)):
+**On the Mac** ([details](#desktop-app)):
 
 ![PR Deck on the Mac: repositories and PRs on the left, the PR with its conversation on the right, commands along the bottom](docs/screenshots/desktop.png)
 
@@ -36,6 +36,8 @@ The terminal app works the same on Linux and Windows, with the same config file 
 
 - **Windows** needs [Git for Windows](https://gitforwindows.org) as well as `gh` (`winget install --id GitHub.cli`). Commands are shell commands, so prdeck runs them with Git for Windows' `sh.exe` (found on PATH, next to `git.exe`, or in `Program Files\Git`); write your own commands as you would on a Mac (`&&`, `$(…)`, `'quotes'`). Build with `go build -o prdeck.exe ./cmd/prdeck` and put it on your PATH. `b` opens the PR in your default browser, `y` copies to the Windows clipboard, `esc` on a running command stops everything it started, and paths can be typed as `C:\code\x` or `~\code\x`.
 - **Linux** runs commands with `/bin/sh`, opens links with `xdg-open`, and copies with `wl-copy` or `xclip`.
+
+The desktop app runs there too: see [Desktop app on Windows and Linux](#on-windows-and-linux).
 
 Why and how: [ADR 0016](docs/adr/0016-windows-and-linux.md).
 
@@ -93,7 +95,7 @@ Commands run in **your existing clone** of the PR's repo. The PR view's `folder`
 
 The clone search (`L` or `p`) is fuzzy, like fzf: it lists every git clone under your home folder, with clones of this repo first, and narrows as you type (`odh fea` finds `~/projects/odh-feast/feast`). Pick with `↑↓` and `enter` or a click; `tab` copies the path into the box to edit; a typed path (`~/work/x`) can be used as is. Your choice is saved under `repos.paths` in the config, so you only do it once.
 
-## Desktop app (macOS)
+## Desktop app
 
 The same PRs and commands in a native window, built with [GPUI](https://www.gpui.rs), the Rust UI framework Zed is made with. The window is Rust; everything behind it (config, GitHub, clones, commands) is the same Go core, which the app runs in the background as `prdeck serve`. Your config file and custom commands work in both.
 
@@ -116,7 +118,7 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 - **Inline review**: click a line number in Files changed to comment on that line, or drag across line numbers (or Shift-click) to comment on several. The comment box can copy the selected lines or turn them into a suggested change. Add a single comment, or start a review: comments stay pending under their lines until you Submit review, Approve or Request changes, and go to GitHub together. Existing review threads show at their lines with Reply.
 - **Profile photos** from GitHub next to every author and reviewer.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
-- **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
+- **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up… (the gear at the top right on Windows and Linux).
 
 Needs Rust (`rustup`) and Go. From the repo:
 
@@ -127,6 +129,15 @@ cargo run --release             # your PRs (uses your gh login)
 ```
 
 `desktop/scripts/bundle.sh` builds `desktop/dist/PR Deck.app` to keep in Applications.
+
+### On Windows and Linux
+
+The same app, with `Ctrl` wherever the Mac uses `⌘` (`Ctrl+K`, `Ctrl+Enter`, …; the hints in the app say so). There is no menu bar: its items are the shortcuts below, the window's title bar, and a gear at the top right that opens setup. Setup installs `gh` with winget on Windows; on Linux it shows the command for your distribution.
+
+- **Windows**: needs [Git for Windows](https://gitforwindows.org), Go, and Rust with the MSVC build tools (Visual Studio Build Tools, "Desktop development with C++"). `cargo run --release` works as above; `desktop\scripts\package-windows.ps1` builds a zip with `PR Deck.exe` and the `prdeck.exe` it starts (keep them together).
+- **Linux**: needs Go, Rust, a C compiler, `pkg-config`, and the fontconfig, libxkbcommon-x11 and libxcb development files (Debian and Ubuntu: `sudo apt install build-essential pkg-config libfontconfig-dev libxkbcommon-x11-dev libx11-xcb-dev`; Fedora: `sudo dnf install gcc gcc-c++ pkgconf fontconfig-devel libxkbcommon-x11-devel libxcb-devel`). It draws with Vulkan, or OpenGL without it, on Wayland or X11. `desktop/scripts/package-linux.sh` builds a tar.gz whose `install.sh` puts PR Deck in your applications menu.
+
+Window sizes are saved in `%APPDATA%\prdeck` on Windows and `~/.config/prdeck` on Linux. Why and how: [ADR 0016](docs/adr/0016-windows-and-linux.md).
 
 | Keys | |
 | --- | --- |
@@ -143,7 +154,9 @@ cargo run --release             # your PRs (uses your gh login)
 | `⌘,` | edit the config |
 | your command keys | run that command; `esc` closes the command bar |
 
-Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
+On Windows and Linux: `Ctrl` for `⌘`, and `Ctrl+Q` quits.
+
+Screenshots (Mac only): `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
 
 ## Configuration
 

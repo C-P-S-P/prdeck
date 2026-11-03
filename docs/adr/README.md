@@ -1,6 +1,6 @@
 # How PR Deck is designed
 
-PR Deck shows the open pull requests you are involved in, renders each one the way GitHub does, and runs git commands on its branch with one key. It comes as a terminal app (`prdeck`) and a macOS app (PR Deck.app). Both are front-ends over one Go core.
+PR Deck shows the open pull requests you are involved in, renders each one the way GitHub does, and runs git commands on its branch with one key. It comes as a terminal app (`prdeck`) and a desktop app (PR Deck.app on the Mac, also built for Windows and Linux). Both are front-ends over one Go core.
 
 This folder holds the architecture decision records (ADRs): one short file per decision, saying what was decided, why, and what it costs. Read this page for the overall shape, then the records for the reasons.
 
