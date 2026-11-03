@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Match scores query against s. ok is false when some term does not match; idx holds
@@ -35,6 +36,17 @@ func Match(query, s string) (score int, idx []int, ok bool) {
 		}
 	}
 	sort.Ints(idx)
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if utf8.RuneLen(unicode.ToLower(r)) != n {
+			// Lowercasing changed a letter's length (İ, the Kelvin sign, invalid UTF-8), so
+			// the offsets do not fit s: better no highlights than the wrong letters. The
+			// total length is not enough, as a shorter and a longer letter cancel out.
+			idx = nil
+			break
+		}
+		i += n
+	}
 	// Shorter texts win ties: ~/projects/feast before ~/projects/feast-old/feast.
 	score -= len(s) / 8
 	return score, idx, true
@@ -75,7 +87,7 @@ func scorePositions(s string, pos []int, base int) int {
 	score := 0
 	for i, p := range pos {
 		score += 16
-		if p == 0 || isBoundary(rune(s[p-1])) {
+		if prev, _ := utf8.DecodeLastRuneInString(s[:p]); p == 0 || isBoundary(prev) {
 			score += 12
 		}
 		if p >= base {

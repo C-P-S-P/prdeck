@@ -42,6 +42,9 @@ func (m *Model) syncViewport() {
 	m.vp.Width, m.vp.Height = l.rightW-2, l.bodyH-2
 
 	listH := l.prsH - 3
+	if listH > 0 { // no empty rows below the list while rows above are hidden
+		m.listTop = max(0, min(m.listTop, len(m.visible())-listH))
+	}
 	if m.cursor < m.listTop {
 		m.listTop = m.cursor
 	}

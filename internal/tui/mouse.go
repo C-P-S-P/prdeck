@@ -13,14 +13,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.w == 0 || m.prompt != nil {
 		return m, nil
 	}
+	// The panes keep at least 6 rows, so with a tall bottom area on a short terminal the
+	// view is taller than the screen and Bubble Tea cuts lines off the top.
+	l := m.layout()
+	msg.Y += max(0, 1+l.bodyH+len(l.bottom)-m.h)
 	if m.pathRepo != "" {
-		l := m.layout()
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && msg.Y >= 1+l.bodyH {
 			return m.clickBottom(msg.Y-1-l.bodyH, msg.X, l)
 		}
 		return m, nil
 	}
-	l := m.layout()
 	bodyTop, bodyEnd := 1, 1+l.bodyH
 	reposEnd := bodyTop + l.reposH
 	inLeft := msg.X < l.leftW
@@ -91,7 +93,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		x := msg.X - 1
 		for i, s := range spans {
 			if x >= s[0] && x < s[1] && i < len(m.filters) {
-				return m, m.switchFilter(i, "")
+				return m.switchFilter(i, "")
 			}
 		}
 		return m, nil

@@ -328,17 +328,24 @@ func (m Model) selected() (github.PR, bool) {
 }
 
 func (m *Model) clampCursor() {
+	// Rows are sorted by count, so the repo cursor follows the selected repo; a repo
+	// with no open PRs left goes back to all repositories.
+	m.repoCursor = 0
+	for i, r := range m.repoRows() {
+		if strings.EqualFold(r.name, m.repoSel) {
+			m.repoCursor, m.repoSel = i, r.name
+			break
+		}
+	}
+	if m.repoCursor == 0 {
+		m.repoSel = ""
+	}
 	v := m.visible()
 	if m.cursor >= len(v) {
 		m.cursor = len(v) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
-	}
-	rows := m.repoRows()
-	if m.repoCursor >= len(rows) {
-		m.repoCursor = 0
-		m.repoSel = ""
 	}
 }
 
@@ -623,7 +630,7 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if n, err := strconv.Atoi(key); err == nil && n >= 1 && n <= len(m.filters) {
-		return m, m.switchFilter(n-1, "")
+		return m.switchFilter(n-1, "")
 	}
 
 	switch key {
@@ -640,8 +647,10 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) switchFilter(i int, custom string) tea.Cmd {
-	return func() tea.Msg { return filterMsg{i, custom} }
+// switchFilter applies the filter at once: as a command it would race the next key's,
+// since Bubble Tea runs each command in its own goroutine.
+func (m Model) switchFilter(i int, custom string) (tea.Model, tea.Cmd) {
+	return m.update(filterMsg{i, custom})
 }
 
 type filterMsg struct {
@@ -1055,9 +1064,9 @@ func (m Model) paletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		it := items[min(m.pcur, len(items)-1)]
 		if it.idx >= 0 {
-			return m, m.switchFilter(it.idx, "")
+			return m.switchFilter(it.idx, "")
 		}
-		return m, m.switchFilter(m.active, it.query)
+		return m.switchFilter(m.active, it.query)
 	}
 	var cmd tea.Cmd
 	m.pin, cmd = m.pin.Update(k)

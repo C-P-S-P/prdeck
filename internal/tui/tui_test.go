@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -229,6 +230,48 @@ func TestMoveAndRepoFilter(t *testing.T) {
 	}
 }
 
+func TestRepoFilterAfterRefresh(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("h"))
+	m = send(t, m, key("j"))
+	m = send(t, m, key("j"))
+	if m.repoSel != "northwind/registry" {
+		t.Fatalf("repoSel = %q", m.repoSel)
+	}
+	// operator's PR closes: registry moves up a row, and the cursor goes with it.
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: []github.PR{be.prs[0], be.prs[2]}})
+	m = nm.(Model)
+	if rows := m.repoRows(); rows[m.repoCursor].name != "northwind/registry" {
+		t.Errorf("repo cursor on %q, filter on %q", rows[m.repoCursor].name, m.repoSel)
+	}
+	// registry's PR closes too: back to all repositories rather than an empty list.
+	nm, _ = m.Update(searchMsg{seq: m.seq, prs: []github.PR{be.prs[2]}})
+	m = nm.(Model)
+	if m.repoSel != "" || m.repoCursor != 0 || len(m.visible()) != 1 {
+		t.Errorf("repoSel=%q repoCursor=%d visible=%d", m.repoSel, m.repoCursor, len(m.visible()))
+	}
+}
+
+func TestListScrollsBackWhenItShrinks(t *testing.T) {
+	be, m := newTest(t)
+	var prs []github.PR
+	for i := 1; i <= 60; i++ {
+		prs = append(prs, github.PR{Number: i, Title: fmt.Sprintf("Change %d", i), Repo: "northwind/registry"})
+	}
+	be.prs = prs
+	m = search(t, m)
+	m = send(t, m, key("G"))
+	if m.listTop == 0 {
+		t.Fatal("the list did not scroll")
+	}
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: prs[:10]})
+	m = nm.(Model)
+	if m.listTop != 0 || !strings.Contains(ansi.Strip(m.View()), "Change 1 ") {
+		t.Errorf("listTop = %d; all 10 PRs fit, so the list should show from the top", m.listTop)
+	}
+}
+
 func TestFilterSwitchSearches(t *testing.T) {
 	be, m := newTest(t)
 	m = search(t, m)
@@ -238,6 +281,20 @@ func TestFilterSwitchSearches(t *testing.T) {
 	}
 	if len(be.searched) == 0 || be.searched[len(be.searched)-1] != "author:@me" {
 		t.Errorf("searched = %v", be.searched)
+	}
+}
+
+func TestFilterKeysApplyInOrder(t *testing.T) {
+	_, m := newTest(t)
+	m = search(t, m)
+	// Bubble Tea runs commands in their own goroutines, in no fixed order, so the
+	// switch must not wait for one.
+	for _, k := range []string{"2", "3"} {
+		nm, _ := m.Update(key(k))
+		m = nm.(Model)
+	}
+	if m.active != 2 {
+		t.Errorf("active = %d, want the last filter pressed", m.active)
 	}
 }
 
@@ -621,6 +678,28 @@ func TestEscCancelsTerminalSetup(t *testing.T) {
 	m = nm.(Model)
 	if m.running != "" || m.out == nil || m.out.ok {
 		t.Errorf("esc should cancel the setup: running=%q out=%+v", m.running, m.out)
+	}
+}
+
+func TestClickInViewTallerThanTerminal(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 12})
+	m = send(t, m, key("L"))
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	if len(lines) <= m.h {
+		t.Fatalf("view is %d lines, want more than %d", len(lines), m.h)
+	}
+	lines = lines[len(lines)-m.h:] // Bubble Tea shows the last lines
+	row := -1
+	for i, l := range lines {
+		if strings.Contains(l, "odh-feast") {
+			row = i
+		}
+	}
+	m = send(t, m, click(4, row))
+	if got := be.saved["northwind/registry"]; got != "/home/me/projects/odh-feast" {
+		t.Errorf("clicked odh-feast on row %d, saved %q", row, got)
 	}
 }
 
