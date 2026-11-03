@@ -67,6 +67,10 @@ impl Rpc {
         if demo {
             cmd.arg(if signed_out { "--demo-signed-out" } else { "--demo" });
         }
+        // No console window for the core on Windows; the pipes work without one, and
+        // git, gh and sh started by the core share its hidden console.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -166,8 +170,9 @@ impl Rpc {
 }
 
 /// Settings prdeck needs from the user's login shell: PATH (an app opened from Finder
-/// or the Dock gets a bare one, without Homebrew's `gh` and `git`; Zed does the same)
-/// and where the config lives, so the app and the terminal read the same file.
+/// or the Dock gets a bare one, without Homebrew's `gh` and `git`; Zed does the same;
+/// a Linux desktop launcher can miss what the shell profile adds too) and where the
+/// config lives, so the app and the terminal read the same file.
 const SHELL_VARS: [&str; 4] = ["PATH", "XDG_CONFIG_HOME", "PRDECK_CONFIG", "GH_CONFIG_DIR"];
 
 /// The SHELL_VARS the login shell sets differently from this process.
@@ -182,9 +187,19 @@ fn login_env() -> Vec<(&'static str, String)> {
         .collect()
 }
 
+/// The login shell to ask on `os`: $SHELL (zsh when unset) on the Mac, $SHELL when set
+/// on Linux, none on Windows, where an app gets the same PATH as a terminal.
+fn login_shell_for(os: &str, shell: Option<String>) -> Option<String> {
+    match os {
+        "macos" => Some(shell.unwrap_or_else(|| "/bin/zsh".into())),
+        "windows" => None,
+        _ => shell.filter(|s| !s.is_empty()),
+    }
+}
+
 /// Runs a script in the user's login shell (3 seconds at most) and returns its output.
 fn login_shell(script: &str) -> Option<String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let shell = login_shell_for(std::env::consts::OS, std::env::var("SHELL").ok())?;
     let mut child = Command::new(shell)
         .args(["-l", "-c", script])
         .stdin(Stdio::null())
@@ -210,13 +225,14 @@ fn login_shell(script: &str) -> Option<String> {
     Some(out)
 }
 
-/// The prdeck binary: $PRDECK_BIN, else one next to this app (inside the .app bundle),
-/// else the one build.rs compiled, else `prdeck` on PATH.
+/// The prdeck binary: $PRDECK_BIN, else one next to this app (inside the .app bundle;
+/// prdeck.exe on Windows), else the one build.rs compiled, else `prdeck` on PATH.
 fn sidecar() -> PathBuf {
     if let Some(p) = std::env::var_os("PRDECK_BIN") {
         return p.into();
     }
-    if let Some(p) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("prdeck"))) {
+    let name = format!("prdeck{}", std::env::consts::EXE_SUFFIX);
+    if let Some(p) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(&name))) {
         if p.is_file() {
             return p;
         }
@@ -226,4 +242,20 @@ fn sidecar() -> PathBuf {
         return built.into();
     }
     "prdeck".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::login_shell_for;
+
+    #[test]
+    fn login_shell_per_os() {
+        let zsh = || Some("/usr/bin/zsh".to_string());
+        assert_eq!(login_shell_for("macos", zsh()).as_deref(), Some("/usr/bin/zsh"));
+        assert_eq!(login_shell_for("macos", None).as_deref(), Some("/bin/zsh"));
+        assert_eq!(login_shell_for("linux", zsh()).as_deref(), Some("/usr/bin/zsh"));
+        assert_eq!(login_shell_for("linux", None), None);
+        assert_eq!(login_shell_for("linux", Some(String::new())), None);
+        assert_eq!(login_shell_for("windows", zsh()), None);
+    }
 }
