@@ -3,7 +3,9 @@ package github
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
@@ -13,6 +15,9 @@ import (
 type Client struct {
 	gql  *api.GraphQLClient
 	rest *api.RESTClient // diffs: GraphQL has no patches
+
+	imgMu sync.Mutex
+	img   *http.Client // images on GitHub's hosts, with the login; made on first use
 }
 
 func NewClient() (*Client, error) {
