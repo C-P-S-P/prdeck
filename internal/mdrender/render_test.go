@@ -198,3 +198,33 @@ func TestHostileTextIsHarmless(t *testing.T) {
 		t.Errorf("a \\r in a code block hid part of it:\n%s", plain(out))
 	}
 }
+
+func TestFencesFollowCommonMark(t *testing.T) {
+	// ```npm install``` on its own line is inline code, not a fence, so the cleanup
+	// goes on after it. A fence closes only with the same character, at least as
+	// many of them, and nothing after.
+	toMarkdown := map[string]string{
+		"```npm install```\ncc @foo <b>x</b>":     "```npm install```\ncc **@foo** **x**",
+		"````md\n```go\n@foo <b>x</b>\n```\n````": "````md\n```go\n@foo <b>x</b>\n```\n````",
+		"```\n```go\n@foo\n```\nafter @bar":       "```\n```go\n@foo\n```\nafter **@bar**",
+		"~~~\n```\n@foo\n~~~\n@bar":               "~~~\n```\n@foo\n~~~\n**@bar**",
+		"```suggestion\nreturn x\n````\n@bar":     "**Suggested change**\n\n```\nreturn x\n````\n**@bar**",
+		// A fence inside a template's HTML comment is only text, so "``` -->" ends it.
+		"<!--\n```toml\nx\n``` -->\n@bar": "\n**@bar**",
+	}
+	for in, want := range toMarkdown {
+		if got := GitHubToMarkdown(in); got != want {
+			t.Errorf("GitHubToMarkdown(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	forDesktop := map[string]string{
+		"```npm install```\ncc @foo":      "```npm install```\ncc [@foo](https://github.com/foo)",
+		"````md\n```go\n@foo\n```\n````":  "````md\n```go\n@foo\n```\n````",
+		"<!--\n```toml\nx\n``` -->\n@bar": "\n[@bar](https://github.com/bar)",
+	}
+	for in, want := range forDesktop {
+		if got := GitHubForDesktop(in); got != want {
+			t.Errorf("GitHubForDesktop(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}

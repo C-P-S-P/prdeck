@@ -11,9 +11,10 @@ import (
 // syntax. This turns the common cases into plain markdown before parsing.
 
 var (
-	fence        = regexp.MustCompile("^ {0,3}(```|~~~)")
+	fence        = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})(.*)$")
 	alertLine    = regexp.MustCompile(`^(\s*>\s*)\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$`)
 	htmlComment  = regexp.MustCompile(`(?s)<!--.*?-->`)
+	commentStart = regexp.MustCompile(`^ {0,3}<!--`)
 	imgTag       = regexp.MustCompile(`(?is)<img\b[^>]*>`)
 	attrAlt      = regexp.MustCompile(`(?i)\balt\s*=\s*"([^"]*)"`)
 	attrSrc      = regexp.MustCompile(`(?i)\bsrc\s*=\s*"([^"]*)"`)
@@ -38,24 +39,26 @@ func GitHubToMarkdown(src string) string {
 			text = nil
 		}
 	}
-	inCode := false
+	open := ""       // the fence of the code block we are in
+	comment := false // in an HTML comment, where a fence is only text
 	for _, line := range strings.Split(src, "\n") {
-		if fence.MatchString(line) {
-			if !inCode {
+		if next, ok := fenceLine(line, open); ok && !comment {
+			if open == "" {
 				flush()
 				if lang := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "`~")); lang == "suggestion" {
 					out = append(out, "**Suggested change**", "")
 					line = strings.Replace(line, "suggestion", "", 1)
 				}
 			}
-			inCode = !inCode
+			open = next
 			out = append(out, line)
 			continue
 		}
-		if inCode {
+		if open != "" {
 			out = append(out, line)
 			continue
 		}
+		comment = inComment(line, comment)
 		if m := alertLine.FindStringSubmatch(line); m != nil {
 			line = m[1] + "**" + alertHeading[strings.ToUpper(m[2])] + "**"
 		}
@@ -63,6 +66,34 @@ func GitHubToMarkdown(src string) string {
 	}
 	flush()
 	return strings.Join(out, "\n")
+}
+
+// fenceLine reports whether line opens a code block (open is "") or closes the one
+// open began, read as CommonMark does: a backtick fence has no backtick after it
+// (```npm install``` is inline code), and a closing fence is the same character, at
+// least as many of them, with nothing after. next is the fence then open, or "".
+func fenceLine(line, open string) (next string, ok bool) {
+	m := fence.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	if open == "" {
+		return m[1], m[1][0] == '~' || !strings.Contains(m[2], "`")
+	}
+	return "", m[1][0] == open[0] && len(m[1]) >= len(open) && strings.TrimSpace(m[2]) == ""
+}
+
+// inComment reports whether an HTML comment is open after line, given whether one
+// was before it. A comment that starts a line runs to the line with "-->", as in
+// CommonMark, so a commented-out template block ending "``` -->" is not left open.
+func inComment(line string, open bool) bool {
+	if !open {
+		if !commentStart.MatchString(line) {
+			return false
+		}
+		line = line[strings.Index(line, "<!--")+4:]
+	}
+	return !strings.Contains(line, "-->")
 }
 
 // convertHTML handles the HTML that commonly appears in PR bodies and bot comments.
@@ -108,7 +139,8 @@ func boldMentions(s string) string {
 // profiles. Fenced code blocks pass through untouched.
 func GitHubForDesktop(src string) string {
 	var out []string
-	inCode := false
+	open := ""       // the fence of the code block we are in
+	comment := false // in an HTML comment, where a fence is only text
 	text := []string{}
 	flush := func() {
 		if len(text) > 0 {
@@ -118,22 +150,23 @@ func GitHubForDesktop(src string) string {
 		}
 	}
 	for _, line := range strings.Split(src, "\n") {
-		if fence.MatchString(line) {
-			if !inCode {
+		if next, ok := fenceLine(line, open); ok && !comment {
+			if open == "" {
 				flush()
 				if lang := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "`~")); lang == "suggestion" {
 					out = append(out, "**Suggested change**", "")
 					line = strings.Replace(line, "suggestion", "diff", 1)
 				}
 			}
-			inCode = !inCode
+			open = next
 			out = append(out, line)
 			continue
 		}
-		if inCode {
+		if open != "" {
 			out = append(out, line)
 			continue
 		}
+		comment = inComment(line, comment)
 		text = append(text, line)
 	}
 	flush()
