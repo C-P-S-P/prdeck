@@ -1,0 +1,13 @@
+{
+  "branch": "main",
+  "changes": [
+    " M sdk/python/registry/online_writer.py",
+    "?? notes/push-source.md"
+  ],
+  "clone": "~/code/registry",
+  "exists": true,
+  "path": "~/code/registry",
+  "rebasing": false,
+  "remote": "origin",
+  "worktree": false
+}

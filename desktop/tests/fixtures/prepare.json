@@ -1,0 +1,44 @@
+{
+  "action": "",
+  "changes": [
+    " M sdk/python/registry/online_writer.py",
+    "?? notes/push-source.md"
+  ],
+  "confirm": true,
+  "folder": {
+    "branch": "main",
+    "changes": [
+      " M sdk/python/registry/online_writer.py",
+      "?? notes/push-source.md"
+    ],
+    "clone": "~/code/registry",
+    "exists": true,
+    "path": "~/code/registry",
+    "rebasing": false,
+    "remote": "origin",
+    "worktree": false
+  },
+  "pr": {
+    "author": "you",
+    "baseRefName": "main",
+    "checkState": "FAILURE",
+    "comments": 12,
+    "createdAt": "2026-01-02T03:04:05Z",
+    "headRefName": "feat/stream-push-source",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "mergeable": "CONFLICTING",
+    "number": 4821,
+    "repo": "northwind/registry",
+    "reviewDecision": "CHANGES_REQUESTED",
+    "state": "OPEN",
+    "title": "Add streaming push source to the registry",
+    "updatedAt": "2026-01-02T03:04:05Z",
+    "url": "https://github.com/northwind/registry/pull/4821"
+  },
+  "pre": "gh pr checkout https://github.com/northwind/registry/pull/4821",
+  "script": "git fetch origin main && git rebase origin/main",
+  "silent": false,
+  "terminal": false,
+  "title": "Rebase"
+}

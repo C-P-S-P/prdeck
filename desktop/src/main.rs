@@ -3,6 +3,8 @@
 //!
 //! Run with sample data: `cargo run -- --demo`
 
+#[cfg(test)]
+mod contract_tests;
 mod deck;
 mod diff;
 mod layout;

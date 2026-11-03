@@ -84,7 +84,7 @@ func (b *Backend) load() {
 			},
 			timeline: []github.Event{
 				{Kind: "review", Author: "mlin", State: "CHANGES_REQUESTED", At: b.ago(2 * h), Body: "Looks close. One thing before this can land."},
-				{Kind: "thread", Author: "mlin", At: b.ago(2 * h), Path: "sdk/python/registry/push_source.py", Line: 44,
+				{Kind: "thread", Author: "mlin", At: b.ago(2 * h), Path: "sdk/python/registry/push_source.py", Line: 44, Side: "RIGHT",
 					DiffHunk: "@@ -41,6 +41,9 @@ class StreamPushSource:\n+    def push(self, name, df, *, allow_registry_cache=True):\n+        fv = self._get_feature_view(name, allow_registry_cache)\n+        self._validate(fv, df)",
 					Body:     "Should `allow_registry_cache` default to `False` here? A stale registry would silently drop new columns.",
 					Replies: []github.Reply{
