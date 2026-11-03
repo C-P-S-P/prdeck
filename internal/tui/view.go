@@ -326,7 +326,11 @@ func (m Model) detailContent(w int) (string, int) {
 			line(wrap.Render(sSoft.Render("labels   ") + sPurple.Render(strings.Join(d.Labels, ", "))))
 		}
 		if n := newCount(d); n > 0 {
-			line(wrap.Render(sSoft.Render("new      ") + sBlue.Render(strconv.Itoa(n)+" since you last looked") + sDim.Render("  ·  ") + sText.Render("n") + sDim.Render(" jump to the first")))
+			hint := ""
+			if m.jumpKeyFree() {
+				hint = sDim.Render("  ·  ") + sText.Render("n") + sDim.Render(" jump to the first")
+			}
+			line(wrap.Render(sSoft.Render("new      ") + sBlue.Render(strconv.Itoa(n)+" since you last looked") + hint))
 		}
 	}
 	if pr.Mergeable == "CONFLICTING" {
@@ -481,12 +485,15 @@ func (m Model) helpContent(w int) string {
 	line := func(s string) { b.WriteString(s + "\n") }
 	key := func(k, what string) string { return sKey.Render(k) + " " + sSoft.Render(what) }
 	line(sBold.Render("Keys"))
-	for _, l := range wrapItems([]string{
+	keys := []string{
 		key("j/k", "move"), key("h/l", "switch pane"), key("tab", "next pane"), key("enter", "open"),
 		key("esc", "back / dismiss"), key("g/G", "top / bottom"), key("ctrl+d/u", "page"),
 		key("1-"+strconv.Itoa(max(1, len(m.filters))), "filters"), key("/", "filter palette"),
-		key("n", "first new comment"), key("R", "refresh"), key("?", "help"), key("q", "quit"),
-	}, w) {
+	}
+	if m.jumpKeyFree() {
+		keys = append(keys, key("n", "first new comment"))
+	}
+	for _, l := range wrapItems(append(keys, key("R", "refresh"), key("?", "help"), key("q", "quit")), w) {
 		line(l)
 	}
 	if m.cfg.UI.MouseOn() {

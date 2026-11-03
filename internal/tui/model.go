@@ -99,6 +99,10 @@ type Model struct {
 	vp       viewport.Model
 	vpKey    string
 	newAt    int // the PR view's line of the first new comment, review or reply; -1 if none
+	// The PR on screen, and when you had last seen it as you opened it: loading it
+	// again while it stays on screen keeps what was new then.
+	openKey   string
+	openSince time.Time
 
 	palette bool
 	pin     textinput.Model
@@ -302,14 +306,16 @@ func (m *Model) selectionCmds() tea.Cmd {
 		return nil
 	}
 	key := pr.Key()
-	for i := range m.prs {
-		if m.prs[i].Key() == key {
-			m.prs[i].Unread = false // shown now, so the core marks it seen
-		}
+	visit := key != m.openKey // opened now, not a refresh of the PR on screen
+	if visit {
+		m.openKey, m.openSince = key, time.Time{}
 	}
+	m.markRead(key)
 	if d, fresh := m.be.CachedDetail(pr); d != nil {
-		if cur, ok := m.details[key]; !ok || cur.UpdatedAt.Before(d.UpdatedAt) {
-			m.details[key] = d
+		// Opened again, the saved copy replaces the one from your last visit, and
+		// with it that visit's new tags.
+		if cur, ok := m.details[key]; !ok || cur.UpdatedAt.Before(d.UpdatedAt) || visit && !cur.UpdatedAt.After(d.UpdatedAt) {
+			m.showDetail(key, d)
 		}
 		if fresh {
 			return m.folderCmd(pr)
@@ -319,6 +325,31 @@ func (m *Model) selectionCmds() tea.Cmd {
 		tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return wantDetailMsg{key} }),
 		m.folderCmd(pr),
 	)
+}
+
+// showDetail keeps d as the detail for key. While the PR stays on screen, a refresh,
+// CI finishing or your own comment loads it again; what was new when you opened it
+// stays tagged.
+func (m *Model) showDetail(key string, d *github.Detail) {
+	if key == m.openKey {
+		if m.openSince.IsZero() {
+			m.openSince = d.LastSeen
+		} else if m.openSince.Before(d.LastSeen) {
+			d = d.SinceSeen(m.openSince, m.be.Viewer())
+		}
+	}
+	m.details[key] = d
+	m.markRead(key)
+}
+
+// markRead clears a PR's dot: the core marks it seen when it shows its detail, which
+// may come in after the list was refreshed.
+func (m *Model) markRead(key string) {
+	for i := range m.prs {
+		if m.prs[i].Key() == key {
+			m.prs[i].Unread = false
+		}
+	}
 }
 
 func (m Model) detailCmd(pr github.PR) tea.Cmd {
@@ -428,7 +459,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detErr[msg.key] = firstLine(msg.err.Error())
 		} else {
 			delete(m.detErr, msg.key)
-			m.details[msg.key] = msg.d
+			m.showDetail(msg.key, msg.d)
 		}
 		m.vpKey = ""
 		return m, nil
@@ -601,6 +632,17 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.jumpToNew()
 	}
 	return m, nil
+}
+
+// jumpKeyFree reports that n jumps to the first new item: none of your commands is on
+// n, so the PR view and ? help can say so.
+func (m Model) jumpKeyFree() bool {
+	for _, c := range m.cfg.Commands {
+		if c.Key == "n" {
+			return false
+		}
+	}
+	return true
 }
 
 // jumpToNew scrolls the PR view to the first comment, review or reply that came after

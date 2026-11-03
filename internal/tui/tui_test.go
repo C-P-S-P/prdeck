@@ -46,8 +46,12 @@ func (f *fakeBackend) Search(_ context.Context, q string) ([]github.PR, error) {
 func (f *fakeBackend) CachedDetail(github.PR) (*github.Detail, bool) { return nil, false }
 func (f *fakeBackend) Detail(_ context.Context, pr github.PR) (*github.Detail, error) {
 	f.loaded++
+	lastSeen := time.Now() // your visit before this load, as the core sets it
+	if f.news {
+		lastSeen = lastSeen.Add(-90 * time.Minute)
+	}
 	return &github.Detail{
-		PR: pr, Body: "## Summary\nAdds a `StreamPushSource`.", Commits: 6, ChangedFiles: 14,
+		PR: pr, Body: "## Summary\nAdds a `StreamPushSource`.", Commits: 6, ChangedFiles: 14, LastSeen: lastSeen,
 		Checks:    []github.Check{{Name: "lint", State: "SUCCESS"}, {Name: "integration", State: "FAILURE", URL: "https://github.com/northwind/registry/actions/runs/5/job/9", RunID: 5}},
 		Reviewers: []github.Reviewer{{Login: "mlin", State: "CHANGES_REQUESTED"}},
 		Timeline: []github.Event{
@@ -383,7 +387,22 @@ func TestUnreadAndJumpToNew(t *testing.T) {
 		t.Errorf("n should scroll to the new thread:\n%s", ansi.Strip(m.vp.View()))
 	}
 
+	// CI finishes while you read: the PR is loaded again, seen as of now.
 	be.news = false
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "1 since you last looked") {
+		t.Errorf("loaded again while on screen: what was new when you opened it stays tagged:\n%s", v)
+	}
+
+	// A PR's detail coming in after you moved on (your own comment, say) clears its dot.
+	m.prs[0].Unread = true
+	first, _ := be.Detail(context.Background(), m.prs[0])
+	m = send(t, m, detailMsg{key: m.prs[0].Key(), d: first})
+	if m.prs[0].Unread {
+		t.Error("the core marked #4821 seen when it loaded it: its dot should go")
+	}
+
 	m = send(t, m, key("esc")) // back to the list
 	m = send(t, m, key("j"))
 	pr, _ = m.selected()
@@ -394,11 +413,31 @@ func TestUnreadAndJumpToNew(t *testing.T) {
 		t.Errorf("n on #%d with nothing new: flash %q", pr.Number, m.flash)
 	}
 
+	// Back on #312: opened again, its tags from the last visit go.
+	m = send(t, m, key("k"))
+	pr, _ = m.selected()
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	if v := ansi.Strip(m.View()); pr.Number != 312 || strings.Contains(v, "1 since you last looked") {
+		t.Errorf("#%d opened again: nothing is new since the last visit:\n%s", pr.Number, v)
+	}
+
 	// A command of yours on n still runs.
 	be.cfg.Commands = append(be.cfg.Commands, config.Command{Name: "Notes", Key: "n", Run: "echo notes"})
 	m = send(t, m, key("n"))
 	if len(be.ran) != 1 || be.ran[0].Title != "Notes" {
 		t.Errorf("your n command should run: %+v", be.ran)
+	}
+	be.news = true
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	m.help = true
+	if v, _ := m.detailContent(100); strings.Contains(ansi.Strip(v), "first new comment") {
+		t.Errorf("? help offers n while your command has it:\n%s", v)
+	}
+	m.help = false
+	if v, _ := m.detailContent(100); !strings.Contains(ansi.Strip(v), "1 since you last looked") || strings.Contains(ansi.Strip(v), "jump to the first") {
+		t.Errorf("the PR view offers n while your command has it:\n%s", v)
 	}
 }
 
