@@ -446,12 +446,17 @@ func (s *server) execute(p core.Plan, changes string) (any, error) {
 		return nil, codedError{"bad_request", fmt.Errorf("changes must be stash or drop, not %q", changes)}
 	}
 	if p.Terminal {
-		// The desktop app has no terminal to hand over. Open a terminal editor in
-		// Terminal.app; refuse other terminal commands with a clear reason.
+		// The desktop app has no terminal to hand over. Open a terminal editor in a
+		// terminal window (Terminal.app on the Mac); refuse other terminal commands with
+		// a clear reason.
 		if p.Action != "open" {
 			return nil, codedError{"needs_terminal", fmt.Errorf("%s runs in a terminal (output: terminal); run it from prdeck in a terminal", p.Title)}
 		}
-		p.Script = terminalApp(p.Script, p.Dir())
+		script, err := inTerminal(p.Script, p.Dir())
+		if err != nil {
+			return nil, codedError{"needs_terminal", fmt.Errorf("%s opens in a terminal, but %w; run it from prdeck in a terminal", p.Title, err)}
+		}
+		p.Script = script
 		p.Terminal = false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)

@@ -417,7 +417,7 @@ func (b *Backend) write(ctx context.Context, p core.Plan) core.Result {
 }
 
 func (b *Backend) TerminalCmd(p core.Plan) *exec.Cmd {
-	return exec.Command("/bin/sh", "-c", "echo '(demo) would run: '"+runner.Quote(p.Script)+"; sleep 1")
+	return runner.Command(context.Background(), "echo '(demo) would run: '"+runner.Quote(p.Script)+"; sleep 1", "", false)
 }
 
 type errExit int

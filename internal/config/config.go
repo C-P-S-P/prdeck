@@ -377,9 +377,10 @@ func quotedPlaceholder(run string) string {
 	return ""
 }
 
-// ExpandHome turns a leading ~ into the user's home folder.
+// ExpandHome turns a leading ~ into the user's home folder. On Windows ~\ works too, as
+// ShortenHome writes it.
 func ExpandHome(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~"+string(filepath.Separator)) {
 		home, err := os.UserHomeDir()
 		if err == nil {
 			return filepath.Join(home, strings.TrimPrefix(p, "~"))

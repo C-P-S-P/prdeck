@@ -503,11 +503,11 @@ impl Deck {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(if ed.editing.is_some() {
+                    .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(key_hint(if ed.editing.is_some() {
                         "⌘↵ saves"
                     } else {
                         "⌘↵ adds to your review"
-                    }))
+                    })))
                     .when_some(ed.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(rgb(RED)).child(e)))
                     .child(
                         div()

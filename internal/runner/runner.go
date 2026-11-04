@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -41,9 +42,22 @@ func Quote(s string) string {
 // Command builds the process for a script run in dir. When captured is true the
 // process gets no terminal: prompts are turned off so it can never hang waiting for input.
 func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
-	c := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	sh, err := Shell()
+	arg := script
+	if runtime.GOOS == "windows" {
+		// Git's sh splits its command line by Cygwin's rules, not the ones Go quotes
+		// it for (a \\ in quotes becomes \), so the script travels in the environment.
+		arg = `eval "$PRDECK_SCRIPT"`
+	}
+	c := exec.CommandContext(ctx, sh, "-c", arg)
+	if err != nil {
+		c.Err = err // Start says what is missing
+	}
 	c.Dir = dir
 	c.Env = os.Environ()
+	if runtime.GOOS == "windows" {
+		c.Env = append(c.Env, "PRDECK_SCRIPT="+script)
+	}
 	if captured {
 		c.Env = append(c.Env, "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "GIT_EDITOR=true", "NO_COLOR=1")
 	}
@@ -55,10 +69,18 @@ func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
 // keep Run waiting on its output.
 func Run(ctx context.Context, script, dir string) (string, error) {
 	c := Command(ctx, script, dir, true)
-	done := killGroup(c)
+	started, done := killGroup(c)
 	var buf bytes.Buffer
 	c.Stdout, c.Stderr = &buf, &buf
-	err := c.Run()
+	err := c.Start()
+	if err == nil {
+		started()
+		err = c.Wait()
+	}
 	done()
-	return strings.TrimRight(buf.String(), "\n"), err
+	out := buf.String()
+	if runtime.GOOS == "windows" {
+		out = strings.ReplaceAll(out, "\r\n", "\n") // what Windows programs end lines with
+	}
+	return strings.TrimRight(out, "\n"), err
 }

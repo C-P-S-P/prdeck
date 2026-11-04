@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -142,6 +143,10 @@ func TestOpenReportsFailedEditor(t *testing.T) {
 	if r := open("sleep 3"); r.Err != nil || !strings.HasPrefix(r.Output, "Opened ") || time.Since(start) > 2*time.Second {
 		t.Errorf("editor left running: err=%v output=%q after %v", r.Err, r.Output, time.Since(start))
 	}
+	if runtime.GOOS == "windows" {
+		// Windows cannot remove the folder a running program is in: let it end first.
+		t.Cleanup(func() { time.Sleep(time.Until(start.Add(3500 * time.Millisecond))) })
+	}
 	// Nothing is left in the temp folder if prdeck quits before the editor does.
 	if left, _ := os.ReadDir(tmp); len(left) > 0 {
 		t.Errorf("left in the temp folder: %v", left)
@@ -153,6 +158,7 @@ func TestOpenReportsFailedEditor(t *testing.T) {
 func TestSetClonePathWhileScanning(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // the home folder on Windows
 	clone := realClone(t, "https://github.com/acme/tool.git")
 	cfg := config.Default()
 	cfg.Repos.Scan, cfg.Repos.Paths = nil, map[string]string{"acme/tool": clone}
@@ -304,6 +310,7 @@ func TestCappedBufferKeepsTheStart(t *testing.T) {
 func TestSetWorktreeDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // the home folder on Windows
 	clone := realClone(t, "https://github.com/acme/tool.git")
 	cfg := config.Default()
 	cfg.Repos.Scan, cfg.Repos.Paths = nil, map[string]string{"acme/tool": clone}
@@ -313,10 +320,11 @@ func TestSetWorktreeDir(t *testing.T) {
 		t.Error("a folder inside a clone was accepted")
 	}
 	got, err := s.SetWorktreeDir(filepath.Join(home, "trees"))
-	if err != nil || got != "~/trees" {
+	short := "~" + string(filepath.Separator) + "trees"
+	if err != nil || got != short {
 		t.Fatalf("SetWorktreeDir = %q, %v", got, err)
 	}
-	if saved, _ := os.ReadFile(file); !strings.Contains(string(saved), "worktree_dir: ~/trees") {
+	if saved, _ := os.ReadFile(file); !strings.Contains(string(saved), "worktree_dir: "+short) {
 		t.Errorf("config file:\n%s", saved)
 	}
 	f, err := s.ResolveFolder(github.PR{Repo: "acme/tool", Number: 7}, true)

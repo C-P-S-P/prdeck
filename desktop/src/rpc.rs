@@ -67,6 +67,10 @@ impl Rpc {
         if demo {
             cmd.arg(if signed_out { "--demo-signed-out" } else { "--demo" });
         }
+        // No console window for the core on Windows; the pipes work without one, and
+        // git, gh and sh started by the core share its hidden console.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -166,19 +170,30 @@ impl Rpc {
 }
 
 /// Settings prdeck needs from the user's login shell: PATH (an app opened from Finder
-/// or the Dock gets a bare one, without Homebrew's `gh` and `git`; Zed does the same)
-/// and where the config lives, so the app and the terminal read the same file.
+/// or the Dock gets a bare one, without Homebrew's `gh` and `git`; Zed does the same;
+/// a Linux desktop launcher can miss what the shell profile adds too) and where the
+/// config lives, so the app and the terminal read the same file.
 const SHELL_VARS: [&str; 4] = ["PATH", "XDG_CONFIG_HOME", "PRDECK_CONFIG", "GH_CONFIG_DIR"];
 
 /// The SHELL_VARS the login shell sets differently from this process.
 fn login_env() -> Vec<(&'static str, String)> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let Some(shell) = login_shell_for(std::env::consts::OS, std::env::var("SHELL").ok()) else { return vec![] };
     let Some(env) = shell_values(&shell) else { return vec![] };
     SHELL_VARS
         .iter()
         .filter_map(|name| Some((*name, env.get(*name)?.clone())))
         .filter(|(name, value)| !value.is_empty() && std::env::var(name).ok().as_deref() != Some(value.as_str()))
         .collect()
+}
+
+/// The login shell to ask on `os`: $SHELL (zsh when unset) on the Mac, $SHELL when set
+/// on Linux, none on Windows, where an app gets the same PATH as a terminal.
+fn login_shell_for(os: &str, shell: Option<String>) -> Option<String> {
+    match os {
+        "macos" => Some(shell.unwrap_or_else(|| "/bin/zsh".into())),
+        "windows" => None,
+        _ => shell.filter(|s| !s.is_empty()),
+    }
 }
 
 /// The environment `shell` exports after a login. It is printed by `env -0`, not the
@@ -219,13 +234,14 @@ fn login_shell(shell: &str, script: &str) -> Option<String> {
     Some(out)
 }
 
-/// The prdeck binary: $PRDECK_BIN, else one next to this app (inside the .app bundle),
-/// else the one build.rs compiled, else `prdeck` on PATH.
+/// The prdeck binary: $PRDECK_BIN, else one next to this app (inside the .app bundle;
+/// prdeck.exe on Windows), else the one build.rs compiled, else `prdeck` on PATH.
 fn sidecar() -> PathBuf {
     if let Some(p) = std::env::var_os("PRDECK_BIN") {
         return p.into();
     }
-    if let Some(p) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("prdeck"))) {
+    let name = format!("prdeck{}", std::env::consts::EXE_SUFFIX);
+    if let Some(p) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(&name))) {
         if p.is_file() {
             return p;
         }
@@ -239,31 +255,60 @@ fn sidecar() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use super::login_shell_for;
+    #[cfg(unix)]
     use super::shell_values;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    /// Writes an executable sh script to stand in for a login shell, and runs it once.
+    /// On Linux a script can't run ("text file busy") while a process forked by another
+    /// test still holds it open for writing, so the tests take turns writing and retry
+    /// that first run; macOS checks a new executable the first time it runs, which can
+    /// take longer than login_shell waits.
+    #[cfg(unix)]
+    fn test_shell(name: &str, body: &str) -> std::path::PathBuf {
+        static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let sh = std::env::temp_dir().join(format!("prdeck-test-{name}-{}", std::process::id()));
+        std::fs::write(&sh, body).unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..50 {
+            if std::process::Command::new(&sh).output().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        sh
+    }
+
+    #[test]
+    fn login_shell_per_os() {
+        let zsh = || Some("/usr/bin/zsh".to_string());
+        assert_eq!(login_shell_for("macos", zsh()).as_deref(), Some("/usr/bin/zsh"));
+        assert_eq!(login_shell_for("macos", None).as_deref(), Some("/bin/zsh"));
+        assert_eq!(login_shell_for("linux", zsh()).as_deref(), Some("/usr/bin/zsh"));
+        assert_eq!(login_shell_for("linux", None), None);
+        assert_eq!(login_shell_for("linux", Some(String::new())), None);
+        assert_eq!(login_shell_for("windows", zsh()), None);
+    }
+
+    #[cfg(unix)] // the test shells are sh scripts
     #[test]
     fn login_path_ignores_what_dotfiles_print() {
         // A login shell whose dotfiles print before and after the command.
-        let sh = std::env::temp_dir().join(format!("prdeck-test-shell-{}", std::process::id()));
-        std::fs::write(&sh, "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n").unwrap();
-        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // macOS checks a new executable the first time it runs, which can take longer
-        // than login_shell waits; do that first.
-        let _ = std::process::Command::new(&sh).output();
+        let sh = test_shell("shell", "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n");
         let values = shell_values(sh.to_str().unwrap());
         let _ = std::fs::remove_file(&sh);
         assert_eq!(values.as_ref().and_then(|v| v.get("PATH")).map(String::as_str), Some("/opt/homebrew/bin:/usr/bin"));
     }
 
+    #[cfg(unix)] // the test shells are sh scripts
     #[test]
     fn path_comes_from_env_not_the_shells_own_syntax() {
         // A shell like fish, where "$PATH" would join a list with spaces: the value
         // must come from the exported environment instead.
-        let sh = std::env::temp_dir().join(format!("prdeck-test-fish-{}", std::process::id()));
-        std::fs::write(&sh, "#!/bin/sh\nexport PATH=/opt/homebrew/bin:/usr/bin\nPATH_LIST='/opt/homebrew/bin /usr/bin'\neval \"$3\"\n").unwrap();
-        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _ = std::process::Command::new(&sh).output();
+        let sh = test_shell("fish", "#!/bin/sh\nexport PATH=/opt/homebrew/bin:/usr/bin\nPATH_LIST='/opt/homebrew/bin /usr/bin'\neval \"$3\"\n");
         let values = shell_values(sh.to_str().unwrap());
         let _ = std::fs::remove_file(&sh);
         let path = values.as_ref().and_then(|v| v.get("PATH")).cloned().unwrap_or_default();

@@ -202,14 +202,37 @@ func TestExampleParses(t *testing.T) {
 	}
 }
 
+// Paths shortened for display expand back on every system: ShortenHome gives ~\code on
+// Windows.
+func TestHomeRoundTrip(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	p := filepath.Join(home, "code", "tool")
+	short := ShortenHome(p)
+	if want := "~" + string(filepath.Separator) + filepath.Join("code", "tool"); short != want {
+		t.Errorf("ShortenHome(%q) = %q, want %q", p, short, want)
+	}
+	for _, s := range []string{short, "~/code/tool"} {
+		if got := ExpandHome(s); got != p {
+			t.Errorf("ExpandHome(%q) = %q, want %q", s, got, p)
+		}
+	}
+	if got := ExpandHome(`~x\y`); got != `~x\y` {
+		t.Errorf("ExpandHome(~x) = %q", got)
+	}
+}
+
 func TestShortenHomeNeedsASeparator(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // the home folder on Windows
 	for in, want := range map[string]string{
-		home:                 "~",
-		home + "/code/api":   "~/code/api",
-		home + "-old/code":   home + "-old/code",
-		"/elsewhere/project": "/elsewhere/project",
+		home:                               "~",
+		filepath.Join(home, "code", "api"): "~" + string(filepath.Separator) + filepath.Join("code", "api"),
+		home + "-old/code":                 home + "-old/code",
+		"/elsewhere/project":               "/elsewhere/project",
 	} {
 		if got := ShortenHome(in); got != want {
 			t.Errorf("ShortenHome(%q) = %q, want %q", in, got, want)

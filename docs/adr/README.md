@@ -1,6 +1,6 @@
 # How PR Deck is designed
 
-PR Deck shows the open pull requests you are involved in, renders each one the way GitHub does, and runs git commands on its branch with one key. It comes as a terminal app (`prdeck`) and a macOS app (PR Deck.app). Both are front-ends over one Go core.
+PR Deck shows the open pull requests you are involved in, renders each one the way GitHub does, and runs git commands on its branch with one key. It comes as a terminal app (`prdeck`) and a desktop app (PR Deck.app on the Mac, also built for Windows and Linux). Both are front-ends over one Go core.
 
 This folder holds the architecture decision records (ADRs): one short file per decision, saying what was decided, why, and what it costs. Read this page for the overall shape, then the records for the reasons.
 
@@ -99,7 +99,7 @@ sequenceDiagram
 | `internal/github` | GitHub GraphQL with the gh login: search, PR detail, the viewer, image downloads. |
 | `internal/cache` | The last PR lists and PR details as JSON, so both apps open instantly, and when you last opened each PR. |
 | `internal/repos` | Finds clones on disk, reads their branch and uncommitted changes, plans worktrees. |
-| `internal/runner` | Fills `{placeholders}` (shell-quoted) and runs commands with `/bin/sh -c`. |
+| `internal/runner` | Fills `{placeholders}` (shell-quoted) and runs commands with `/bin/sh -c` (Git for Windows' `sh.exe` on Windows). |
 | `internal/core` | `Service`: ties the above together; turns a command into a `Plan` and runs it. |
 | `internal/server` | `prdeck serve`: the core as one-JSON-object-per-line requests; first-run setup. |
 | `internal/tui`, `internal/mdrender`, `internal/termout` | The terminal app, its markdown renderer, and its terminal writer. |
@@ -131,5 +131,6 @@ sequenceDiagram
 | [0017](0017-review-and-merge-commands.md) | Approve, Request changes, Comment and Merge when ready as commands |
 | [0018](0018-unread-since-you-last-looked.md) | Unread PRs and new comments since you last looked |
 | [0019](0019-ci-and-a-protocol-contract.md) | CI, and a contract test between Go and Rust |
+| [0020](0020-windows-and-linux.md) | Windows and Linux |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.

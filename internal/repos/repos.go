@@ -198,7 +198,7 @@ func branchWorktree(clone, branch string) string {
 	for _, line := range strings.Split(string(out), "\n") {
 		switch {
 		case strings.HasPrefix(line, "worktree "):
-			path = strings.TrimPrefix(line, "worktree ")
+			path = filepath.FromSlash(strings.TrimPrefix(line, "worktree ")) // git on Windows writes C:/x
 		case line == "branch refs/heads/"+branch:
 			return path
 		}

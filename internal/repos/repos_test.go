@@ -87,7 +87,7 @@ func TestWorktreePath(t *testing.T) {
 		"a/weird name!":   "/w/weird-name-42",
 	}
 	for repo, want := range cases {
-		if got := WorktreePath("/w", repo, 42); got != want {
+		if got := WorktreePath("/w", repo, 42); got != filepath.FromSlash(want) { // \w\feast-42 on Windows
 			t.Errorf("WorktreePath(%q) = %q, want %q", repo, got, want)
 		}
 	}

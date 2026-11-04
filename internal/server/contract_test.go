@@ -43,7 +43,9 @@ func (pixelImages) FetchImage(context.Context, string) ([]byte, string, error) {
 }
 
 func TestContract(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // setupStatus lists folders that exist under home
+	home := t.TempDir() // setupStatus lists folders that exist under home
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // the home folder on Windows
 	if *update {
 		if err := os.MkdirAll(fixtures, 0o755); err != nil {
 			t.Fatal(err)
@@ -81,6 +83,7 @@ func TestContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v; run go test ./internal/server -run TestContract -update to make it", err)
 		}
+		want = bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n")) // a Windows checkout may end lines with \r\n
 		if !bytes.Equal(got.Bytes(), want) {
 			t.Errorf("%s: the reply no longer matches %s, %s\nIf the change is meant, run go test ./internal/server -run TestContract -update, then cargo test in desktop/.",
 				method, path, firstDiff(got.String(), string(want)))
@@ -143,14 +146,15 @@ func TestContract(t *testing.T) {
 }
 
 // steady blanks what changes from run to run, so a fixture changes only when the
-// protocol does: times (the demo's are relative to when it started) and, in
-// setupStatus, what is installed on this machine.
+// protocol does: times (the demo's are relative to when it started), the separator in
+// paths under the home folder (~\code on Windows) and, in setupStatus, what is
+// installed on this machine.
 func steady(v any, machine bool) any {
 	switch v := v.(type) {
 	case map[string]any:
 		for k, x := range v {
 			switch {
-			case machine && (k == "ghVersion" || k == "brewFound" || k == "installed" || k == "run"):
+			case machine && (k == "ghVersion" || k == "brewFound" || k == "installer" || k == "installHint" || k == "installed" || k == "run"):
 				v[k] = blank(x)
 			default:
 				v[k] = steady(x, machine)
@@ -163,6 +167,9 @@ func steady(v any, machine bool) any {
 	case string:
 		if _, err := time.Parse(time.RFC3339Nano, v); err == nil {
 			return "2026-01-02T03:04:05Z"
+		}
+		if strings.HasPrefix(v, `~\`) {
+			return filepath.ToSlash(v)
 		}
 	}
 	return v

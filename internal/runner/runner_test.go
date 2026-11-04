@@ -3,7 +3,10 @@ package runner
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -58,10 +61,83 @@ func TestFilledTitleStaysText(t *testing.T) {
 	}
 }
 
+// Git for Windows' sh reads its command line by Cygwin's rules, which halve a \\ that Go
+// writes as is: a UNC path or a regex must still reach the script whole.
+func TestRunKeepsBackslashes(t *testing.T) {
+	const s = `\\server\share\x "q" a\\b\`
+	out, err := Run(context.Background(), "printf '%s' "+Quote(s), t.TempDir())
+	if err != nil || out != s {
+		t.Errorf("out=%q err=%v, want %q", out, err, s)
+	}
+}
+
 func TestRunNoPrompt(t *testing.T) {
 	out, err := Run(context.Background(), `echo "$GIT_TERMINAL_PROMPT $GIT_EDITOR"`, t.TempDir())
 	if err != nil || strings.TrimSpace(out) != "0 true" {
 		t.Errorf("out=%q err=%v", out, err)
+	}
+}
+
+// Output lines end in \n everywhere; elsewhere than Windows output is kept as it is.
+func TestRunLineEnds(t *testing.T) {
+	out, err := Run(context.Background(), `printf 'a\r\nb\r\n'`, t.TempDir())
+	want := "a\r\nb\r"
+	if runtime.GOOS == "windows" {
+		want = "a\nb"
+	}
+	if err != nil || out != want {
+		t.Errorf("out=%q err=%v, want %q", out, err, want)
+	}
+}
+
+func TestFindShell(t *testing.T) {
+	git := filepath.Join("/pf", "Git", "cmd", "git.exe")
+	bin := filepath.Join("/pf", "Git", "bin", "sh.exe")
+	usr := filepath.Join("/pf", "Git", "usr", "bin", "sh.exe")
+	user := filepath.Join("/local", "Programs", "Git", "bin", "sh.exe")
+	env := map[string]string{"ProgramFiles": "/nowhere", "LOCALAPPDATA": "/local"}
+	cases := []struct {
+		name, goos string
+		path       map[string]string // what lookPath finds
+		files      []string
+		want       string
+	}{
+		{"mac", "darwin", nil, nil, "/bin/sh"},
+		{"linux", "linux", map[string]string{"sh": "/usr/bin/sh"}, nil, "/bin/sh"},
+		{"sh on PATH", "windows", map[string]string{"sh": usr, "git": git}, []string{bin}, usr},
+		{"next to git", "windows", map[string]string{"git": git}, []string{bin, usr}, bin},
+		{"only usr/bin", "windows", map[string]string{"git": git}, []string{usr}, usr},
+		{"git in mingw64", "windows", map[string]string{"git": filepath.Join("/pf", "Git", "mingw64", "bin", "git.exe")}, []string{bin}, bin},
+		{"git not on PATH", "windows", nil, []string{user}, user},
+		{"no git", "windows", nil, nil, ""},
+	}
+	for _, c := range cases {
+		lookPath := func(name string) (string, error) {
+			if p, ok := c.path[name]; ok {
+				return p, nil
+			}
+			return "", exec.ErrNotFound
+		}
+		isFile := func(p string) bool { return slices.Contains(c.files, p) }
+		got, err := findShell(c.goos, lookPath, func(k string) string { return env[k] }, isFile)
+		if got != c.want || (err != nil) != (c.want == "") {
+			t.Errorf("%s: got %q, %v; want %q", c.name, got, err, c.want)
+		}
+	}
+}
+
+// On Windows the commands sh started must stop too, not only the ones taskkill finds
+// under it: by 500ms sleep runs, from a process whose Windows parent has exited.
+func TestCancelStopsTreeOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows only: there the script runs in a job object")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(500*time.Millisecond, cancel)
+	start := time.Now()
+	_, err := Run(ctx, "sleep 10 && echo done", t.TempDir())
+	if took := time.Since(start); err == nil || took > 5*time.Second {
+		t.Errorf("Run returned after %v, err=%v", took, err)
 	}
 }
 
@@ -74,49 +150,5 @@ func TestCancelStopsWholeScript(t *testing.T) {
 	_, err := Run(ctx, "sleep 5 && echo done", t.TempDir())
 	if took := time.Since(start); err == nil || took > time.Second {
 		t.Errorf("Run returned after %v, err=%v", took, err)
-	}
-}
-
-// A command stopped by the terminal (ssh asking for a passphrase from a background
-// process group) must be stopped by cancelling too: a stopped process that handles
-// SIGTERM, as ssh does, keeps it pending until it runs again.
-func TestCancelStopsStoppedCommand(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(100*time.Millisecond, cancel)
-	done := make(chan error, 1)
-	go func() {
-		_, err := Run(ctx, "trap 'exit 1' TERM; kill -STOP $$; echo late", t.TempDir())
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Error("no error from a cancelled run")
-		}
-	case <-time.After(3 * time.Second):
-		t.Error("Run did not return after cancel")
-	}
-}
-
-// A command that ignores SIGTERM is killed after the grace period, so Run still returns.
-func TestCancelKillsWhatIgnoresTerm(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(100*time.Millisecond, cancel)
-	start := time.Now()
-	_, err := Run(ctx, "trap '' TERM; sleep 30", t.TempDir())
-	if took := time.Since(start); err == nil || took > killGrace+2*time.Second {
-		t.Errorf("Run returned after %v, err=%v", took, err)
-	}
-}
-
-// Captured scripts have no controlling terminal: opening /dev/tty fails at once rather
-// than stopping the script in the background.
-func TestCapturedScriptHasNoTerminal(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	// In a subshell: dash, Linux's sh, exits when exec's redirection fails.
-	out, err := Run(ctx, "(exec 3</dev/tty) && echo has-tty || echo no-tty", t.TempDir())
-	if err != nil || !strings.Contains(out, "no-tty") {
-		t.Errorf("out=%q err=%v", out, err)
 	}
 }

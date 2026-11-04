@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -50,7 +51,7 @@ func Inspect(path, repo string) (top, remote string, err error) {
 	if err != nil {
 		return "", "", ErrNotGit
 	}
-	top = strings.TrimSpace(string(out))
+	top = filepath.FromSlash(strings.TrimSpace(string(out))) // git on Windows writes C:/x
 	for _, r := range readRemotes(filepath.Join(top, ".git", "config")) {
 		if strings.EqualFold(r.repo, repo) {
 			return top, r.name, nil
@@ -64,6 +65,12 @@ var skipDirs = map[string]bool{
 	"Library": true, "Applications": true, "Pictures": true, "Music": true, "Movies": true,
 	"Public": true, "node_modules": true, "vendor": true, "venv": true, "__pycache__": true,
 	"target": true, "dist": true, "build": true,
+}
+
+func init() {
+	if runtime.GOOS == "windows" {
+		skipDirs["AppData"] = true // hidden there by an attribute, not a leading dot
+	}
 }
 
 // FindClones walks roots (depth levels deep) for clones with a remote pointing at repo.

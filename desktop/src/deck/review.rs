@@ -333,12 +333,12 @@ impl Deck {
                     .py(px(8.))
                     .border_t_1()
                     .border_color(rgb(BORDER))
-                    .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(match (pending > 0, mine) {
+                    .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(key_hint(match (pending > 0, mine) {
                         (true, true) => "Your line comments go with Submit review · you can't approve your own pull request",
                         (true, false) => "Your line comments go with whichever you choose",
                         (false, true) => "Markdown works · ⌘↵ comments · you can't approve your own pull request",
                         (false, false) => "Markdown works · ⌘↵ comments",
-                    }))
+                    })))
                     .when_some(draft.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(rgb(RED)).child(e)))
                     .child(
                         div()
@@ -426,7 +426,7 @@ impl Deck {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child("⌘↵ replies"))
+                            .child(div().text_size(px(11.5)).text_color(rgb(DIM)).child(key_hint("⌘↵ replies")))
                             .when_some(r.error.clone(), |d, e| d.child(div().text_size(px(12.)).text_color(rgb(RED)).child(e)))
                             .child(div().flex_1())
                             .child(

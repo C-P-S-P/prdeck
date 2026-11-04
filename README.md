@@ -1,8 +1,8 @@
 # prdeck
 
-A dashboard for the pull requests you're involved in, in the terminal and on the Mac. Pick a PR, read it the way GitHub shows it, then fetch, rebase, push or open it in your editor with one key.
+A dashboard for the pull requests you're involved in, in the terminal and as a desktop app (Mac, Windows, Linux). Pick a PR, read it the way GitHub shows it, then fetch, rebase, push or open it in your editor with one key.
 
-**On the Mac** ([details](#desktop-app-macos)):
+**On the Mac** ([details](#desktop-app)):
 
 ![PR Deck on the Mac: repositories and PRs on the left, the PR with its conversation on the right, commands along the bottom](docs/screenshots/desktop.png)
 
@@ -37,6 +37,17 @@ Needs Go 1.26+, `git`, and the GitHub CLI signed in (`gh auth login`). prdeck us
 git clone https://github.com/MasterPushers/prdeck && cd prdeck
 go build -o ~/.local/bin/prdeck ./cmd/prdeck
 ```
+
+### Windows and Linux
+
+The terminal app works the same on Linux and Windows, with the same config file (`~/.config/prdeck/config.yaml`, which is `%USERPROFILE%\.config\prdeck\config.yaml` on Windows) and the same commands.
+
+- **Windows** needs [Git for Windows](https://gitforwindows.org) as well as `gh` (`winget install --id GitHub.cli`). Commands are shell commands, so prdeck runs them with Git for Windows' `sh.exe` (found on PATH, next to `git.exe`, or in `Program Files\Git`); write your own commands as you would on a Mac (`&&`, `$(…)`, `'quotes'`). Build with `go build -o prdeck.exe ./cmd/prdeck` and put it on your PATH. `b` opens the PR in your default browser, `y` copies to the Windows clipboard, `esc` on a running command stops everything it started, and paths can be typed as `C:\code\x` or `~\code\x`. As in Git Bash, `sh` turns arguments that look like Unix paths into Windows ones, so write `gh api repos/…` without the leading slash.
+- **Linux** runs commands with `/bin/sh`, opens links with `xdg-open`, and copies with `wl-copy` or `xclip`.
+
+The desktop app runs there too, downloaded from CI or built yourself: see [Desktop app on Windows and Linux](#on-windows-and-linux).
+
+Why and how: [ADR 0020](docs/adr/0020-windows-and-linux.md).
 
 ## Use
 
@@ -103,7 +114,7 @@ Commands run in **your existing clone** of the PR's repo. The PR view's `folder`
 
 The clone search (`L` or `p`) is fuzzy, like fzf: it lists every git clone under your home folder, with clones of this repo first, and narrows as you type (`odh fea` finds `~/projects/odh-feast/feast`). Pick with `↑↓` and `enter` or a click; `tab` copies the path into the box to edit; a typed path (`~/work/x`) can be used as is. Your choice is saved under `repos.paths` in the config, so you only do it once.
 
-## Desktop app (macOS)
+## Desktop app
 
 The same PRs and commands in a native window, built with [GPUI](https://www.gpui.rs), the Rust UI framework Zed is made with. The window is Rust; everything behind it (config, GitHub, clones, commands) is the same Go core, which the app runs in the background as `prdeck serve`. Your config file and custom commands work in both.
 
@@ -140,7 +151,7 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 - **Profile photos** from GitHub next to every author and reviewer. Photos download separately from PR images, so a PR full of screenshots never holds them up; downloads that stall or fail are tried again, and an image that still does not load says so (⌘R tries again).
 - **Your clones and worktrees**: Local clone in the PR's side panel shows which clone commands run in; `L` (or File → Use Another Clone…) points the repo at another one, picked from the clones found on disk, a folder picker or a typed path. A command that makes a new worktree shows where it will go first, with Change folder… to put worktrees somewhere else.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
-- **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
+- **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up… (the gear at the top right on Windows and Linux).
 
 Needs Rust (`rustup`) and Go. From the repo:
 
@@ -151,6 +162,22 @@ cargo run --release             # your PRs (uses your gh login)
 ```
 
 `desktop/scripts/bundle.sh` builds `desktop/dist/PR Deck.app` to keep in Applications.
+
+### On Windows and Linux
+
+The same app, with `Ctrl` wherever the Mac uses `⌘` (`Ctrl+K`, `Ctrl+Enter`, …; the hints in the app say so). There is no menu bar: its items are the shortcuts below, the window's title bar, and a gear at the top right that opens setup. Setup installs `gh` with winget on Windows; on Linux it shows the command for your distribution.
+
+**Download it.** Every push to main and every pull request builds PR Deck for Windows and Linux ([Desktop builds](.github/workflows/desktop-builds.yml)): open a finished run in the repo's Actions tab, signed in to GitHub, and download the package from its artifacts, next to a screenshot of the app on each system. These are test builds, not releases. You also need `git` and the GitHub CLI (`gh`); PR Deck's setup signs you in.
+
+- **Windows**: `prdeck-desktop-<version>-windows-amd64.zip`. Install [Git for Windows](https://gitforwindows.org) (its `sh` runs PR Deck's commands), unzip anywhere and run `PR Deck.exe`, keeping `prdeck.exe` next to it. Setup installs `gh` with winget when it is missing. The exe is not signed, so Windows may ask first (More info, Run anyway).
+- **Linux**: `prdeck-desktop-<version>-linux-x86_64.tar.gz`. Install git and gh with your package manager, then `tar xzf prdeck-desktop-*-linux-x86_64.tar.gz` and run `install.sh` in the folder it makes: PR Deck appears in your applications (files go to `~/.local`). It draws with Vulkan, or OpenGL without it, on Wayland or X11.
+
+**Build it.** The same packages come from the scripts in `desktop/scripts`, into `desktop/dist`:
+
+- **Windows**: needs Git for Windows, Go, and Rust with the MSVC build tools (Visual Studio Build Tools, "Desktop development with C++"). `cargo run --release` works as above; `powershell -ExecutionPolicy Bypass -File desktop\scripts\package-windows.ps1` builds the zip.
+- **Linux**: needs Go, Rust, a C compiler, `pkg-config`, and the fontconfig, xkbcommon and xcb development files (Debian and Ubuntu: `sudo apt install build-essential pkg-config libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev`; Fedora: `sudo dnf install gcc gcc-c++ pkgconf fontconfig-devel libxkbcommon-x11-devel libxcb-devel`). `desktop/scripts/package-linux.sh` builds the tar.gz.
+
+Window sizes are saved in `%APPDATA%\prdeck` on Windows and `~/.config/prdeck` on Linux. Why and how: [ADR 0020](docs/adr/0020-windows-and-linux.md).
 
 | Keys | |
 | --- | --- |
@@ -170,7 +197,9 @@ cargo run --release             # your PRs (uses your gh login)
 | `⌘,` | edit the config |
 | your command keys | run that command; `esc` closes the command bar |
 
-Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|new|pick:312|goto|palette|changes|noclone|worktree|changeclone]`; add `--signed-out --setup --state setup-signin` for setup.
+On Windows and Linux: `Ctrl` for `⌘`, and `Ctrl+Q` quits.
+
+Screenshots (Mac only): `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|new|pick:312|goto|palette|changes|noclone|worktree|changeclone]`; add `--signed-out --setup --state setup-signin` for setup.
 
 ## Configuration
 

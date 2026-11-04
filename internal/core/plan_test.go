@@ -84,6 +84,19 @@ func TestOpenInClone(t *testing.T) {
 	}
 }
 
+func TestOpenCommand(t *testing.T) {
+	for goos, want := range map[string]string{
+		"darwin":  "open",
+		"linux":   "xdg-open",
+		"freebsd": "xdg-open",
+		"windows": "rundll32 url.dll,FileProtocolHandler",
+	} {
+		if got := openCommand(goos); got != want {
+			t.Errorf("%s: %q, want %q", goos, got, want)
+		}
+	}
+}
+
 func TestRerunFailed(t *testing.T) {
 	d := &github.Detail{PR: pr, Checks: []github.Check{
 		{Name: "lint", State: "SUCCESS", RunID: 11},

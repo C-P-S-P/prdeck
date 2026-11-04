@@ -1,6 +1,8 @@
 //! Pane sizes, remembered between launches in
-//! ~/Library/Application Support/prdeck/desktop.json.
+//! ~/Library/Application Support/prdeck/desktop.json (%APPDATA%\prdeck on Windows,
+//! ~/.config/prdeck on Linux).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -26,8 +28,21 @@ impl Default for Layout {
 }
 
 fn path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join("Library/Application Support/prdeck/desktop.json"))
+    path_for(std::env::consts::OS, |v| std::env::var_os(v))
+}
+
+/// Where the file lives on `os`: Application Support on the Mac, %APPDATA% on Windows,
+/// $XDG_CONFIG_HOME or ~/.config elsewhere.
+fn path_for(os: &str, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let dir = match os {
+        "macos" => PathBuf::from(var("HOME")?).join("Library/Application Support"),
+        "windows" => PathBuf::from(var("APPDATA")?),
+        _ => match var("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+            Some(d) => PathBuf::from(d),
+            None => PathBuf::from(var("HOME")?).join(".config"),
+        },
+    };
+    Some(dir.join("prdeck").join("desktop.json"))
 }
 
 impl Layout {
@@ -46,5 +61,26 @@ impl Layout {
         if let Ok(b) = serde_json::to_vec_pretty(self) {
             let _ = std::fs::write(p, b);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OsString, PathBuf, path_for};
+
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |v| pairs.iter().find(|(k, _)| *k == v).map(|(_, x)| x.into())
+    }
+
+    #[test]
+    fn path_per_os() {
+        let p = |s: &str| Some(PathBuf::from(s));
+        let home = env(&[("HOME", "/h"), ("APPDATA", r"C:\Users\me\AppData\Roaming")]);
+        assert_eq!(path_for("macos", &home), p("/h/Library/Application Support/prdeck/desktop.json"));
+        assert_eq!(path_for("linux", &home), p("/h/.config/prdeck/desktop.json"));
+        assert_eq!(path_for("linux", env(&[("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")])), p("/x/prdeck/desktop.json"));
+        assert_eq!(path_for("linux", env(&[("HOME", "/h"), ("XDG_CONFIG_HOME", "")])), p("/h/.config/prdeck/desktop.json"));
+        assert_eq!(path_for("windows", &home), Some(PathBuf::from(r"C:\Users\me\AppData\Roaming").join("prdeck").join("desktop.json")));
+        assert_eq!(path_for("windows", env(&[("HOME", "/h")])), None);
     }
 }

@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/MasterPushers/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/runner"
 )
 
 // First-run setup for the desktop app: sign in to GitHub (through gh, so prdeck never
@@ -46,7 +48,9 @@ type folderChoice struct {
 type setupStatus struct {
 	GhInstalled  bool           `json:"ghInstalled"`
 	GhVersion    string         `json:"ghVersion"`
-	BrewFound    bool           `json:"brewFound"`
+	BrewFound    bool           `json:"brewFound"`   // installGh can install gh with Homebrew
+	Installer    string         `json:"installer"`   // what installGh installs gh with: brew, winget, or "" (it cannot)
+	InstallHint  string         `json:"installHint"` // how to install gh by hand on this system
 	SignedIn     bool           `json:"signedIn"`
 	Login        string         `json:"login"`
 	ConfigExists bool           `json:"configExists"`
@@ -72,14 +76,18 @@ func (s *server) setupStatus() (any, error) {
 	if _, err := os.Stat(s.info.ConfigPath); err == nil {
 		st.ConfigExists = true
 	}
+	if runtime.GOOS == "windows" {
+		addGhToPath()
+	}
 	if gh, err := exec.LookPath("gh"); err == nil {
 		st.GhInstalled = true
 		if out, err := exec.Command(gh, "--version").Output(); err == nil {
 			st.GhVersion = strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
 		}
 	}
-	_, err := exec.LookPath("brew")
-	st.BrewFound = err == nil
+	st.Installer = ghInstaller(runtime.GOOS, exec.LookPath)
+	st.BrewFound = st.Installer == "brew"
+	st.InstallHint = ghInstallHint(runtime.GOOS, osRelease())
 
 	if s.info.Demo {
 		st.GhInstalled, st.SignedIn, st.Login = true, s.demoSignedIn, "you"
@@ -94,7 +102,9 @@ func (s *server) setupStatus() (any, error) {
 	st.Folders = s.folders()
 	for _, e := range knownEditors {
 		c := editorChoice{Name: e.name, Label: e.label}
-		if _, err := exec.LookPath(e.cli); err == nil {
+		if runtime.GOOS == "windows" {
+			c.Run, c.Installed = windowsEditor(e.name, e.cli, exec.LookPath, os.Getenv, isFile)
+		} else if _, err := exec.LookPath(e.cli); err == nil {
 			c.Installed = true
 		} else if e.app != "" && appInstalled(e.app) {
 			// The app is there without its command-line tool: open it with `open -a`.
@@ -290,10 +300,18 @@ func (s *server) loginCancel() {
 	}
 }
 
-// installGh installs the GitHub CLI with Homebrew.
+// installGh installs the GitHub CLI with Homebrew, or winget on Windows. On Linux it
+// says the command instead: the package manager needs sudo.
 func (s *server) installGh() (any, error) {
 	if s.info.Demo {
 		return map[string]any{"ok": true, "output": "(demo) brew install gh"}, nil
+	}
+	switch runtime.GOOS {
+	case "darwin": // Homebrew, below
+	case "windows":
+		return installWithWinget()
+	default:
+		return nil, codedError{"no_installer", errors.New("PR Deck does not install gh here. " + ghInstallHint(runtime.GOOS, osRelease()))}
 	}
 	brew, err := exec.LookPath("brew")
 	if err != nil {
@@ -306,6 +324,22 @@ func (s *server) installGh() (any, error) {
 		return nil, fmt.Errorf("brew install gh: %s", lastLines(string(out), 6))
 	}
 	return map[string]any{"ok": true, "output": lastLines(string(out), 6)}, nil
+}
+
+func installWithWinget() (any, error) {
+	winget, err := exec.LookPath("winget")
+	if err != nil {
+		return nil, codedError{"no_installer", errors.New("winget is not installed. " + ghInstallHint("windows", ""))}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	raw, err := exec.CommandContext(ctx, winget, wingetArgs...).CombinedOutput()
+	out := cleanProgress(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("winget install gh: %s", lastLines(out, 6))
+	}
+	addGhToPath()
+	return map[string]any{"ok": true, "output": lastLines(out, 6)}, nil
 }
 
 func lastLines(s string, n int) string {
@@ -345,12 +379,12 @@ func (s *server) openConfig() (any, error) {
 		}
 	}
 	cfg := s.b.Config()
-	run := `open -t {path}`
+	run := textEditorRun(runtime.GOOS)
 	if ed, ok := cfg.Editor.Editors[cfg.Editor.Default]; ok && !ed.Terminal {
 		run = ed.Run
 	}
 	script := strings.ReplaceAll(run, "{path}", shellQuote(path))
-	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd := runner.Command(context.Background(), script, "", false)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}

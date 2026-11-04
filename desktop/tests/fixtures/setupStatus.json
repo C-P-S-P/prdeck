@@ -53,6 +53,8 @@
   ],
   "ghInstalled": true,
   "ghVersion": "",
+  "installHint": "",
+  "installer": "",
   "login": "you",
   "signedIn": true,
   "worktree": false,

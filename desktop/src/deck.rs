@@ -1078,7 +1078,9 @@ impl Deck {
             }
             return;
         }
-        if m.platform && !m.shift && !m.alt && !m.control {
+        // ⌘1–⌘9; Ctrl on Windows and Linux.
+        let (cmd, other) = if cfg!(target_os = "macos") { (m.platform, m.control) } else { (m.control, m.platform) };
+        if cmd && !m.shift && !m.alt && !other {
             if let Ok(n @ 1..=9) = ks.key.parse::<usize>() {
                 self.activate_tab(n, cx);
             }
@@ -1186,7 +1188,7 @@ fn code_chip(text: impl Into<SharedString>, color: u32) -> Div {
         .border_color(rgb(BORDER_2))
         .text_color(rgb(color))
         .text_size(px(11.5))
-        .font_family(MONO)
+        .font_family(mono())
         .child(text.into())
 }
 
@@ -1216,7 +1218,7 @@ fn md_body(id: String, body: &str, images: &Images) -> AnyElement {
 }
 
 impl Deck {
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let synced = if self.loading {
             "Syncing…".to_string()
         } else {
@@ -1227,6 +1229,18 @@ impl Deck {
             }
         };
         let stop = |_: &MouseDownEvent, _: &mut Window, cx: &mut App| cx.stop_propagation();
+        let tool = |id: &'static str| {
+            div()
+                .id(id)
+                .size(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(BG_HOVER)))
+                .on_mouse_down(MouseButton::Left, stop)
+                .child(icon(id, 14., SOFT))
+        };
         div()
             .id("header")
             .h(px(38.))
@@ -1234,19 +1248,24 @@ impl Deck {
             .flex()
             .items_center()
             .gap(px(10.))
-            .pl(px(84.))
+            // Room for the traffic lights on the Mac.
+            .pl(px(if cfg!(target_os = "macos") { 84. } else { 12. }))
             .pr(px(10.))
             .bg(rgb(BG_DEEP))
             .border_b_1()
             .border_color(rgb(BORDER))
             .on_mouse_down(MouseButton::Left, |ev, window, _| {
                 if ev.click_count == 2 {
-                    window.titlebar_double_click();
+                    if cfg!(target_os = "linux") {
+                        window.zoom_window();
+                    } else {
+                        window.titlebar_double_click();
+                    }
                 } else {
                     window.start_window_move();
                 }
             })
-            .child(div().text_size(px(12.)).text_color(rgb(SOFT)).font_family(MONO).child("prdeck"))
+            .child(div().text_size(px(12.)).text_color(rgb(SOFT)).font_family(mono()).child("prdeck"))
             .child(
                 div().flex_1().flex().justify_center().child(
                     div()
@@ -1271,12 +1290,12 @@ impl Deck {
                                 .flex_1()
                                 .min_w(px(0.))
                                 .truncate()
-                                .font_family(MONO)
+                                .font_family(mono())
                                 .text_size(px(12.))
                                 .text_color(rgb(TEXT_SOFT))
                                 .child(self.query()),
                         )
-                        .child(kbd("⌘K")),
+                        .child(kbd(key_hint("⌘K"))),
                 ),
             )
             .child(div().text_size(px(12.)).text_color(rgb(DIM)).child(synced))
@@ -1293,7 +1312,20 @@ impl Deck {
                     .on_click(cx.listener(|this, _, _, cx| this.load(cx)))
                     .child(icon("refresh-cw", 14., SOFT)),
             )
+            // Windows and Linux have no menu bar: the gear is PR Deck → Set Up….
+            .when(!cfg!(target_os = "macos"), |d| {
+                d.child(tool("settings").on_click(cx.listener(|this, _, window, cx| this.open_setup(window, cx))))
+            })
             .when(!self.hello.viewer.is_empty(), |d| d.child(self.images.face(&self.hello.viewer, 24.)))
+            // No title bar from the window manager (GNOME on Wayland): the header has the
+            // window's buttons. Dragging it moves the window, as on the Mac.
+            .when(cfg!(target_os = "linux") && matches!(window.window_decorations(), Decorations::Client { .. }), |d| {
+                let can = window.window_controls();
+                let max = if window.is_maximized() { "window-restore" } else { "window-maximize" };
+                d.when(can.minimize, |d| d.child(tool("window-minimize").on_click(|_, window, _| window.minimize_window())))
+                    .when(can.maximize, |d| d.child(tool(max).on_click(|_, window, _| window.zoom_window())))
+                    .child(tool("window-close").on_click(|_, window, _| window.remove_window()))
+            })
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2037,7 +2069,7 @@ impl Deck {
             .bg(rgb(BG_SIDE))
             .child(
                 aside_section("Branch")
-                    .child(div().font_family(MONO).text_color(rgb(BLUE_LIGHT)).truncate().child(pr.head.clone()))
+                    .child(div().font_family(mono()).text_color(rgb(BLUE_LIGHT)).truncate().child(pr.head.clone()))
                     .child(div().text_color(rgb(SOFT)).child(format!("into {}", pr.base)))
                     .when_some(d.auto_merge.as_ref(), |s, a| {
                         s.child(
@@ -2228,7 +2260,7 @@ impl Deck {
                     .border_color(rgb(BORDER))
                     .text_size(px(11.5))
                     .text_color(rgb(TEXT_SOFT))
-                    .font_family(MONO)
+                    .font_family(mono())
                     .child(icon("git-branch", 13., DIM))
                     .child(branch),
             )
@@ -2246,7 +2278,7 @@ impl Deck {
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(BG_HOVER)))
                     .on_click(cx.listener(|this, _, window, cx| this.open_palette(PaletteMode::Filters, window, cx)))
-                    .child(kbd("⌘K"))
+                    .child(kbd(key_hint("⌘K")))
                     .child(div().text_color(rgb(TEXT)).child("Filters")),
             )
     }
@@ -2271,7 +2303,7 @@ impl Deck {
                 .flex_1()
                 .min_w(px(0.))
                 .truncate()
-                .font_family(MONO)
+                .font_family(mono())
                 .text_size(px(12.5))
                 .text_color(rgb(TEXT))
                 .child(div().flex().child(div().text_color(rgb(GREEN)).child("$ ")).child(s))
@@ -2324,7 +2356,7 @@ impl Deck {
                             .text_size(px(12.))
                             .child(icon("folder-git-2", 13., BLUE))
                             .child(div().flex_none().text_color(rgb(SOFT)).child("Makes a new worktree at"))
-                            .child(div().flex_1().min_w(px(0.)).truncate().font_family(MONO).text_color(rgb(TEXT)).child(short_home(&plan.folder.path)))
+                            .child(div().flex_1().min_w(px(0.)).truncate().font_family(mono()).text_color(rgb(TEXT)).child(short_home(&plan.folder.path)))
                             .child(div().flex_none().text_color(rgb(DIM)).child(format!("new worktrees go in {parent}")))
                             .child(
                                 button_look("worktree-dir")
@@ -2357,7 +2389,7 @@ impl Deck {
                                         short_home(&plan.folder.path),
                                         if n == 1 { "" } else { "s" }
                                     )))
-                                    .child(div().truncate().font_family(MONO).text_color(rgb(DIM)).child(format!("{}{more}", shown.join("  ")))),
+                                    .child(div().truncate().font_family(mono()).text_color(rgb(DIM)).child(format!("{}{more}", shown.join("  ")))),
                             )
                             .child(
                                 button_look("stash")
@@ -2405,7 +2437,7 @@ impl Deck {
                             .overflow_y_scroll()
                             .px(px(12.))
                             .pb(px(10.))
-                            .font_family(MONO)
+                            .font_family(mono())
                             .text_size(px(12.))
                             .text_color(rgb(if *ok { TEXT_SOFT } else { 0xf2b0b0 }))
                             .children(output.lines().map(|l| div().child(l.to_string())))
@@ -2425,7 +2457,7 @@ impl Deck {
                     Some(c) => row()
                         .child(label(format!("Clone of {}", run.pr.repo)))
                         .child(div().flex_none().text_color(rgb(SOFT)).child("now"))
-                        .child(div().flex_1().min_w(px(0.)).truncate().font_family(MONO).text_color(rgb(TEXT)).child(short_home(c)))
+                        .child(div().flex_1().min_w(px(0.)).truncate().font_family(mono()).text_color(rgb(TEXT)).child(short_home(c)))
                         .child(choose)
                         .child(close),
                     None => row()
@@ -2464,7 +2496,7 @@ impl Deck {
                                     .hover(|s| s.bg(rgb(BG_HOVER)))
                                     .on_click(cx.listener(move |this, _, window, cx| this.set_clone_path(path.clone(), window, cx)))
                                     .child(icon("folder-git-2", 13., BLUE))
-                                    .child(div().font_family(MONO).text_color(rgb(TEXT)).child(short_home(p)))
+                                    .child(div().font_family(mono()).text_color(rgb(TEXT)).child(short_home(p)))
                                     .child(div().text_color(rgb(if now { GREEN } else { DIM })).child(if now { "in use" } else { "use this clone" }))
                                     .into_any_element(),
                             );
@@ -2533,7 +2565,7 @@ impl Deck {
                     .on_click(cx.listener(move |this, _, window, cx| this.apply(apply.clone(), window, cx)))
                     .child(div().w(px(12.)).text_color(rgb(BLUE)).child(if it.active { "✓" } else { "" }))
                     .child(div().flex_1().min_w(px(0.)).truncate().child(it.label.clone()))
-                    .child(div().font_family(MONO).text_size(px(12.)).text_color(rgb(SOFT)).child(it.qual.clone()))
+                    .child(div().font_family(mono()).text_size(px(12.)).text_color(rgb(SOFT)).child(it.qual.clone()))
                     .into_any_element(),
             );
         }
@@ -2601,10 +2633,10 @@ impl Deck {
                                 .text_color(rgb(DIM))
                                 .child(hint("↑↓", "move"))
                                 .child(hint("↵", if p.mode == PaletteMode::Prs { "open" } else { "apply" }))
-                                .child(div().ml_auto().font_family(MONO).text_color(rgb(SOFT)).child(if p.mode == PaletteMode::Prs {
-                                    "⌘T go to PR · ⌘K filters"
+                                .child(div().ml_auto().font_family(mono()).text_color(rgb(SOFT)).child(if p.mode == PaletteMode::Prs {
+                                    key_hint("⌘T go to PR · ⌘K filters")
                                 } else {
-                                    "author: involves: review-requested: label: repo:"
+                                    "author: involves: review-requested: label: repo:".into()
                                 })),
                         ),
                 )
@@ -2804,13 +2836,13 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<Any
                         .border_color(rgb(BORDER_2))
                         .text_size(px(11.5))
                         .text_color(rgb(TEXT_SOFT))
-                        .font_family(MONO)
+                        .font_family(mono())
                         .child(icon("file-diff", 12., DIM))
                         .child(e.path.clone())
                         .when(e.resolved, |d| d.child(div().ml_auto().text_color(rgb(GREEN)).child("resolved")))
                         .when(e.outdated, |d| d.child(div().ml_auto().text_color(rgb(DIM)).child("outdated"))),
                 )
-                .child(div().font_family(MONO).text_size(px(12.)).children(tail.iter().map(|l| {
+                .child(div().font_family(mono()).text_size(px(12.)).children(tail.iter().map(|l| {
                     let (bg, fg) = if l.starts_with("@@") {
                         (0x1f2633, BLUE)
                     } else if l.starts_with('+') {
@@ -2902,7 +2934,7 @@ impl Render for Deck {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .text_size(px(13.))
-            .child(self.header(cx))
+            .child(self.header(window, cx))
             .children(self.banner_view(cx))
             .when(self.setup.is_some(), |d| d.child(self.setup_view(cx)))
             .when(self.setup.is_none(), |d| d.child(self.body(cx)).children(self.run_bar(cx)).child(self.footer(cx)))

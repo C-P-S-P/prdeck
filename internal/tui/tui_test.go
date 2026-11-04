@@ -984,6 +984,7 @@ func TestTerminalCommandGetsTheTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close() // Windows cannot remove an open file
 	out := termout.New(f)
 	defer out.Close()
 

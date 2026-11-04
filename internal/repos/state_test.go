@@ -67,6 +67,21 @@ func TestInspect(t *testing.T) {
 	}
 }
 
+// The path comes back the way Go writes paths, so on Windows it is C:\x like the
+// clone's own path, not git's C:/x.
+func TestBranchWorktree(t *testing.T) {
+	dir := realClone(t, "https://github.com/acme/tool.git")
+	wt := filepath.Join(t.TempDir(), "tool-7")
+	git(t, dir, "worktree", "add", "-q", "-b", "feat/x", wt)
+	real := func(p string) string { r, _ := filepath.EvalSymlinks(p); return r }
+	if got := BranchWorktree(dir, "feat/x"); real(got) != real(wt) || filepath.Clean(got) != got {
+		t.Errorf("feat/x is in %q, want %q", got, wt)
+	}
+	if got := BranchWorktree(dir, "main"); real(got) != real(dir) || filepath.Clean(got) != got {
+		t.Errorf("main is in %q, want %q", got, dir)
+	}
+}
+
 func TestFindClones(t *testing.T) {
 	home := t.TempDir()
 	fakeClone(t, filepath.Join(home, "work", "deep", "tool"), map[string]string{"origin": "https://github.com/acme/tool.git"})
