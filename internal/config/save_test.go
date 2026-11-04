@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -66,13 +67,13 @@ func TestSaveSetupKeepsTheRest(t *testing.T) {
 		t.Fatal(err)
 	}
 	home, _ := os.UserHomeDir()
-	err := SaveSetup(file, Setup{Scan: []string{home + "/projects", "~/code"}, Editor: "zed", EditorRun: `open -a "Zed" {path}`, Worktree: true})
+	err := SaveSetup(file, Setup{Scan: []string{filepath.Join(home, "projects"), "~/code"}, Editor: "zed", EditorRun: `open -a "Zed" {path}`, Worktree: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(file)
 	got := string(raw)
-	for _, want := range []string{"# mine", "refresh: 5m", "# slower", "a/b: ~/x", "scan: [~/projects, ~/code]", "default: zed", "worktree: true", `zed: open -a "Zed" {path}`} {
+	for _, want := range []string{"# mine", "refresh: 5m", "# slower", "a/b: ~/x", "scan: [" + short("projects") + ", ~/code]", "default: zed", "worktree: true", `zed: open -a "Zed" {path}`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in\n%s", want, got)
 		}
@@ -140,7 +141,7 @@ func TestSaveWritesThroughASymlink(t *testing.T) {
 	if !strings.Contains(string(raw), "a/b: /x/y") || !strings.Contains(string(raw), "mouse: true") {
 		t.Errorf("target not updated:\n%s", raw)
 	}
-	if st, _ := os.Stat(real); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(real); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 { // Windows keeps no such modes
 		t.Errorf("mode = %v, want 0600", st.Mode().Perm())
 	}
 	if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) > 0 {
@@ -151,6 +152,9 @@ func TestSaveWritesThroughASymlink(t *testing.T) {
 func TestSaveThroughALinkIntoAReadOnlyFolder(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can write anywhere")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no read-only folders")
 	}
 	dir := t.TempDir()
 	store := filepath.Join(dir, "store")
@@ -190,7 +194,7 @@ func TestSaveWorktreeDirKeepsTheRest(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(file)
-	for _, want := range []string{"default: zed # my editor", "worktree_dir: ~/trees", "scan: [~/src]"} {
+	for _, want := range []string{"default: zed # my editor", "worktree_dir: " + short("trees"), "scan: [~/src]"} {
 		if !strings.Contains(string(got), want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
@@ -199,3 +203,6 @@ func TestSaveWorktreeDirKeepsTheRest(t *testing.T) {
 		t.Errorf("worktree_dir written twice:\n%s", got)
 	}
 }
+
+// short is name under the home folder as ShortenHome writes it: ~\name on Windows.
+func short(name string) string { return "~" + string(filepath.Separator) + name }

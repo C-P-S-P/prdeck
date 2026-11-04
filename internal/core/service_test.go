@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -141,6 +142,10 @@ func TestOpenReportsFailedEditor(t *testing.T) {
 	start := time.Now()
 	if r := open("sleep 3"); r.Err != nil || !strings.HasPrefix(r.Output, "Opened ") || time.Since(start) > 2*time.Second {
 		t.Errorf("editor left running: err=%v output=%q after %v", r.Err, r.Output, time.Since(start))
+	}
+	if runtime.GOOS == "windows" {
+		// Windows cannot remove the folder a running program is in: let it end first.
+		t.Cleanup(func() { time.Sleep(time.Until(start.Add(3500 * time.Millisecond))) })
 	}
 	// Nothing is left in the temp folder if prdeck quits before the editor does.
 	if left, _ := os.ReadDir(tmp); len(left) > 0 {
