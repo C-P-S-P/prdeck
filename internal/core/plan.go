@@ -142,7 +142,7 @@ func BuildPlan(cfg *config.Config, c config.Command, pr github.PR, f Folder, inp
 	if !f.Exists || f.Rebasing {
 		return p, nil
 	}
-	switchBranch := c.Branch && f.Branch != pr.HeadRefName
+	switchBranch := c.Branch && (f.Branch != pr.HeadRefName || f.OwnBranch)
 	if switchBranch {
 		p.Pre = "gh pr checkout " + runner.Quote(pr.URL)
 	}

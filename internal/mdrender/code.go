@@ -31,21 +31,17 @@ func (r *renderer) code(n ast.Node, lang string, w int) []string {
 		out = append(out, paint(" "+pad(label, inner, 0)+" ", style{fg: cFaint, bg: cPanel}, false))
 	}
 	for _, line := range highlight(src, lang) {
-		var used int
-		var parts []string
+		var b strings.Builder
 		for _, rn := range line {
 			rn.st.bg = cPanel
-			tw := ansi.StringWidth(rn.text)
-			if used+tw > inner {
-				rest := ansi.Truncate(rn.text, max(inner-used-1, 0), "")
-				parts = append(parts, paint(rest, rn.st, false), paint("…", style{fg: cDim, bg: cPanel}, false))
-				used = inner
-				break
-			}
-			parts = append(parts, paint(rn.text, rn.st, false))
-			used += tw
+			b.WriteString(paint(rn.text, rn.st, false))
 		}
-		out = append(out, paint(" ", panel, false)+strings.Join(parts, "")+paint(strings.Repeat(" ", max(inner-used, 0)+1), panel, false))
+		s := b.String()
+		if ansi.StringWidth(s) > inner {
+			// The cut run's reset lands after the tail, so the "…" starts with one.
+			s = ansi.Truncate(s, inner, "\x1b[0m"+paint("…", style{fg: cDim, bg: cPanel}, false))
+		}
+		out = append(out, paint(" ", panel, false)+s+paint(strings.Repeat(" ", max(inner-ansi.StringWidth(s), 0)+1), panel, false))
 	}
 	return out
 }

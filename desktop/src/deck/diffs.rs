@@ -364,11 +364,7 @@ impl Deck {
                 card().child(head.child(small_button(
                     "files-open",
                     &format!("Open in {editor}"),
-                    cx.listener(|this, _, window, cx| {
-                        if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
-                            this.start(c, window, cx);
-                        }
-                    }),
+                    cx.listener(|this, _, window, cx| this.on_open_in_editor(&OpenInEditor, window, cx)),
                 ))),
             )
             .child(div().text_size(px(12.)).text_color(rgb(DIM)).child("Click a line number to comment on that line."))

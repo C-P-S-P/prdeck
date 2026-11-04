@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -293,6 +294,22 @@ func (c *Config) validate() {
 		if cmd.Run == "" && cmd.Action == "" && !cmd.Branch {
 			c.Warnings = append(c.Warnings, fmt.Sprintf("command %q has no run line", cmd.Name))
 		}
+		// A mistyped condition would let the command run on every PR, so name it.
+		for _, w := range cmd.When {
+			switch w {
+			case "authored", "others", "draft", "ready", "ci_failed", "conflict":
+			default:
+				c.Warnings = append(c.Warnings, fmt.Sprintf("command %q: when %q is not authored, others, draft, ready, ci_failed or conflict", cmd.Name, w))
+			}
+		}
+		switch cmd.Output {
+		case "", "panel", "terminal", "silent":
+		default:
+			c.Warnings = append(c.Warnings, fmt.Sprintf("command %q: output %q is not panel, terminal or silent", cmd.Name, cmd.Output))
+		}
+		if p := quotedPlaceholder(cmd.Run); p != "" {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("command %q: %s is inside quotes, which undoes its shell quoting; write it bare", cmd.Name, p))
+		}
 		if cmd.Key == "" {
 			continue
 		}
@@ -309,12 +326,51 @@ func (c *Config) validate() {
 	if _, ok := c.Editor.Editors[c.Editor.Default]; !ok {
 		c.Warnings = append(c.Warnings, fmt.Sprintf("editor %q is not defined under editor.editors", c.Editor.Default))
 	}
+	for name, ed := range c.Editor.Editors {
+		if p := quotedPlaceholder(ed.Run); p != "" {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("editor %q: %s is inside quotes, which undoes its shell quoting; write it bare", name, p))
+		}
+	}
 	if c.GitHub.Refresh < Duration(30*time.Second) {
 		c.GitHub.Refresh = Duration(30 * time.Second)
 	}
 	if c.GitHub.Limit <= 0 || c.GitHub.Limit > 100 {
 		c.GitHub.Limit = 50
 	}
+}
+
+// fills matches, at its start, a placeholder that commands fill (see DefaultCommands).
+var fills = regexp.MustCompile(`^\{(number|branch|base|repo|owner|name|title|author|url|remote|path|input)\}`)
+
+// quotedPlaceholder returns the first placeholder that run puts inside '...' or "...",
+// or "". Values are shell-quoted already, and quoting them again turns the quotes
+// inside out: `-m '{title}'` lets a title like `x; rm -rf ~` run. It only feeds a
+// warning, so it stays simple: comments are skipped, but heredocs and "$( )" are not
+// understood and may warn when there is no need.
+func quotedPlaceholder(run string) string {
+	var q byte // the quote that is open, or 0
+	for i := 0; i < len(run); i++ {
+		ch := run[i]
+		switch {
+		case q != 0 && ch == q:
+			q = 0
+		case q != 0 && ch == '{':
+			if p := fills.FindString(run[i:]); p != "" {
+				return p
+			}
+		case q == '\'':
+		case ch == '\\':
+			i++ // the next character is escaped, also inside "..."
+		case q == '"':
+		case ch == '\'' || ch == '"':
+			q = ch
+		case ch == '#' && (i == 0 || strings.IndexByte(" \t\n;&|()", run[i-1]) >= 0):
+			for i < len(run) && run[i] != '\n' { // a comment runs to the end of the line
+				i++
+			}
+		}
+	}
+	return ""
 }
 
 // ExpandHome turns a leading ~ into the user's home folder.
@@ -328,10 +384,11 @@ func ExpandHome(p string) string {
 	return p
 }
 
-// ShortenHome turns the user's home folder back into ~ for display.
+// ShortenHome turns the user's home folder back into ~ for display. Only the whole
+// folder counts, so /Users/sam-old stays as it is when home is /Users/sam.
 func ShortenHome(p string) string {
 	home, err := os.UserHomeDir()
-	if err == nil && home != "" && strings.HasPrefix(p, home) {
+	if err == nil && home != "" && (p == home || strings.HasPrefix(p, home+string(filepath.Separator))) {
 		return "~" + strings.TrimPrefix(p, home)
 	}
 	return p

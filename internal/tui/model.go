@@ -4,6 +4,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"sort"
@@ -22,6 +24,7 @@ import (
 	"github.com/MasterPushers/prdeck/internal/fuzzy"
 	"github.com/MasterPushers/prdeck/internal/github"
 	"github.com/MasterPushers/prdeck/internal/repos"
+	"github.com/MasterPushers/prdeck/internal/termout"
 )
 
 // Backend is what the UI needs from the core. *core.Service implements it.
@@ -103,7 +106,8 @@ type Model struct {
 	pcur    int
 
 	prompt   *config.Command
-	pathRepo string // the path prompt is open for this repo
+	promptPR github.PR // the PR the prompt's command runs on
+	pathRepo string    // the path prompt is open for this repo
 	promptIn textinput.Model
 
 	// The path prompt fuzzy-searches every clone under the home folder.
@@ -117,6 +121,7 @@ type Model struct {
 	plan    *core.Plan
 	running string
 	cancel  context.CancelFunc
+	runID   int // counts runs; running and cancel belong to the last one
 	out     *output
 	flash   string
 
@@ -125,9 +130,22 @@ type Model struct {
 	md   *markdown
 }
 
+// navKeys are taken by navigation here before commands are looked up, on top of
+// config.Reserved. The desktop app runs commands on them, so the config allows them.
+var navKeys = map[string]bool{
+	"g": true, "G": true, "h": true, "l": true, "enter": true, "tab": true, "shift+tab": true, "esc": true,
+	"up": true, "down": true, "left": true, "right": true, "home": true, "end": true,
+	"pgup": true, "pgdown": true, "ctrl+d": true, "ctrl+u": true, "ctrl+r": true, "ctrl+c": true,
+}
+
 // New builds the UI model.
 func New(be Backend) Model {
 	cfg := be.Config()
+	for _, c := range cfg.Commands {
+		if navKeys[c.Key] {
+			cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("command %q: key %q is used for navigation in the terminal app", c.Name, c.Key))
+		}
+	}
 	var filters []config.Filter
 	for _, f := range cfg.Filters {
 		if !f.Hidden {
@@ -171,8 +189,12 @@ type (
 	clonesMsg     struct{ clones []repos.DiskClone }
 	wantDetailMsg struct{ key string }
 	tickMsg       time.Time
-	resultMsg     core.Result
-	preparedMsg   struct {
+	resultMsg     struct {
+		id int // the run it ends
+		r  core.Result
+	}
+	preparedMsg struct {
+		id   int
 		plan core.Plan
 		out  string
 		err  error
@@ -183,6 +205,34 @@ type (
 	}
 	clearFlashMsg struct{ text string }
 )
+
+// ttyCmd runs a command that takes over the terminal (an editor, `output: terminal`).
+// Bubble Tea hands it the program's output, which is termout's queue; through that,
+// the command's stdout would be a pipe, so editors would not see the window size and
+// tools would turn off color. It gets the terminal itself instead.
+type ttyCmd struct{ *exec.Cmd }
+
+func (c ttyCmd) SetStdin(r io.Reader) {
+	if c.Stdin == nil {
+		c.Stdin = r
+	}
+}
+
+func (c ttyCmd) SetStdout(w io.Writer) {
+	if t, ok := w.(*termout.Writer); ok {
+		t.Flush(time.Second) // leaving the alt screen is still queued
+		w = t.File()
+	}
+	if c.Stdout == nil {
+		c.Stdout = w
+	}
+}
+
+func (c ttyCmd) SetStderr(w io.Writer) {
+	if c.Stderr == nil {
+		c.Stderr = w
+	}
+}
 
 // Init starts the first search (New already counted it as m.seq).
 //
@@ -278,17 +328,24 @@ func (m Model) selected() (github.PR, bool) {
 }
 
 func (m *Model) clampCursor() {
+	// Rows are sorted by count, so the repo cursor follows the selected repo; a repo
+	// with no open PRs left goes back to all repositories.
+	m.repoCursor = 0
+	for i, r := range m.repoRows() {
+		if strings.EqualFold(r.name, m.repoSel) {
+			m.repoCursor, m.repoSel = i, r.name
+			break
+		}
+	}
+	if m.repoCursor == 0 {
+		m.repoSel = ""
+	}
 	v := m.visible()
 	if m.cursor >= len(v) {
 		m.cursor = len(v) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
-	}
-	rows := m.repoRows()
-	if m.repoCursor >= len(rows) {
-		m.repoCursor = 0
-		m.repoSel = ""
 	}
 }
 
@@ -431,8 +488,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case resultMsg:
-		m.running, m.cancel = "", nil
-		r := core.Result(msg)
+		if msg.id == m.runID { // a command started since is still running
+			m.running, m.cancel = "", nil
+		}
+		r := msg.r
 		if r.Plan.Silent && r.Err == nil {
 			cmd := m.setFlash("✓ " + r.Plan.Title)
 			return m, cmd
@@ -459,14 +518,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case preparedMsg:
+		if msg.id == m.runID {
+			m.running, m.cancel = "", nil
+		}
 		if msg.err != nil {
-			m.running = ""
 			m.out = &output{title: msg.plan.Title, ok: false, lines: outputLines(msg.out, msg.err)}
 			return m, nil
 		}
-		m.running = ""
 		p := msg.plan
-		return m, tea.ExecProcess(m.be.TerminalCmd(p), func(err error) tea.Msg { return termDoneMsg{plan: p, err: err} })
+		return m, tea.Exec(ttyCmd{m.be.TerminalCmd(p)}, func(err error) tea.Msg { return termDoneMsg{plan: p, err: err} })
 
 	case termDoneMsg:
 		if msg.err != nil {
@@ -570,7 +630,7 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if n, err := strconv.Atoi(key); err == nil && n >= 1 && n <= len(m.filters) {
-		return m, m.switchFilter(n-1, "")
+		return m.switchFilter(n-1, "")
 	}
 
 	switch key {
@@ -587,8 +647,10 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) switchFilter(i int, custom string) tea.Cmd {
-	return func() tea.Msg { return filterMsg{i, custom} }
+// switchFilter applies the filter at once: as a command it would race the next key's,
+// since Bubble Tea runs each command in its own goroutine.
+func (m Model) switchFilter(i int, custom string) (tea.Model, tea.Cmd) {
+	return m.update(filterMsg{i, custom})
 }
 
 type filterMsg struct {
@@ -687,11 +749,18 @@ func (m Model) startCommand(c *config.Command, input string) (tea.Model, tea.Cmd
 		cmd := m.setFlash("Select a pull request first")
 		return m, cmd
 	}
+	return m.startCommandFor(pr, c, input)
+}
+
+// startCommandFor is startCommand for a given PR. A command that waited on a prompt or
+// the missing-clone dialog goes on with the PR it was started for, even if a refresh
+// moved the selection meanwhile.
+func (m Model) startCommandFor(pr github.PR, c *config.Command, input string) (tea.Model, tea.Cmd) {
 	if c.Action == "setpath" {
 		return m.askPath(pr.Repo)
 	}
 	if c.Prompt != "" && input == "" {
-		m.prompt = c
+		m.prompt, m.promptPR = c, pr
 		m.promptIn.Prompt = c.Prompt + ": "
 		m.promptIn.SetValue("")
 		return m, m.promptIn.Focus()
@@ -804,7 +873,7 @@ func (m Model) useClone(repo, path string) (tea.Model, tea.Cmd) {
 		folder = m.folderCmd(pr)
 	}
 	if pending != nil {
-		nm, cmd := m.startCommand(&pending.cmd, pending.input)
+		nm, cmd := m.startCommandFor(pending.pr, &pending.cmd, pending.input)
 		return nm, tea.Batch(flash, folder, cmd)
 	}
 	return m, tea.Batch(flash, folder)
@@ -844,16 +913,18 @@ func (m Model) run(p core.Plan) (tea.Model, tea.Cmd) {
 	m.plan = nil
 	m.out = nil
 	m.running = p.Title
-	be := m.be
-	if p.Terminal {
-		return m, func() tea.Msg {
-			out, err := be.Setup(context.Background(), p)
-			return preparedMsg{plan: p, out: out, err: err}
-		}
-	}
+	m.runID++
+	be, id := m.be, m.runID
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	return m, func() tea.Msg { return resultMsg(be.Execute(ctx, p)) }
+	if p.Terminal {
+		// esc cancels the setup (worktree, checkout); the command itself has the terminal.
+		return m, func() tea.Msg {
+			out, err := be.Setup(ctx, p)
+			return preparedMsg{id: id, plan: p, out: out, err: err}
+		}
+	}
+	return m, func() tea.Msg { return resultMsg{id, be.Execute(ctx, p)} }
 }
 
 func (m Model) planKey(key string) (tea.Model, tea.Cmd) {
@@ -923,7 +994,7 @@ func (m Model) promptKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := m.setFlash("Nothing entered; command not run")
 			return m, cmd
 		}
-		return m.startCommand(c, in)
+		return m.startCommandFor(m.promptPR, c, in)
 	}
 	if m.pathRepo != "" {
 		n := len(m.pathMatches())
@@ -993,9 +1064,9 @@ func (m Model) paletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		it := items[min(m.pcur, len(items)-1)]
 		if it.idx >= 0 {
-			return m, m.switchFilter(it.idx, "")
+			return m.switchFilter(it.idx, "")
 		}
-		return m, m.switchFilter(m.active, it.query)
+		return m.switchFilter(m.active, it.query)
 	}
 	var cmd tea.Cmd
 	m.pin, cmd = m.pin.Update(k)

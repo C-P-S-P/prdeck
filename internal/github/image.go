@@ -2,11 +2,16 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
@@ -15,7 +20,27 @@ import (
 // maxImage is the largest image FetchImage downloads.
 const maxImage = 15 << 20
 
-var plainHTTP = &http.Client{Timeout: 30 * time.Second}
+var plainHTTP = &http.Client{Timeout: 30 * time.Second, Transport: imageTransport()}
+
+// imageTransport is Go's default transport, except that it never connects to this
+// machine or its link-local network: anyone who can comment could otherwise make
+// opening a PR send GET requests to local servers (github.com proxies images, so
+// they cannot show there either). With a proxy set, the proxy does the dialing.
+func imageTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	if os.Getenv("HTTPS_PROXY")+os.Getenv("https_proxy")+os.Getenv("HTTP_PROXY")+os.Getenv("http_proxy") != "" {
+		return t // the proxy is often on localhost
+	}
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: func(_, addr string, _ syscall.RawConn) error {
+		host, _, _ := net.SplitHostPort(addr)
+		if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
+			return fmt.Errorf("%s is a local address", host)
+		}
+		return nil
+	}}
+	t.DialContext = d.DialContext
+	return t
+}
 
 // FetchImage downloads an image from a PR or comment body. Images hosted by GitHub
 // (attachments, avatars, private repo images) are fetched with the gh login; any
@@ -23,13 +48,50 @@ var plainHTTP = &http.Client{Timeout: 30 * time.Second}
 func (c *Client) FetchImage(ctx context.Context, rawURL string) ([]byte, string, error) {
 	client := plainHTTP
 	if githubHosted(rawURL) {
-		hc, err := api.DefaultHTTPClient()
-		if err == nil {
-			hc.Timeout = 30 * time.Second
-			client = hc
-		}
+		// GitHub answers http:// with a redirect to https, but the token would already
+		// have crossed the network in the clear; go to https first.
+		rawURL = withHTTPS(rawURL)
+		client = c.imageClient()
 	}
 	return fetch(ctx, client, rawURL)
+}
+
+// imageClient is the logged-in client for GitHub-hosted images. It is made once:
+// finding the token can mean running `gh auth token`, and a PR's images all load
+// at once. If that fails, images get plain requests and the next one tries again.
+func (c *Client) imageClient() *http.Client {
+	c.imgMu.Lock()
+	defer c.imgMu.Unlock()
+	if c.img == nil {
+		hc, err := api.DefaultHTTPClient()
+		if err != nil {
+			return plainHTTP
+		}
+		hc.Timeout = 30 * time.Second
+		hc.CheckRedirect = httpsOnly
+		c.img = hc
+	}
+	return c.img
+}
+
+// withHTTPS is rawURL with an http: scheme changed to https:.
+func withHTTPS(rawURL string) string {
+	if len(rawURL) > 5 && strings.EqualFold(rawURL[:5], "http:") {
+		return "https:" + rawURL[5:]
+	}
+	return rawURL
+}
+
+// httpsOnly is the redirect policy for requests that carry the token: Go's default
+// (at most 10 redirects), but never to plain http.
+func httpsOnly(req *http.Request, via []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("%s: redirected to plain http", via[0].URL.Host)
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
 }
 
 // FetchPublicImage downloads an image without any login.

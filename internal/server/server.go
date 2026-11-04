@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -120,11 +122,19 @@ func Serve(b Backend, info Info, in io.Reader, out io.Writer) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// A bug in one request fails that request, not every other one with it.
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "prdeck serve: %s panicked: %v\n%s", req.Method, r, debug.Stack())
+					s.send(response{ID: req.ID, Error: &respError{Code: "error", Message: fmt.Sprintf("internal error in %s: %v", req.Method, r)}})
+				}
+			}()
 			s.handle(req)
 		}()
 	}
+	s.close() // first, since a waiting loginWait returns only once gh stops
 	wg.Wait()
-	s.close()
+	s.close() // again, for a gh a loginStart started meanwhile
 	return sc.Err()
 }
 

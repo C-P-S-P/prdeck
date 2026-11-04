@@ -143,3 +143,57 @@ func TestExampleParses(t *testing.T) {
 		t.Errorf("example has warnings: %v", cfg.Warnings)
 	}
 }
+
+func TestShortenHomeNeedsASeparator(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for in, want := range map[string]string{
+		home:                 "~",
+		home + "/code/api":   "~/code/api",
+		home + "-old/code":   home + "-old/code",
+		"/elsewhere/project": "/elsewhere/project",
+	} {
+		if got := ShortenHome(in); got != want {
+			t.Errorf("ShortenHome(%q) = %q, want %q", in, got, want)
+		}
+		if got := ExpandHome(ShortenHome(in)); got != in {
+			t.Errorf("ExpandHome(ShortenHome(%q)) = %q", in, got)
+		}
+	}
+}
+
+func TestUnknownWhenAndOutputWarn(t *testing.T) {
+	cfg, err := Load(write(t, "commands:\n  - name: Squash\n    run: git reset --soft HEAD~1\n    when: author\n    output: terminl\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(text, `"author"`) || !strings.Contains(text, `"terminl"`) {
+		t.Errorf("warnings = %v", cfg.Warnings)
+	}
+}
+
+func TestQuotedPlaceholderWarns(t *testing.T) {
+	for run, want := range map[string]string{
+		`git commit -m '{title}'`:            "{title}",
+		`echo "Fix: {title}"`:                "{title}",
+		`git commit -m {title}`:              "",
+		`open -a "Zed" {path}`:               "",
+		"# don't push\necho {title}":         "",
+		`echo it\'s {title}`:                 "",
+		`awk '{print}' && echo "a\"b" {url}`: "",
+		`echo x#y '{branch}'`:                "{branch}",
+	} {
+		if got := quotedPlaceholder(run); got != want {
+			t.Errorf("quotedPlaceholder(%q) = %q, want %q", run, got, want)
+		}
+	}
+	cfg, err := Load(write(t, "editor:\n  editors:\n    mine: \"my-editor '{path}'\"\ncommands:\n  - name: Note\n    run: echo \"{title}\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(text, `command "Note"`) || !strings.Contains(text, `editor "mine"`) {
+		t.Errorf("warnings = %v", cfg.Warnings)
+	}
+}

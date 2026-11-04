@@ -120,6 +120,9 @@ pub struct Deck {
     folders: HashMap<String, FolderState>,
     section: Section,
     run: Option<Run>,
+    /// Bumped whenever a run starts or closes, so a reply that arrives late lands
+    /// only on the run that asked for it.
+    run_id: u64,
     palette: Option<Palette>,
     images: Images,
     layout: Layout,
@@ -175,6 +178,7 @@ impl Deck {
             folders: HashMap::new(),
             section: Section::Conversation,
             run: None,
+            run_id: 0,
             palette: None,
             images,
             layout: Layout::load(),
@@ -211,21 +215,31 @@ impl Deck {
 
     /// Downloads images from PR text as the markdown view asks for them, several at
     /// a time, and redraws as each arrives.
-    fn load_images(&mut self, mut queue: futures::channel::mpsc::UnboundedReceiver<String>, cx: &mut Context<Self>) {
+    fn load_images(&mut self, queue: futures::channel::mpsc::UnboundedReceiver<String>, cx: &mut Context<Self>) {
         let (Some(rpc), images) = (self.rpc.clone(), self.images.clone()) else { return };
+        let pool = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            while let Some(url) = queue.next().await {
-                let fetch = rpc.call::<FetchedImage>("image", json!({ "url": url }));
-                let (images, this) = (images.clone(), this.clone());
-                cx.spawn(async move |cx| {
-                    let bytes = fetch.await.ok().and_then(|f| {
-                        let data = base64::engine::general_purpose::STANDARD.decode(f.data).ok()?;
-                        Some((data, f.kind))
-                    });
-                    images.put(url, bytes);
-                    let _ = this.update(cx, |_, cx| cx.notify());
+            // Six downloads at most: the next is asked for only when one finishes.
+            let mut arrived = queue
+                .map(|url| {
+                    let fetch = rpc.call::<FetchedImage>("image", json!({ "url": url }));
+                    let (images, pool) = (images.clone(), pool.clone());
+                    async move {
+                        let fetched = fetch.await.ok();
+                        // Decoding a big image takes a while, so not on the main thread.
+                        pool.spawn(async move {
+                            let bytes = fetched.and_then(|f| {
+                                let data = base64::engine::general_purpose::STANDARD.decode(f.data).ok()?;
+                                Some((data, f.kind))
+                            });
+                            images.put(url, bytes);
+                        })
+                        .await
+                    }
                 })
-                .detach();
+                .buffer_unordered(6);
+            while arrived.next().await.is_some() {
+                let _ = this.update(cx, |_, cx| cx.notify());
             }
         })
         .detach();
@@ -283,7 +297,10 @@ impl Deck {
             loop {
                 cx.background_executor().timer(Duration::from_secs(30)).await;
                 let ok = this.update(cx, |this, cx| {
-                    if this.synced.is_some_and(|t| t.elapsed() >= every) && !this.loading {
+                    // Until a search has worked (the first can fail, offline at login),
+                    // try again on every tick, unless setup is showing.
+                    let due = this.synced.map_or(this.setup.is_none(), |t| t.elapsed() >= every);
+                    if due && !this.loading {
                         this.load(cx);
                     }
                     cx.notify();
@@ -412,7 +429,7 @@ impl Deck {
                 }
             }
         }
-        self.load_detail(pr.clone(), cx);
+        self.load_detail(pr.clone(), false, cx);
         self.load_folder(pr, cx);
         self.load_section(cx);
         cx.notify();
@@ -445,7 +462,9 @@ impl Deck {
         self.select(list[next].clone(), cx);
     }
 
-    fn load_detail(&mut self, pr: Pr, cx: &mut Context<Self>) {
+    /// Shows the saved detail, then asks GitHub unless the saved one is still current.
+    /// `force` (⌘R) always asks.
+    fn load_detail(&mut self, pr: Pr, force: bool, cx: &mut Context<Self>) {
         let Some(rpc) = self.rpc.clone() else { return };
         let key = pr.key();
         if !self.detail_loading.insert(key.clone()) {
@@ -466,7 +485,7 @@ impl Deck {
                 }
                 Err(_) => false,
             };
-            if !fresh {
+            if !fresh || force {
                 let res = rpc.call::<Detail>("detail", json!({ "pr": pr })).await;
                 let _ = this.update(cx, |this, _| match res {
                     Ok(d) => {
@@ -532,6 +551,7 @@ impl Deck {
             }
         });
         input.update(cx, |s, cx| s.focus(window, cx));
+        self.run_id += 1;
         self.run = Some(Run { pr, cmd, input: String::new(), stage: Stage::Prompt(input), _sub: Some(sub) });
         cx.notify();
     }
@@ -539,12 +559,18 @@ impl Deck {
     fn prepare(&mut self, pr: Pr, cmd: Cmd, input: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rpc) = self.rpc.clone() else { return };
         let plan = rpc.call::<Plan>("prepare", json!({ "command": cmd.name, "pr": pr, "input": input }));
+        self.run_id += 1;
         self.run = Some(Run { pr: pr.clone(), cmd, input, stage: Stage::Preparing, _sub: None });
         self.focus.focus(window, cx);
         cx.notify();
+        let id = self.run_id;
         cx.spawn_in(window, async move |this, cx| {
             let res = plan.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                // Closed or replaced while preparing: never run it.
+                if this.run_id != id {
+                    return;
+                }
                 match res {
                     Ok(plan) if !plan.changes.is_empty() || plan.confirm => {
                         this.set_stage(Stage::Ready { plan, drop_armed: false });
@@ -573,6 +599,7 @@ impl Deck {
         let silent = plan.silent;
         self.set_stage(Stage::Running(plan));
         cx.notify();
+        let id = self.run_id;
         cx.spawn(async move |this, cx| {
             let res = res.await;
             let _ = this.update(cx, |this, cx| {
@@ -589,7 +616,9 @@ impl Deck {
                     }
                     Err(e) => Stage::Done { title: "Command".into(), ok: false, output: e.message },
                 };
-                this.set_stage(stage);
+                if this.run_id == id {
+                    this.set_stage(stage);
+                }
                 if reload {
                     this.load_folder(pr, cx);
                 }
@@ -613,9 +642,13 @@ impl Deck {
             run._sub = Some(sub);
         }
         let found = rpc.call::<Vec<String>>("findClones", json!({ "repo": pr.repo }));
+        let id = self.run_id;
         cx.spawn(async move |this, cx| {
             let found = found.await.unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
+                if this.run_id != id {
+                    return;
+                }
                 if let Some(Run { stage: Stage::NoClone { found: f, .. }, .. }) = this.run.as_mut() {
                     *f = Some(found);
                 }
@@ -629,6 +662,7 @@ impl Deck {
         let (Some(rpc), Some(run)) = (self.rpc.clone(), self.run.as_ref()) else { return };
         let (pr, cmd, input) = (run.pr.clone(), run.cmd.clone(), run.input.clone());
         let res = rpc.call::<SetPath>("setClonePath", json!({ "repo": pr.repo, "path": path }));
+        let id = self.run_id;
         cx.spawn_in(window, async move |this, cx| {
             let res = res.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -639,7 +673,9 @@ impl Deck {
                         }
                         this.folders.remove(&pr.key());
                         this.load_folder(pr.clone(), cx);
-                        this.prepare(pr, cmd, input, window, cx);
+                        if this.run_id == id {
+                            this.prepare(pr, cmd, input, window, cx);
+                        }
                     }
                     Err(e) => this.banner = Some(e.message),
                 }
@@ -652,9 +688,13 @@ impl Deck {
     fn clone_repo(&mut self, cx: &mut Context<Self>) {
         let (Some(rpc), Some(run)) = (self.rpc.clone(), self.run.as_ref()) else { return };
         let plan = rpc.call::<Plan>("clonePlan", json!({ "pr": run.pr }));
+        let id = self.run_id;
         cx.spawn(async move |this, cx| {
             let res = plan.await;
             let _ = this.update(cx, |this, cx| {
+                if this.run_id != id {
+                    return;
+                }
                 match res {
                     Ok(plan) => this.set_stage(Stage::Ready { plan, drop_armed: false }),
                     Err(e) => this.set_stage(Stage::Failed(e.message)),
@@ -685,6 +725,7 @@ impl Deck {
             return;
         }
         self.run = None;
+        self.run_id += 1;
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -835,10 +876,11 @@ impl Deck {
     }
 
     fn on_refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
+        self.images.retry_failed();
         self.load(cx);
         if let Some(pr) = self.selected_pr() {
             self.details.remove(&pr.key());
-            self.load_detail(pr.clone(), cx);
+            self.load_detail(pr.clone(), true, cx);
             self.load_folder(pr, cx);
         }
     }
@@ -1569,11 +1611,7 @@ impl Deck {
                             .gap(px(8.))
                             .child(
                                 primary_look("open")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
-                                            this.start(c, window, cx);
-                                        }
-                                    }))
+                                    .on_click(cx.listener(|this, _, window, cx| this.on_open_in_editor(&OpenInEditor, window, cx)))
                                     .child(format!("Open in {editor}")),
                             )
                             .when(self.find_cmd(|c| c.action == "open" && c.worktree).is_some(), |d| {
@@ -1737,11 +1775,7 @@ impl Deck {
             )))
             .child(
                 primary_look("handoff")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(c) = this.find_cmd(|c| c.action == "open" && !c.worktree) {
-                            this.start(c, window, cx);
-                        }
-                    }))
+                    .on_click(cx.listener(|this, _, window, cx| this.on_open_in_editor(&OpenInEditor, window, cx)))
                     .child(format!("Open in {editor}")),
             )
             .into_any_element()
@@ -2766,4 +2800,27 @@ fn fuzzy_score(query: &str, hay: &str) -> Option<usize> {
         score += at + if boundary { 0 } else { 50 };
     }
     Some(score)
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's glob exports its own `test` attribute.
+    use crate::markdown::Images;
+
+    #[test]
+    fn refresh_retries_images_that_failed() {
+        let (images, mut queue) = Images::new();
+        images.show_faces(true);
+        let photo = "https://github.com/octo.png?size=96";
+        images.face("octo", 20.);
+        assert_eq!(queue.try_recv().ok().as_deref(), Some(photo));
+        // A failed download is not asked for again on every draw…
+        images.put(photo.into(), None);
+        images.face("octo", 20.);
+        assert!(queue.try_recv().is_err());
+        // …until ⌘R.
+        images.retry_failed();
+        images.face("octo", 20.);
+        assert_eq!(queue.try_recv().ok().as_deref(), Some(photo));
+    }
 }

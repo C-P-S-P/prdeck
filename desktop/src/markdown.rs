@@ -106,6 +106,12 @@ impl Images {
         let _ = self.queue.unbounded_send(url.to_string());
         blank()
     }
+
+    /// Forgets the images that failed (offline, a timeout), so the next draw asks for
+    /// them again. ⌘R calls it.
+    pub fn retry_failed(&self) {
+        self.map.lock().unwrap().retain(|_, e| !matches!(e, Entry::Failed));
+    }
 }
 
 /// A transparent pixel, shown while an image loads.
@@ -127,6 +133,13 @@ fn decode(bytes: Vec<u8>, kind: &str) -> Option<Arc<Image>> {
     } else if b.starts_with(&[0xff, 0xd8]) {
         ImageFormat::Jpeg
     } else if b.starts_with(b"GIF8") {
+        // GPUI decodes every frame of a GIF at the full screen size with no memory
+        // limit, so a few KB can ask for many GB. Nothing over 16384 px a side can be
+        // drawn, and 2^31 pixels (8 GB) still fits long screen recordings.
+        let (w, h, frames) = gif_size(b)?;
+        if w > 16384 || h > 16384 || w * h * frames > 1 << 31 {
+            return None;
+        }
         ImageFormat::Gif
     } else if b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
         ImageFormat::Webp
@@ -135,11 +148,84 @@ fn decode(bytes: Vec<u8>, kind: &str) -> Option<Arc<Image>> {
     } else if b.starts_with(b"II*\0") || b.starts_with(b"MM\0*") {
         ImageFormat::Tiff
     } else if kind.contains("svg") || head.starts_with("<svg") || head.starts_with("<?xml") {
+        if reads_local_files(b) {
+            return None;
+        }
         ImageFormat::Svg
     } else {
         return None;
     };
     Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
+/// A GIF's screen width and height and its number of frames, read from its blocks
+/// without decoding them. None when the blocks do not end in the trailer (a cut-off
+/// file, or a block GPUI does not know): GPUI never stops decoding those, and spins a
+/// core for as long as the app runs.
+fn gif_size(b: &[u8]) -> Option<(u64, u64, u64)> {
+    // Reading past the end gives the trailer (0x3b), so a cut-off file ends the scan.
+    let at = |i: usize| b.get(i).map_or(0x3b, |&v| v as usize);
+    let table = |flags: usize| if flags & 0x80 != 0 { 3 << ((flags & 7) + 1) } else { 0 };
+    // Skips data sub-blocks (a length byte, then the data) and the 0 that ends them,
+    // and gives the last one's length too.
+    let skip = |mut i: usize| {
+        let mut last = 0;
+        while i < b.len() && b[i] != 0 {
+            last = b[i];
+            i += 1 + b[i] as usize;
+        }
+        (i + 1, last)
+    };
+    let (w, h) = (at(6) | at(7) << 8, at(8) | at(9) << 8);
+    let mut i = 13 + table(at(10));
+    let mut frames = 0;
+    loop {
+        match at(i) {
+            // Plain text, graphic control, comment and application extensions.
+            0x21 if matches!(at(i + 1), 0x01 | 0xf9 | 0xfe | 0xff) => {
+                let (next, last) = skip(i + 2);
+                // A graphic control extension must end in 4 bytes. GPUI skips one that
+                // does not, then reads on from the wrong place, where it can find
+                // frames that are not counted here.
+                if at(i + 1) == 0xf9 && last != 4 {
+                    break;
+                }
+                i = next;
+            }
+            0x2c => {
+                frames += 1;
+                i = skip(i + 11 + table(at(i + 9))).0;
+            }
+            _ => break,
+        }
+    }
+    (b.get(i) == Some(&0x3b)).then_some((w as u64, h as u64, frames))
+}
+
+/// Whether an SVG has an image whose href is a file on this Mac. GPUI draws SVGs with
+/// usvg's default options, which read such files, so PR text could show the user's own
+/// files or hang the app on /dev/zero. Parsing with the same usvg finds exactly the
+/// hrefs it would follow; web addresses, which usvg never loads, change nothing.
+fn reads_local_files(b: &[u8]) -> bool {
+    // Every image reference has an href; a gzipped SVG can't be searched, so parse it.
+    if !b.starts_with(&[0x1f, 0x8b]) && !b.windows(4).any(|w| w == b"href") {
+        return false;
+    }
+    let hit = AtomicBool::new(false);
+    let opts = usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|href, _| {
+                if std::path::Path::new(href).exists() {
+                    hit.store(true, Ordering::Relaxed);
+                }
+                None
+            }),
+        },
+        ..Default::default()
+    };
+    let _ = usvg::Tree::from_data(b, &opts);
+    hit.load(Ordering::Relaxed)
 }
 
 /// Decodes `data:image/png;base64,…` and `data:image/svg+xml;utf8,…` URLs.
@@ -159,7 +245,8 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+            // get, not [..]: the two bytes can end inside a multi-byte character.
+            if let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
                 out.push(v);
                 i += 3;
                 continue;
@@ -173,6 +260,13 @@ fn percent_decode(s: &str) -> String {
 
 /// PR text as a markdown view. `id` must be stable for the same text.
 pub fn view(id: impl Into<SharedString>, text: &str, images: &Images) -> TextView {
+    plain_view(id, text, images).markdown_extensions(extensions(images))
+}
+
+/// A markdown view without the GitHub extensions. Every view is made here, so its
+/// images load through `images` (left to GPUI, an SVG would be drawn without the check
+/// in `decode` and could read local files) and its links go through `open_link`.
+fn plain_view(id: impl Into<SharedString>, text: &str, images: &Images) -> TextView {
     let images = images.clone();
     let id: SharedString = id.into();
     let id = if text.contains("<img") || text.contains("![") {
@@ -180,11 +274,29 @@ pub fn view(id: impl Into<SharedString>, text: &str, images: &Images) -> TextVie
     } else {
         id
     };
-    let ext = extensions(&images);
     TextView::markdown(ElementId::Name(id), text.to_string())
         .selectable(true)
         .image_source(move |uri| images.source(uri.as_ref()))
-        .markdown_extensions(ext)
+        .on_link_click(open_link)
+}
+
+/// Opens a clicked link in the browser, as the view does by default, but only web and
+/// mail links: PR text could otherwise point at file:, smb: or another app's URL
+/// scheme, which github.com never lets through.
+fn open_link(url: &SharedString, event: &ClickEvent, _: &mut Window, cx: &mut App) {
+    let opens = match event {
+        ClickEvent::Mouse(click) => matches!(click.up.button, MouseButton::Left | MouseButton::Middle),
+        ClickEvent::Keyboard(_) => true,
+        ClickEvent::Touch(click) => !click.long_press,
+    };
+    if opens && web_link(url) {
+        cx.open_url(url);
+    }
+}
+
+fn web_link(url: &str) -> bool {
+    let url = url.to_ascii_lowercase();
+    ["https://", "http://", "mailto:"].iter().any(|p| url.starts_with(p))
 }
 
 /// True when the node or anything inside it is an image.
@@ -200,6 +312,7 @@ fn has_image(node: &markdown_ast::Node) -> bool {
 /// [!WARNING] or [!CAUTION] becomes a colored box with a title.
 fn extensions(images: &Images) -> MarkdownExtensions {
     let cell_images = images.clone();
+    let alert_images = images.clone();
     MarkdownExtensions::default()
         // Tables of screenshots (before | after) get equal columns, like GitHub
         // gives them; the default layout sizes columns by their text alone.
@@ -268,7 +381,7 @@ fn extensions(images: &Images) -> MarkdownExtensions {
                 .collect();
             Some(MarkdownNode::new("gh-alert", Alert { kind, body: inner.join("\n") }).markdown(src.to_string()))
         })
-        .block_renderer("gh-alert", |node, _, _| {
+        .block_renderer("gh-alert", move |node, _, _| {
             let Some(a) = node.data::<Alert>() else { return div().into_any_element() };
             let (title, color, icon_name) = match a.kind.as_str() {
                 "TIP" => ("Tip", GREEN, "circle-check"),
@@ -298,7 +411,8 @@ fn extensions(images: &Images) -> MarkdownExtensions {
                         .child(icon(icon_name, 15., color))
                         .child(title),
                 )
-                .child(TextView::markdown(ElementId::Name(format!("alert-{:x}", h.finish()).into()), a.body.clone()).selectable(true))
+                // Through view(), so images in the alert load like the rest of the text.
+                .child(view(format!("alert-{:x}", h.finish()), &a.body, &alert_images))
                 .into_any_element()
         })
         .parser_revision(1)
@@ -311,4 +425,119 @@ struct ImageTable {
 struct Alert {
     kind: String,
     body: String,
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's glob exports its own `test` attribute.
+    use super::{data_url, decode, gif_size, percent_decode, reads_local_files, web_link};
+
+    #[test]
+    fn only_web_and_mail_links_open() {
+        for ok in ["https://github.com/a/b/pull/1", "HTTP://example.com", "mailto:a@example.com"] {
+            assert!(web_link(ok), "{ok}");
+        }
+        for bad in ["file:///System/Applications/Utilities/Terminal.app", "smb://host/share", "vscode://vscode.git/clone?url=x", "javascript:alert(1)", "docs/a.md"] {
+            assert!(!web_link(bad), "{bad}");
+        }
+    }
+
+    /// A GIF on a `w` by `h` screen with `frames` one-pixel frames.
+    fn gif(w: u16, h: u16, frames: usize) -> Vec<u8> {
+        let mut b = b"GIF89a".to_vec();
+        b.extend(w.to_le_bytes());
+        b.extend(h.to_le_bytes());
+        b.extend([0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff]);
+        b.extend(b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00");
+        for _ in 0..frames {
+            b.extend([0x21, 0xf9, 4, 0, 0, 0, 0, 0]);
+            b.extend([0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0x80, 0, 0, 0, 0xff, 0xff, 0xff, 2, 2, 0x44, 1, 0]);
+        }
+        b.push(0x3b);
+        b
+    }
+
+    #[test]
+    fn gifs_too_big_to_decode_are_refused() {
+        assert_eq!(gif_size(&gif(4000, 4000, 300)), Some((4000, 4000, 300)));
+        assert!(decode(gif(1, 1, 1), "image/gif").is_some());
+        assert!(decode(gif(1920, 1080, 500), "image/gif").is_some());
+        assert!(decode(gif(4000, 4000, 300), "image/gif").is_none());
+        assert!(decode(gif(20000, 10, 1), "image/gif").is_none());
+    }
+
+    #[test]
+    fn gifs_that_hide_frames_from_the_count_are_refused() {
+        // After a graphic control extension of 3 bytes, GPUI reads on 2 bytes off and
+        // finds 200 frames on a 4000x4000 screen (13 GB) in what is one frame's data
+        // when the blocks are read correctly.
+        let mut b = gif(4000, 4000, 1);
+        b.pop();
+        b.extend([0x21, 0xf9, 3, 4, 0, 0, 0]);
+        b.extend([0x2c, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 5, 2, 2, 0x44, 1, 0]);
+        for _ in 0..200 {
+            b.extend([0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 32, 0x44, 1]);
+            b.extend([0; 31]);
+        }
+        b.push(0x3b);
+        b.extend([1; 59]);
+        b.extend([0, 0x3b]);
+        assert!(decode(b, "image/gif").is_none());
+    }
+
+    #[test]
+    fn gifs_gpui_never_finishes_are_refused() {
+        let whole = gif(2, 2, 3);
+        let n = whole.len();
+        let junk = |at: usize, block: &[u8]| [&whole[..at], block, &whole[at..]].concat();
+        // The first frame's extension starts 38 bytes in; a comment can go there.
+        assert_eq!(&whole[38..40], &[0x21, 0xf9]);
+        assert!(decode(junk(38, b"\x21\xfe\x02hi\x00"), "image/gif").is_some());
+        // No trailer, cut off in a frame, an unknown block, an unknown extension.
+        for bad in [whole[..n - 1].to_vec(), whole[..n - 6].to_vec(), junk(38, b"\x99"), junk(38, b"\x21\x42\x01x\x00")] {
+            assert!(gif_size(&bad).is_none());
+            assert!(decode(bad, "image/gif").is_none());
+        }
+    }
+
+    #[test]
+    fn percent_decode_keeps_odd_escapes() {
+        assert_eq!(percent_decode("%3Csvg%20x"), "<svg x");
+        assert_eq!(percent_decode("%zz a%2 é%41"), "%zz a%2 éA");
+        // '%' then a character of more than one byte used to panic.
+        assert_eq!(percent_decode("%a\u{e9}x"), "%a\u{e9}x");
+        assert_eq!(percent_decode("100%\u{2713}"), "100%\u{2713}");
+    }
+
+    #[test]
+    fn svgs_that_read_local_files_are_refused() {
+        let svg = |href: &str| {
+            format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><image href="{href}" width="4" height="4"/></svg>"#)
+        };
+        let local = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons/git-branch.svg");
+        assert!(reads_local_files(svg(local).as_bytes()));
+        assert!(decode(svg(local).into_bytes(), "image/svg+xml").is_none());
+        assert!(data_url(&format!("data:image/svg+xml,{}", svg(local))).is_none());
+
+        for ok in [svg("https://example.com/a.png"), svg("/no/such/file.png"), r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#.into()] {
+            assert!(!reads_local_files(ok.as_bytes()), "{ok}");
+            assert!(decode(ok.into_bytes(), "image/svg+xml").is_some());
+        }
+    }
+
+    #[test]
+    fn every_markdown_view_loads_its_images_through_prdeck() {
+        // A TextView made without image_source loads images itself, and GPUI draws an
+        // SVG that reads local files (the body of an alert box did). Only plain_view
+        // makes one.
+        fn count(dir: &std::path::Path) -> usize {
+            let made = [concat!("TextView::", "markdown("), concat!("TextView::", "html(")];
+            std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .map(|p| if p.is_dir() { count(&p) } else { made.iter().map(|m| std::fs::read_to_string(&p).unwrap_or_default().matches(m).count()).sum() })
+                .sum()
+        }
+        assert_eq!(count(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))), 1);
+    }
 }

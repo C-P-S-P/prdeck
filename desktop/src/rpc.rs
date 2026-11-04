@@ -172,8 +172,8 @@ const SHELL_VARS: [&str; 4] = ["PATH", "XDG_CONFIG_HOME", "PRDECK_CONFIG", "GH_C
 
 /// The SHELL_VARS the login shell sets differently from this process.
 fn login_env() -> Vec<(&'static str, String)> {
-    let script = SHELL_VARS.iter().map(|v| format!("printf '%s\\0' \"${v}\"")).collect::<Vec<_>>().join("; ");
-    let Some(out) = login_shell(&script) else { return vec![] };
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let Some(out) = shell_values(&shell) else { return vec![] };
     SHELL_VARS
         .iter()
         .zip(out.split('\0'))
@@ -182,9 +182,17 @@ fn login_env() -> Vec<(&'static str, String)> {
         .collect()
 }
 
-/// Runs a script in the user's login shell (3 seconds at most) and returns its output.
-fn login_shell(script: &str) -> Option<String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+/// SHELL_VARS as `shell` sets them up for a login, each followed by a NUL. Dotfiles can
+/// print too (`eval "$(ssh-agent -s)"` prints "Agent pid 1234"), so the values are read
+/// from between markers.
+fn shell_values(shell: &str) -> Option<String> {
+    let vars = SHELL_VARS.iter().map(|v| format!("printf '%s\\0' \"${v}\"")).collect::<Vec<_>>().join("; ");
+    let out = login_shell(shell, &format!("printf _PRDECK_ENV_; {vars}; printf _PRDECK_ENV_"))?;
+    out.split("_PRDECK_ENV_").nth(1).map(str::to_string)
+}
+
+/// Runs a script in `shell` as a login shell (3 seconds at most) and returns its output.
+fn login_shell(shell: &str, script: &str) -> Option<String> {
     let mut child = Command::new(shell)
         .args(["-l", "-c", script])
         .stdin(Stdio::null())
@@ -201,6 +209,7 @@ fn login_shell(script: &str) -> Option<String> {
             }
             _ => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return None;
             }
         }
@@ -226,4 +235,24 @@ fn sidecar() -> PathBuf {
         return built.into();
     }
     "prdeck".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_values;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn login_path_ignores_what_dotfiles_print() {
+        // A login shell whose dotfiles print before and after the command.
+        let sh = std::env::temp_dir().join(format!("prdeck-test-shell-{}", std::process::id()));
+        std::fs::write(&sh, "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n").unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS checks a new executable the first time it runs, which can take longer
+        // than login_shell waits; do that first.
+        let _ = std::process::Command::new(&sh).output();
+        let values = shell_values(sh.to_str().unwrap());
+        let _ = std::fs::remove_file(&sh);
+        assert_eq!(values.as_deref().and_then(|v| v.split('\0').next()), Some("/opt/homebrew/bin:/usr/bin"));
+    }
 }

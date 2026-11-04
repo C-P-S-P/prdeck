@@ -2,20 +2,30 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	ghconfig "github.com/cli/go-gh/v2/pkg/config"
 )
 
 // Client runs PR Deck's GraphQL queries. Auth comes from gh (`gh auth login`) or GH_TOKEN.
 type Client struct {
 	gql  *api.GraphQLClient
 	rest *api.RESTClient // diffs: GraphQL has no patches
+
+	imgMu sync.Mutex
+	img   *http.Client // images on GitHub's hosts, with the login; made on first use
 }
 
 func NewClient() (*Client, error) {
+	// go-gh reads gh's config once per process; read it again so a login made
+	// since then (Connect after sign-in) is the one used.
+	_ = ghconfig.Reload(nil)
 	opts := api.ClientOptions{Timeout: 30 * time.Second}
 	gql, err := api.NewGraphQLClient(opts)
 	if err != nil {
@@ -139,8 +149,14 @@ func (c *Client) Search(ctx context.Context, filter string, limit int) ([]PR, st
 		} `json:"search"`
 	}
 	vars := map[string]any{"q": SearchQuery(filter), "n": limit}
-	if err := c.gql.DoWithContext(ctx, searchQuery, vars, &resp); err != nil {
-		return nil, "", err
+	err := c.gql.DoWithContext(ctx, searchQuery, vars, &resp)
+	if err != nil {
+		// Orgs with SAML or OAuth app limits the login is not cleared for come back
+		// as null nodes with FORBIDDEN errors; show the rest, as gh does.
+		var ge *api.GraphQLError
+		if !errors.As(err, &ge) || !ge.Match("FORBIDDEN", "search.nodes.") {
+			return nil, "", err
+		}
 	}
 	out := make([]PR, 0, len(resp.Search.Nodes))
 	for _, n := range resp.Search.Nodes {
@@ -148,6 +164,9 @@ func (c *Client) Search(ctx context.Context, filter string, limit int) ([]PR, st
 			continue
 		}
 		out = append(out, n.toPR())
+	}
+	if err != nil && len(out) == 0 {
+		return nil, "", err // none of them can be shown, so say why
 	}
 	return out, resp.Viewer.Login, nil
 }

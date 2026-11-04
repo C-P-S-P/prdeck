@@ -2,6 +2,7 @@ package repos
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -89,5 +90,50 @@ func TestWorktreePath(t *testing.T) {
 		if got := WorktreePath("/w", repo, 42); got != want {
 			t.Errorf("WorktreePath(%q) = %q, want %q", repo, got, want)
 		}
+	}
+}
+
+// A worktree folder deleted by hand is still registered with git. It must not be
+// used, and must not keep its branch from being checked out again.
+func TestBranchWorktreeDeletedByHand(t *testing.T) {
+	clone := realClone(t, "https://github.com/acme/tool.git")
+	wt := filepath.Join(t.TempDir(), "tool-42")
+	git(t, clone, "worktree", "add", "-q", "-b", "feat", wt)
+	// Another PR's worktree, on a disk that is not mounted now: it must stay registered.
+	other := filepath.Join(t.TempDir(), "tool-43")
+	git(t, clone, "worktree", "add", "-q", "-b", "other", other)
+	if got := BranchWorktree(clone, "feat"); got == "" {
+		t.Fatal("worktree not found")
+	}
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(other); err != nil {
+		t.Fatal(err)
+	}
+	if got := BranchWorktree(clone, "feat"); got != "" {
+		t.Errorf("BranchWorktree = %q, a folder that is gone", got)
+	}
+	if out, _ := exec.Command("git", "-C", clone, "worktree", "list").Output(); !strings.Contains(string(out), "tool-43") {
+		t.Errorf("another missing worktree was dropped too:\n%s", out)
+	}
+	git(t, clone, "checkout", "-q", "feat")
+}
+
+func TestOwnBranch(t *testing.T) {
+	clone := realClone(t, "https://github.com/acme/tool.git")
+	if OwnBranch(clone, "origin", "acme/tool", "main") {
+		t.Error("true with the default branch unknown")
+	}
+	git(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	if !OwnBranch(clone, "origin", "acme/tool", "main") {
+		t.Error("false for the default branch of a clone with only the base remote")
+	}
+	if OwnBranch(clone, "origin", "acme/tool", "feat") {
+		t.Error("true for a branch that is not the default")
+	}
+	git(t, clone, "remote", "add", "fork", "git@github.com:alice/tool.git")
+	if OwnBranch(clone, "origin", "acme/tool", "main") {
+		t.Error("true with a remote that may be the fork")
 	}
 }
