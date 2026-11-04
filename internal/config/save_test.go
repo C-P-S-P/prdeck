@@ -178,3 +178,24 @@ func TestSaveThroughALinkIntoAReadOnlyFolder(t *testing.T) {
 		t.Errorf("mode = %v, want a writable file", st.Mode())
 	}
 }
+
+func TestSaveWorktreeDirKeepsTheRest(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	orig := "editor:\n  default: zed # my editor\n  worktree_dir: ~/prdeck\nrepos:\n  scan: [~/src]\n"
+	if err := os.WriteFile(file, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	if err := SaveWorktreeDir(file, filepath.Join(home, "trees")); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(file)
+	for _, want := range []string{"default: zed # my editor", "worktree_dir: ~/trees", "scan: [~/src]"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Count(string(got), "worktree_dir") != 1 {
+		t.Errorf("worktree_dir written twice:\n%s", got)
+	}
+}

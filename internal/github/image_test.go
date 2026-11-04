@@ -82,3 +82,34 @@ func TestProxyDoesNotTurnOffTheLocalGuard(t *testing.T) {
 		t.Errorf("proxy address not allowed: %v", proxyAddrs())
 	}
 }
+
+// A busy server is asked again, and gets there on the third try; a missing image
+// and a refused request fail at once.
+func TestFetchTriesAgain(t *testing.T) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		if r.URL.Path == "/busy.png" && n.Load() == imageTries {
+			_, _ = w.Write([]byte("\x89PNG"))
+			return
+		}
+		if r.URL.Path == "/busy.png" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+	if data, _, err := fetch(ctx, srv.Client(), srv.URL+"/busy.png"); err != nil || string(data) != "\x89PNG" || n.Load() != imageTries {
+		t.Errorf("busy server: data %q, err %v, after %d tries", data, err, n.Load())
+	}
+	n.Store(0)
+	if _, _, err := fetch(ctx, srv.Client(), srv.URL+"/gone.png"); err == nil || n.Load() != 1 {
+		t.Errorf("missing image: err %v, after %d tries", err, n.Load())
+	}
+	start := time.Now()
+	if _, _, err := fetch(ctx, &http.Client{Transport: imageTransport()}, srv.URL+"/local.png"); err == nil || time.Since(start) > 900*time.Millisecond {
+		t.Errorf("refused request: err %v, took %v", err, time.Since(start))
+	}
+}

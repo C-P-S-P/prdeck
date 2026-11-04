@@ -513,6 +513,49 @@ func (s *Service) SetClonePath(repo, path string) (string, error) {
 }
 
 // ClonePath is the clone currently used for repo, if any.
+// SetWorktreeDir makes dir the folder new worktrees go in, and saves it to the config.
+// It returns the folder as saved (with ~ for the home folder).
+func (s *Service) SetWorktreeDir(dir string) (string, error) {
+	dir = config.ExpandHome(strings.TrimSpace(dir))
+	if dir == "" {
+		return "", errors.New("no folder given")
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if st, err := os.Stat(dir); err == nil && !st.IsDir() {
+		return "", fmt.Errorf("%s is a file, not a folder", config.ShortenHome(dir))
+	}
+	// Inside a clone, every worktree would show up in it as untracked files.
+	if top, err := exec.Command("git", "-C", nearestDir(dir), "rev-parse", "--show-toplevel").Output(); err == nil {
+		return "", fmt.Errorf("%s is inside the git clone %s; pick a folder outside your clones", config.ShortenHome(dir), config.ShortenHome(strings.TrimSpace(string(top))))
+	}
+	if err := config.SaveWorktreeDir(s.cfgPath, dir); err != nil {
+		return "", fmt.Errorf("saving to config: %w", err)
+	}
+	short := config.ShortenHome(dir)
+	s.cfgMu.Lock()
+	cfg := *s.Config()
+	cfg.Editor.WorktreeDir = short
+	s.cfg.Store(&cfg)
+	s.cfgMu.Unlock()
+	return short, nil
+}
+
+// nearestDir is dir, or its closest parent that exists.
+func nearestDir(dir string) string {
+	for {
+		if st, err := os.Stat(dir); err == nil && st.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
+}
+
 func (s *Service) ClonePath(repo string) string {
 	c, _ := s.clone(repo)
 	return c.Path

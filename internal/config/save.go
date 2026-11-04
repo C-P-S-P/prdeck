@@ -19,6 +19,13 @@ func SaveRepoPath(file, repo, clonePath string) error {
 	})
 }
 
+// SaveWorktreeDir records `editor.worktree_dir`, the folder new worktrees go in.
+func SaveWorktreeDir(file, dir string) error {
+	return edit(file, func(root *yaml.Node) {
+		set(child(root, "editor"), "worktree_dir", ShortenHome(dir))
+	})
+}
+
 // Setup is what first-run setup in the desktop app chooses.
 type Setup struct {
 	Scan      []string // folders that hold clones

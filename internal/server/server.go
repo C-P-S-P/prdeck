@@ -48,6 +48,7 @@ type Backend interface {
 	SetClonePath(repo, path string) (string, error)
 	ClonePath(repo string) string
 	ListClones(ctx context.Context) []repos.DiskClone
+	SetWorktreeDir(dir string) (string, error)
 }
 
 // writer is a backend that can comment on and review PRs.
@@ -283,7 +284,8 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		// Room for fetch's three tries of up to 30 seconds each.
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 		defer cancel()
 		var data []byte
 		var kind string
@@ -398,6 +400,17 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"note": note, "path": s.b.ClonePath(p.Repo)}, nil
+
+	case "setWorktreeDir":
+		p, err := decode[struct{ Path string }](raw)
+		if err != nil {
+			return nil, err
+		}
+		dir, err := s.b.SetWorktreeDir(p.Path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"dir": dir}, nil
 
 	case "clonePath":
 		p, err := decode[struct{ Repo string }](raw)

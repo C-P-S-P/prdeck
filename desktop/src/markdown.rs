@@ -28,6 +28,9 @@ enum Entry {
 pub struct Images {
     map: Arc<Mutex<HashMap<String, Entry>>>,
     queue: mpsc::UnboundedSender<String>,
+    /// Profile photos have a queue of their own, so they never wait behind a PR's
+    /// screenshots.
+    face_queue: mpsc::UnboundedSender<String>,
     /// Bumped whenever an image arrives, so views lay themselves out again (table
     /// columns are measured once, and a loading image measures as one pixel).
     generation: Arc<AtomicU64>,
@@ -35,10 +38,24 @@ pub struct Images {
     faces: Arc<AtomicBool>,
 }
 
+/// The URLs waiting to be downloaded: images in PR text, and profile photos.
+pub struct Queues {
+    pub images: mpsc::UnboundedReceiver<String>,
+    pub faces: mpsc::UnboundedReceiver<String>,
+}
+
 impl Images {
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<String>) {
-        let (tx, rx) = mpsc::unbounded();
-        (Images { map: Default::default(), queue: tx, generation: Default::default(), faces: Default::default() }, rx)
+    pub fn new() -> (Self, Queues) {
+        let (tx, images) = mpsc::unbounded();
+        let (face_tx, faces) = mpsc::unbounded();
+        let this = Images {
+            map: Default::default(),
+            queue: tx,
+            face_queue: face_tx,
+            generation: Default::default(),
+            faces: Default::default(),
+        };
+        (this, Queues { images, faces })
     }
 
     /// Stores a downloaded image (or the failure to get one).
@@ -80,7 +97,7 @@ impl Images {
             Some(_) => None,
             None => {
                 map.insert(url.to_string(), Entry::Loading);
-                let _ = self.queue.unbounded_send(url.to_string());
+                let _ = self.face_queue.unbounded_send(url.to_string());
                 None
             }
         }
@@ -90,14 +107,15 @@ impl Images {
         let mut map = self.map.lock().unwrap();
         match map.get(url) {
             Some(Entry::Ready(img)) => return ImageSource::Image(img.clone()),
-            Some(_) => return blank(),
+            Some(Entry::Loading) => return blank(),
+            Some(Entry::Failed) => return failed(),
             None => {}
         }
         if url.starts_with("data:") {
             let entry = data_url(url).map(Entry::Ready).unwrap_or(Entry::Failed);
             let src = match &entry {
                 Entry::Ready(img) => ImageSource::Image(img.clone()),
-                _ => blank(),
+                _ => failed(),
             };
             map.insert(url.to_string(), entry);
             return src;
@@ -105,6 +123,13 @@ impl Images {
         map.insert(url.to_string(), Entry::Loading);
         let _ = self.queue.unbounded_send(url.to_string());
         blank()
+    }
+
+    /// Marks every image as failed, to see what that looks like.
+    #[cfg(feature = "snapshot")]
+    pub fn fail_all(&self) {
+        self.map.lock().unwrap().values_mut().for_each(|e| *e = Entry::Failed);
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Forgets the images that failed (offline, a timeout), so the next draw asks for
@@ -119,6 +144,23 @@ fn blank() -> ImageSource {
     static BLANK: OnceLock<Arc<Image>> = OnceLock::new();
     let img = BLANK.get_or_init(|| {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#.to_vec();
+        Arc::new(Image::from_bytes(ImageFormat::Svg, svg))
+    });
+    ImageSource::Image(img.clone())
+}
+
+/// Shown in place of an image that could not be downloaded or read, so it does not
+/// just leave a gap.
+fn failed() -> ImageSource {
+    static FAILED: OnceLock<Arc<Image>> = OnceLock::new();
+    let img = FAILED.get_or_init(|| {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="360" height="56" viewBox="0 0 360 56">
+<rect x="0.5" y="0.5" width="359" height="55" rx="4" fill="#1d1f23" stroke="#3a3d44" stroke-dasharray="4 3"/>
+<g transform="translate(16 16)" fill="none" stroke="#7d828c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+<line x1="2" y1="2" x2="22" y2="22"/><path d="M10.4 4H19a2 2 0 0 1 2 2v8.6"/><path d="M21 19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 1-1.7"/>
+<path d="M13.5 13.5 12 15l-3-3-6 6"/></g>
+<text x="52" y="33" font-family="-apple-system, Helvetica, Arial, sans-serif" font-size="14" fill="#9da3ad">Image did not load. Press ⌘R to try again.</text>
+</svg>"##.as_bytes().to_vec();
         Arc::new(Image::from_bytes(ImageFormat::Svg, svg))
     });
     ImageSource::Image(img.clone())

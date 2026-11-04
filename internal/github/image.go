@@ -29,8 +29,14 @@ var plainHTTP = &http.Client{Timeout: 30 * time.Second, Transport: imageTranspor
 // they cannot show there either). The one local address it does dial is a proxy set
 // in the environment (often on localhost); Go never sends loopback requests through
 // a proxy, so those are still checked here.
+//
+// A PR's images share one HTTP/2 connection per host. When that connection stalls
+// (a network path that stops passing data), every image on it would wait out its
+// timeout together; pings find a silent connection within about 10 seconds and close
+// it, so fetch's next try gets a new one.
 func imageTransport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.HTTP2 = &http.HTTP2Config{SendPingTimeout: 5 * time.Second, PingTimeout: 5 * time.Second}
 	proxies := sync.OnceValue(proxyAddrs)
 	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: func(_, addr string, _ syscall.RawConn) error {
 		host, _, _ := net.SplitHostPort(addr)
@@ -41,7 +47,7 @@ func imageTransport() *http.Transport {
 		if proxies()[addr] {
 			return nil
 		}
-		return fmt.Errorf("%s is a local address", host)
+		return refused{host + " is a local address"}
 	}}
 	t.DialContext = d.DialContext
 	return t
@@ -98,11 +104,10 @@ func (c *Client) imageClient() *http.Client {
 	c.imgMu.Lock()
 	defer c.imgMu.Unlock()
 	if c.img == nil {
-		hc, err := api.DefaultHTTPClient()
+		hc, err := api.NewHTTPClient(api.ClientOptions{Transport: imageTransport(), Timeout: 30 * time.Second})
 		if err != nil {
 			return plainHTTP
 		}
-		hc.Timeout = 30 * time.Second
 		hc.CheckRedirect = httpsOnly
 		c.img = hc
 	}
@@ -121,10 +126,10 @@ func withHTTPS(rawURL string) string {
 // (at most 10 redirects), but never to plain http.
 func httpsOnly(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" {
-		return fmt.Errorf("%s: redirected to plain http", via[0].URL.Host)
+		return refused{via[0].URL.Host + ": redirected to plain http"}
 	}
 	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
+		return refused{"stopped after 10 redirects"}
 	}
 	return nil
 }
@@ -143,32 +148,61 @@ func githubHosted(rawURL string) bool {
 	return h == "github.com" || strings.HasSuffix(h, ".github.com") || strings.HasSuffix(h, ".githubusercontent.com")
 }
 
+// refused is a request PR Deck will not make (a local address, a redirect to plain
+// http); trying again would only be refused again.
+type refused struct{ msg string }
+
+func (e refused) Error() string { return e.msg }
+
+// imageTries is how many times fetch asks for an image before giving up.
+const imageTries = 3
+
+// fetch downloads an image, trying again (after 1, then 2 seconds) when the network
+// fails, the server is busy (429) or has an error (5xx): those are often gone a
+// moment later. A missing image (404), a refused request or one that is too large
+// fails at once.
 func fetch(ctx context.Context, client *http.Client, rawURL string) ([]byte, string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, "", fmt.Errorf("not a web address: %q", rawURL)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	for try := 1; ; try++ {
+		data, kind, again, err := fetchOnce(ctx, client, u)
+		if err == nil || !again || try == imageTries || ctx.Err() != nil {
+			return data, kind, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", err
+		case <-time.After(time.Duration(try) * time.Second):
+		}
+	}
+}
+
+// fetchOnce makes one request; again says whether trying again could work.
+func fetchOnce(ctx context.Context, client *http.Client, u *url.URL) (data []byte, kind string, again bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	// What a browser sends; some hosts (Codecov) refuse a narrower Accept.
 	req.Header.Set("Accept", "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5")
 	req.Header.Set("User-Agent", "prdeck")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, "", !errors.As(err, new(refused)), err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("%s: %s", u.Host, resp.Status)
+		busy := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return nil, "", busy, fmt.Errorf("%s: %s", u.Host, resp.Status)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImage+1))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxImage+1))
 	if err != nil {
-		return nil, "", err
+		return nil, "", true, err
 	}
 	if len(data) > maxImage {
-		return nil, "", fmt.Errorf("image larger than %d MB", maxImage>>20)
+		return nil, "", false, fmt.Errorf("image larger than %d MB", maxImage>>20)
 	}
-	return data, resp.Header.Get("Content-Type"), nil
+	return data, resp.Header.Get("Content-Type"), false, nil
 }

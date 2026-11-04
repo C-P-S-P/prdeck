@@ -254,3 +254,29 @@ func TestCappedBufferKeepsTheStart(t *testing.T) {
 		t.Errorf("kept %d bytes", len(s))
 	}
 }
+
+// A worktree folder chosen in the app is saved and used for the next worktree; one
+// inside a clone is refused, since every worktree would show up in it.
+func TestSetWorktreeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	clone := realClone(t, "https://github.com/acme/tool.git")
+	cfg := config.Default()
+	cfg.Repos.Scan, cfg.Repos.Paths = nil, map[string]string{"acme/tool": clone}
+	file := filepath.Join(home, "config.yml")
+	s := New(cfg, file, nil, nil)
+	if _, err := s.SetWorktreeDir(filepath.Join(clone, "trees")); err == nil {
+		t.Error("a folder inside a clone was accepted")
+	}
+	got, err := s.SetWorktreeDir(filepath.Join(home, "trees"))
+	if err != nil || got != "~/trees" {
+		t.Fatalf("SetWorktreeDir = %q, %v", got, err)
+	}
+	if saved, _ := os.ReadFile(file); !strings.Contains(string(saved), "worktree_dir: ~/trees") {
+		t.Errorf("config file:\n%s", saved)
+	}
+	f, err := s.ResolveFolder(github.PR{Repo: "acme/tool", Number: 7}, true)
+	if err != nil || f.Path != filepath.Join(home, "trees", "tool-7") || f.Exists {
+		t.Errorf("ResolveFolder = %+v, %v", f, err)
+	}
+}

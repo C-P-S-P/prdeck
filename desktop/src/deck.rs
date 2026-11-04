@@ -19,6 +19,7 @@ use crate::rpc::Rpc;
 use crate::theme::*;
 
 mod diffs;
+mod folders;
 mod inline;
 mod review;
 mod setup;
@@ -29,7 +30,7 @@ use setup::*;
 
 gpui_kit::actions!(
     prdeck,
-    [GoToPr, Filters, CloseTab, ReopenTab, Refresh, NextTab, PrevTab, OpenConfig, OpenInEditor, OpenOnGitHub, ToggleSidebar, RunSetup, CommentOnPr]
+    [GoToPr, Filters, CloseTab, ReopenTab, Refresh, NextTab, PrevTab, OpenConfig, OpenInEditor, OpenOnGitHub, ToggleSidebar, RunSetup, CommentOnPr, ChangeClone]
 );
 
 #[derive(Clone, Copy, PartialEq)]
@@ -65,8 +66,10 @@ enum Stage {
     Ready { plan: Plan, drop_armed: bool },
     Running(Plan),
     Done { title: String, ok: bool, output: String },
-    /// The PR's repo has no local clone: pick one found on disk, type a path, or clone.
-    NoClone { found: Option<Vec<String>>, path: Entity<InputState> },
+    /// Pick the clone a repo's commands use: one found on disk, a folder chosen or typed,
+    /// or a new clone. `current` is the clone in use when changing it; None when the repo
+    /// has no clone yet.
+    NoClone { found: Option<Vec<String>>, path: Entity<InputState>, current: Option<String> },
     Failed(String),
 }
 
@@ -214,12 +217,17 @@ impl Deck {
     }
 
     /// Downloads images from PR text as the markdown view asks for them, several at
-    /// a time, and redraws as each arrives.
-    fn load_images(&mut self, queue: futures::channel::mpsc::UnboundedReceiver<String>, cx: &mut Context<Self>) {
+    /// a time, and redraws as each arrives. Profile photos have slots of their own.
+    fn load_images(&mut self, queues: markdown::Queues, cx: &mut Context<Self>) {
+        self.download(queues.images, 6, cx);
+        self.download(queues.faces, 4, cx);
+    }
+
+    fn download(&mut self, queue: futures::channel::mpsc::UnboundedReceiver<String>, slots: usize, cx: &mut Context<Self>) {
         let (Some(rpc), images) = (self.rpc.clone(), self.images.clone()) else { return };
         let pool = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            // Six downloads at most: the next is asked for only when one finishes.
+            // `slots` downloads at most: the next is asked for only when one finishes.
             let mut arrived = queue
                 .map(|url| {
                     let fetch = rpc.call::<FetchedImage>("image", json!({ "url": url }));
@@ -237,7 +245,7 @@ impl Deck {
                         .await
                     }
                 })
-                .buffer_unordered(6);
+                .buffer_unordered(slots);
             while arrived.next().await.is_some() {
                 let _ = this.update(cx, |_, cx| cx.notify());
             }
@@ -572,7 +580,8 @@ impl Deck {
                     return;
                 }
                 match res {
-                    Ok(plan) if !plan.changes.is_empty() || plan.confirm => {
+                    // A new worktree waits too, to show where it goes (and let that change).
+                    Ok(plan) if !plan.changes.is_empty() || plan.confirm || plan.new_worktree() => {
                         this.set_stage(Stage::Ready { plan, drop_armed: false });
                     }
                     Ok(plan) => this.execute(plan, "", cx),
@@ -638,7 +647,7 @@ impl Deck {
             }
         });
         if let Some(run) = self.run.as_mut() {
-            run.stage = Stage::NoClone { found: None, path };
+            run.stage = Stage::NoClone { found: None, path, current: None };
             run._sub = Some(sub);
         }
         let found = rpc.call::<Vec<String>>("findClones", json!({ "repo": pr.repo }));
@@ -671,10 +680,18 @@ impl Deck {
                         if !r.note.is_empty() {
                             this.banner = Some(r.note);
                         }
-                        this.folders.remove(&pr.key());
+                        // Every PR of the repo uses the new clone now.
+                        let repo = format!("{}#", pr.repo.to_lowercase());
+                        this.folders.retain(|k, _| !k.starts_with(&repo));
                         this.load_folder(pr.clone(), cx);
                         if this.run_id == id {
-                            this.prepare(pr, cmd, input, window, cx);
+                            if cmd.name.is_empty() {
+                                // Only changing the clone: nothing to run after.
+                                this.run = None;
+                                this.say_done(&format!("{} now uses {}", pr.repo, short_home(&r.path)), cx);
+                            } else {
+                                this.prepare(pr, cmd, input, window, cx);
+                            }
                         }
                     }
                     Err(e) => this.banner = Some(e.message),
@@ -1045,6 +1062,8 @@ impl Deck {
             "j" => return self.move_selection(1, cx),
             "k" => return self.move_selection(-1, cx),
             "R" => return self.load(cx),
+            // Like the terminal app: point this repo at another clone.
+            "L" => return self.on_change_clone(&ChangeClone, window, cx),
             "/" => return self.open_palette(PaletteMode::Filters, window, cx),
             d if d.len() == 1 && ('1'..='9').contains(&d.chars().next().unwrap()) => {
                 let i = d.parse::<usize>().unwrap() - 1;
@@ -1846,6 +1865,23 @@ impl Deck {
         };
         let rebase = self.find_cmd(|c| c.name.eq_ignore_ascii_case("rebase"));
         let base = pr.base.clone();
+        let change = matches!(self.folders.get(&pr.key()), Some(FolderState::Ready(_) | FolderState::NoClone)).then(|| {
+            let has = matches!(self.folders.get(&pr.key()), Some(FolderState::Ready(_)));
+            let pr = pr.clone();
+            div()
+                .id("change-clone")
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .pt(px(2.))
+                .cursor_pointer()
+                .text_color(rgb(BLUE_LIGHT))
+                .hover(|s| s.text_color(rgb(TEXT_BRIGHT)))
+                .on_click(cx.listener(move |this, _, window, cx| this.change_clone(pr.clone(), window, cx)))
+                .child(icon("folder-open", 12., BLUE_LIGHT))
+                .child(div().flex_1().child(if has { "Use another clone…" } else { "Choose a clone…" }))
+                .child(kbd("L"))
+        });
 
         div()
             .w_full()
@@ -1881,7 +1917,7 @@ impl Deck {
                         )
                     }),
             )
-            .child(aside_section("Local clone").children(local))
+            .child(aside_section("Local clone").children(local).children(change))
             .child(aside_section("Reviewers").children(if d.reviewers.is_empty() {
                 vec![div().text_color(rgb(DIM)).child("No reviewers yet").into_any_element()]
             } else {
@@ -2093,6 +2129,27 @@ impl Deck {
                         .child(close)
                         .into_any_element(),
                 ];
+                if plan.new_worktree() {
+                    let parent = std::path::Path::new(&plan.folder.path).parent().map(|p| short_home(&p.to_string_lossy())).unwrap_or_default();
+                    rows.push(
+                        row()
+                            .pt(px(0.))
+                            .text_size(px(12.))
+                            .child(icon("folder-git-2", 13., BLUE))
+                            .child(div().flex_none().text_color(rgb(SOFT)).child("Makes a new worktree at"))
+                            .child(div().flex_1().min_w(px(0.)).truncate().font_family(MONO).text_color(rgb(TEXT)).child(short_home(&plan.folder.path)))
+                            .child(div().flex_none().text_color(rgb(DIM)).child(format!("new worktrees go in {parent}")))
+                            .child(
+                                button_look("worktree-dir")
+                                    .h(px(26.))
+                                    .text_size(px(12.))
+                                    .on_click(cx.listener(|this, _, window, cx| this.pick_worktree_dir(window, cx)))
+                                    .child(icon("folder-open", 13., SOFT))
+                                    .child("Change folder…"),
+                            )
+                            .into_any_element(),
+                    );
+                }
                 if !plan.changes.is_empty() {
                     let n = plan.changes.len();
                     let shown: Vec<String> = plan.changes.iter().take(4).map(|c| c.trim().to_string()).collect();
@@ -2170,11 +2227,24 @@ impl Deck {
                 }
                 rows
             }
-            Stage::NoClone { found, path } => {
-                let mut rows = vec![
-                    row()
+            Stage::NoClone { found, path, current } => {
+                let choose = button_look("choose-clone")
+                    .h(px(26.))
+                    .text_size(px(12.))
+                    .on_click(cx.listener(|this, _, window, cx| this.pick_clone_dir(window, cx)))
+                    .child(icon("folder-open", 13., SOFT))
+                    .child("Choose folder…");
+                let head = match current {
+                    Some(c) => row()
+                        .child(label(format!("Clone of {}", run.pr.repo)))
+                        .child(div().flex_none().text_color(rgb(SOFT)).child("now"))
+                        .child(div().flex_1().min_w(px(0.)).truncate().font_family(MONO).text_color(rgb(TEXT)).child(short_home(c)))
+                        .child(choose)
+                        .child(close),
+                    None => row()
                         .child(label(run.cmd.name.clone()))
                         .child(div().flex_1().text_color(rgb(YELLOW)).child(format!("No local clone of {} found.", run.pr.repo)))
+                        .child(choose)
                         .child(
                             button_look("clone")
                                 .h(px(26.))
@@ -2182,14 +2252,18 @@ impl Deck {
                                 .on_click(cx.listener(|this, _, _, cx| this.clone_repo(cx)))
                                 .child(format!("Clone {}", run.pr.repo)),
                         )
-                        .child(close)
-                        .into_any_element(),
-                ];
+                        .child(close),
+                };
+                let mut rows = vec![head.into_any_element()];
                 match found {
                     None => rows.push(row().pt(px(0.)).text_color(rgb(DIM)).child("Searching your disk for clones…").into_any_element()),
+                    Some(list) if list.is_empty() && current.is_some() => rows.push(
+                        row().pt(px(0.)).text_color(rgb(DIM)).child("No other clones of this repo found on your disk.").into_any_element(),
+                    ),
                     Some(list) => {
                         for (i, p) in list.iter().enumerate() {
                             let path = p.clone();
+                            let now = current.as_deref().is_some_and(|c| short_home(c) == short_home(p));
                             rows.push(
                                 div()
                                     .id(("found", i))
@@ -2204,7 +2278,7 @@ impl Deck {
                                     .on_click(cx.listener(move |this, _, window, cx| this.set_clone_path(path.clone(), window, cx)))
                                     .child(icon("folder-git-2", 13., BLUE))
                                     .child(div().font_family(MONO).text_color(rgb(TEXT)).child(short_home(p)))
-                                    .child(div().text_color(rgb(DIM)).child("use this clone"))
+                                    .child(div().text_color(rgb(if now { GREEN } else { DIM })).child(if now { "in use" } else { "use this clone" }))
                                     .into_any_element(),
                             );
                         }
@@ -2610,6 +2684,7 @@ impl Render for Deck {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_run_setup))
             .on_action(cx.listener(Self::on_comment))
+            .on_action(cx.listener(Self::on_change_clone))
             .size_full()
             .relative()
             .flex()
@@ -2663,6 +2738,8 @@ impl Deck {
                     self.load(cx);
                 }
             }
+            s if s.starts_with("worktreedir:") => self.set_worktree_dir(s["worktreedir:".len()..].to_string(), window, cx),
+            s if s.starts_with("clonepath:") => self.set_clone_path(s["clonepath:".len()..].to_string(), window, cx),
             s if s.starts_with("scroll:") => {
                 let y: f32 = s[7..].parse().unwrap_or(0.);
                 self.detail_scroll.set_offset(point(px(0.), px(-y)));
@@ -2775,6 +2852,20 @@ impl Deck {
             "checks" => {
                 self.section = Section::Checks;
             }
+            "worktree" => {
+                if let Some(pr) = pick(self, 4821) {
+                    self.select(pr, cx);
+                }
+                if let Some(c) = self.find_cmd(|c| c.action == "open" && c.worktree) {
+                    self.start(c, window, cx);
+                }
+            }
+            "brokenimages" => self.images.fail_all(),
+            "changeclone" => {
+                if let Some(pr) = self.selected_pr() {
+                    self.change_clone(pr, window, cx);
+                }
+            }
             "noclone" => {
                 if let Some(pr) = self.prs.iter().find(|p| p.repo == "upstream/datakit").cloned() {
                     self.select(pr, cx);
@@ -2809,18 +2900,20 @@ mod tests {
 
     #[test]
     fn refresh_retries_images_that_failed() {
-        let (images, mut queue) = Images::new();
+        let (images, mut queues) = Images::new();
         images.show_faces(true);
         let photo = "https://github.com/octo.png?size=96";
         images.face("octo", 20.);
-        assert_eq!(queue.try_recv().ok().as_deref(), Some(photo));
+        assert_eq!(queues.faces.try_recv().ok().as_deref(), Some(photo));
         // A failed download is not asked for again on every draw…
         images.put(photo.into(), None);
         images.face("octo", 20.);
-        assert!(queue.try_recv().is_err());
+        assert!(queues.faces.try_recv().is_err());
         // …until ⌘R.
         images.retry_failed();
         images.face("octo", 20.);
-        assert_eq!(queue.try_recv().ok().as_deref(), Some(photo));
+        assert_eq!(queues.faces.try_recv().ok().as_deref(), Some(photo));
+        // Photos never wait in the queue for images in PR text.
+        assert!(queues.images.try_recv().is_err());
     }
 }

@@ -70,6 +70,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-o", OpenOnGitHub, Some("Deck")),
         KeyBinding::new("cmd-b", ToggleSidebar, Some("Deck")),
         KeyBinding::new("cmd-shift-c", CommentOnPr, Some("Deck")),
+        KeyBinding::new("cmd-shift-l", ChangeClone, Some("Deck")),
     ]);
 }
 
@@ -98,6 +99,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("Open in Editor", OpenInEditor),
                 MenuItem::action("Open on GitHub", OpenOnGitHub),
+                MenuItem::action("Use Another Clone…", ChangeClone),
                 MenuItem::separator(),
                 MenuItem::action("Comment or Review…", CommentOnPr),
             ],

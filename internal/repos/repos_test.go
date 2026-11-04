@@ -95,8 +95,9 @@ func TestWorktreePath(t *testing.T) {
 
 // A worktree folder deleted by hand is still registered with git. BranchWorktree must
 // not use it, and must change nothing (it runs on every selection); DropMissingWorktree,
-// run before a checkout, frees the branch, but leaves a worktree on a disk that is not
-// mounted right now (its parent folder is gone too) alone.
+// run before a checkout, frees the branch, also when the folder around it was deleted
+// too (a temp folder cleaned up), but leaves a worktree on a disk that is not mounted
+// right now alone.
 func TestBranchWorktreeDeletedByHand(t *testing.T) {
 	clone := realClone(t, "https://github.com/acme/tool.git")
 	wt := filepath.Join(t.TempDir(), "tool-42")
@@ -104,14 +105,16 @@ func TestBranchWorktreeDeletedByHand(t *testing.T) {
 	unmounted := filepath.Join(t.TempDir(), "Volumes", "Ext")
 	other := filepath.Join(unmounted, "tool-43")
 	git(t, clone, "worktree", "add", "-q", "-b", "other", other)
+	scratch := filepath.Join(t.TempDir(), "session", "scratchpad")
+	tmp := filepath.Join(scratch, "tool-44")
+	git(t, clone, "worktree", "add", "-q", "-b", "temp", tmp)
 	if got := BranchWorktree(clone, "feat"); got == "" {
 		t.Fatal("worktree not found")
 	}
-	if err := os.RemoveAll(wt); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(unmounted); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{wt, unmounted, filepath.Dir(scratch)} {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
 	listed := func() string {
 		out, _ := exec.Command("git", "-C", clone, "worktree", "list").Output()
@@ -125,10 +128,12 @@ func TestBranchWorktreeDeletedByHand(t *testing.T) {
 	}
 	DropMissingWorktree(clone, "feat")
 	DropMissingWorktree(clone, "other")
-	if l := listed(); strings.Contains(l, "tool-42") || !strings.Contains(l, "tool-43") {
+	DropMissingWorktree(clone, "temp")
+	if l := listed(); strings.Contains(l, "tool-42") || !strings.Contains(l, "tool-43") || strings.Contains(l, "tool-44") {
 		t.Errorf("after DropMissingWorktree:\n%s", l)
 	}
 	git(t, clone, "checkout", "-q", "feat")
+	git(t, clone, "checkout", "-q", "temp")
 }
 
 func TestOwnBranch(t *testing.T) {

@@ -55,8 +55,12 @@ func New(cfg *config.Config) *Backend {
 	return b
 }
 
-func (b *Backend) Config() *config.Config { return b.cfg }
-func (b *Backend) Viewer() string         { return "you" }
+func (b *Backend) Config() *config.Config {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cfg
+}
+func (b *Backend) Viewer() string { return "you" }
 
 func (b *Backend) match(query string) []github.PR {
 	want := ""
@@ -200,7 +204,7 @@ func (b *Backend) ResolveFolder(pr github.PR, wantWorktree bool) (core.Folder, e
 		return core.Folder{}, fmt.Errorf("%w of %s", core.ErrNoClone, pr.Repo)
 	}
 	if wantWorktree || b.cfg.Editor.UseWorktree() {
-		p := "~/prdeck/" + pr.Name() + "-" + strconv.Itoa(pr.Number)
+		p := strings.TrimSuffix(b.cfg.Editor.WorktreeDir, "/") + "/" + pr.Name() + "-" + strconv.Itoa(pr.Number)
 		f := core.Folder{Path: p, Clone: c.path, Remote: "origin", Worktree: true, Exists: b.worktrees[p]}
 		if f.Exists {
 			f.Branch = pr.HeadRefName
@@ -260,6 +264,20 @@ func (b *Backend) SetClonePath(repo, path string) (string, error) {
 	defer b.mu.Unlock()
 	b.clones[repo] = &clone{path: config.ShortenHome(config.ExpandHome(path)), branch: "main"}
 	return "", nil
+}
+
+// SetWorktreeDir changes where new worktrees go, for this run only.
+func (b *Backend) SetWorktreeDir(dir string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	dir = config.ShortenHome(config.ExpandHome(strings.TrimSpace(dir)))
+	if dir == "" {
+		return "", fmt.Errorf("no folder given")
+	}
+	cfg := *b.cfg
+	cfg.Editor.WorktreeDir = dir
+	b.cfg = &cfg
+	return dir, nil
 }
 
 func (b *Backend) ClonePath(repo string) string {

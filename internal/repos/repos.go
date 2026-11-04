@@ -207,10 +207,10 @@ func branchWorktree(clone, branch string) string {
 }
 
 // DropMissingWorktree unregisters the worktree that has branch checked out when its
-// folder was deleted by hand: git keeps the branch reserved for it, so neither the
-// clone nor a new worktree could check the branch out. Called just before a checkout
-// needs the branch, never on selection. A worktree whose parent folder is gone too (a
-// disk that is not mounted right now) is left alone, as are locked ones.
+// folder was deleted (by hand, or with a temp folder another tool cleaned up): git keeps
+// the branch reserved for it, so neither the clone nor a new worktree could check the
+// branch out. Called just before a checkout needs the branch, never on selection. A
+// worktree on a disk that is not mounted right now is left alone, as are locked ones.
 func DropMissingWorktree(clone, branch string) {
 	path := branchWorktree(clone, branch)
 	if path == "" {
@@ -219,10 +219,31 @@ func DropMissingWorktree(clone, branch string) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		return
 	}
-	if st, err := os.Stat(filepath.Dir(path)); err != nil || !st.IsDir() {
+	if onUnmountedDisk(path) {
 		return
 	}
 	_ = exec.Command("git", "-C", clone, "worktree", "remove", "--force", path).Run()
+}
+
+// onUnmountedDisk reports whether path may be on a disk that is not mounted: the first
+// folder of it that is missing sits where disks are mounted (/Volumes/<disk>,
+// /mnt/<disk>, /media/<disk>, /media/<user>/<disk>, /run/media/<user>/<disk>).
+func onUnmountedDisk(path string) bool {
+	p := filepath.Clean(path)
+	for {
+		parent := filepath.Dir(p)
+		if parent == p {
+			return false
+		}
+		if _, err := os.Stat(parent); err == nil {
+			switch filepath.Base(parent) {
+			case "Volumes", "mnt", "media":
+				return true
+			}
+			return filepath.Base(filepath.Dir(parent)) == "media"
+		}
+		p = parent
+	}
 }
 
 // OwnBranch reports whether a fork PR whose head is branch is checked out by gh under
