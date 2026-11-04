@@ -328,7 +328,8 @@ pub fn ago_secs(s: i64) -> String {
 }
 
 pub fn short_home(p: &str) -> String {
-    match std::env::var("HOME") {
+    // Windows has no HOME (Git's sh sets one); its home is USERPROFILE, as in the core.
+    match std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
         Ok(h) if !h.is_empty() && p.starts_with(&h) => format!("~{}", &p[h.len()..]),
         _ => p.to_string(),
     }
