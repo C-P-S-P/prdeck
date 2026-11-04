@@ -19,6 +19,7 @@ type PR struct {
 	HeadRefName    string    `json:"headRefName"`
 	BaseRefName    string    `json:"baseRefName"`
 	IsCrossRepo    bool      `json:"isCrossRepository"`
+	HeadOwner      string    `json:"headOwner"`      // owner of the head repo (the fork, for a cross-repo PR)
 	Mergeable      string    `json:"mergeable"`      // MERGEABLE, CONFLICTING, UNKNOWN
 	ReviewDecision string    `json:"reviewDecision"` // APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, ""
 	Author         string    `json:"author"`

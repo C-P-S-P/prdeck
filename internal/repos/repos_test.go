@@ -93,14 +93,16 @@ func TestWorktreePath(t *testing.T) {
 	}
 }
 
-// A worktree folder deleted by hand is still registered with git. It must not be
-// used, and must not keep its branch from being checked out again.
+// A worktree folder deleted by hand is still registered with git. BranchWorktree must
+// not use it, and must change nothing (it runs on every selection); DropMissingWorktree,
+// run before a checkout, frees the branch, but leaves a worktree on a disk that is not
+// mounted right now (its parent folder is gone too) alone.
 func TestBranchWorktreeDeletedByHand(t *testing.T) {
 	clone := realClone(t, "https://github.com/acme/tool.git")
 	wt := filepath.Join(t.TempDir(), "tool-42")
 	git(t, clone, "worktree", "add", "-q", "-b", "feat", wt)
-	// Another PR's worktree, on a disk that is not mounted now: it must stay registered.
-	other := filepath.Join(t.TempDir(), "tool-43")
+	unmounted := filepath.Join(t.TempDir(), "Volumes", "Ext")
+	other := filepath.Join(unmounted, "tool-43")
 	git(t, clone, "worktree", "add", "-q", "-b", "other", other)
 	if got := BranchWorktree(clone, "feat"); got == "" {
 		t.Fatal("worktree not found")
@@ -108,14 +110,23 @@ func TestBranchWorktreeDeletedByHand(t *testing.T) {
 	if err := os.RemoveAll(wt); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.RemoveAll(other); err != nil {
+	if err := os.RemoveAll(unmounted); err != nil {
 		t.Fatal(err)
+	}
+	listed := func() string {
+		out, _ := exec.Command("git", "-C", clone, "worktree", "list").Output()
+		return string(out)
 	}
 	if got := BranchWorktree(clone, "feat"); got != "" {
 		t.Errorf("BranchWorktree = %q, a folder that is gone", got)
 	}
-	if out, _ := exec.Command("git", "-C", clone, "worktree", "list").Output(); !strings.Contains(string(out), "tool-43") {
-		t.Errorf("another missing worktree was dropped too:\n%s", out)
+	if !strings.Contains(listed(), "tool-42") {
+		t.Error("BranchWorktree unregistered a worktree; looking up must change nothing")
+	}
+	DropMissingWorktree(clone, "feat")
+	DropMissingWorktree(clone, "other")
+	if l := listed(); strings.Contains(l, "tool-42") || !strings.Contains(l, "tool-43") {
+		t.Errorf("after DropMissingWorktree:\n%s", l)
 	}
 	git(t, clone, "checkout", "-q", "feat")
 }

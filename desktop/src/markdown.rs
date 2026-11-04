@@ -135,9 +135,10 @@ fn decode(bytes: Vec<u8>, kind: &str) -> Option<Arc<Image>> {
     } else if b.starts_with(b"GIF8") {
         // GPUI decodes every frame of a GIF at the full screen size with no memory
         // limit, so a few KB can ask for many GB. Nothing over 16384 px a side can be
-        // drawn, and 2^31 pixels (8 GB) still fits long screen recordings.
+        // drawn, and frames are capped at 2^28 pixels in all (1 GB decoded): a 720p
+        // recording of ~290 frames, or 1080p of ~130, still shows.
         let (w, h, frames) = gif_size(b)?;
-        if w > 16384 || h > 16384 || w * h * frames > 1 << 31 {
+        if w > 16384 || h > 16384 || w * h * frames > MAX_PIXELS {
             return None;
         }
         ImageFormat::Gif
@@ -148,7 +149,7 @@ fn decode(bytes: Vec<u8>, kind: &str) -> Option<Arc<Image>> {
     } else if b.starts_with(b"II*\0") || b.starts_with(b"MM\0*") {
         ImageFormat::Tiff
     } else if kind.contains("svg") || head.starts_with("<svg") || head.starts_with("<?xml") {
-        if reads_local_files(b) {
+        if reads_local_files(b) || svg_too_big(b) {
             return None;
         }
         ImageFormat::Svg
@@ -200,6 +201,27 @@ fn gif_size(b: &[u8]) -> Option<(u64, u64, u64)> {
         }
     }
     (b.get(i) == Some(&0x3b)).then_some((w as u64, h as u64, frames))
+}
+
+/// Decoded pixels one image may take: 2^28, 1 GB as RGBA.
+const MAX_PIXELS: u64 = 1 << 28;
+
+/// Whether an SVG says it is too big to draw: GPUI renders it at its own size (times
+/// the screen's scale) with no limit, so `width="60000" height="60000"` in a few bytes
+/// would ask for tens of GB. 4096 x 4096 (64 MB, four times that on a Retina screen)
+/// is far above any diagram or badge.
+fn svg_too_big(b: &[u8]) -> bool {
+    let opts = usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver { resolve_data: Box::new(|_, _, _| None), resolve_string: Box::new(|_, _| None) },
+        ..Default::default()
+    };
+    match usvg::Tree::from_data(b, &opts) {
+        Ok(tree) => {
+            let (w, h) = (tree.size().width() as f64, tree.size().height() as f64);
+            w > 16384. || h > 16384. || w * h > (1u64 << 24) as f64
+        }
+        Err(_) => false, // GPUI can't draw it either
+    }
 }
 
 /// Whether an SVG has an image whose href is a file on this Mac. GPUI draws SVGs with
@@ -461,7 +483,9 @@ mod tests {
     fn gifs_too_big_to_decode_are_refused() {
         assert_eq!(gif_size(&gif(4000, 4000, 300)), Some((4000, 4000, 300)));
         assert!(decode(gif(1, 1, 1), "image/gif").is_some());
-        assert!(decode(gif(1920, 1080, 500), "image/gif").is_some());
+        assert!(decode(gif(1280, 720, 290), "image/gif").is_some());
+        // A 20 KB file asking for 1080p x 500 frames (4 GB decoded) is refused.
+        assert!(decode(gif(1920, 1080, 500), "image/gif").is_none());
         assert!(decode(gif(4000, 4000, 300), "image/gif").is_none());
         assert!(decode(gif(20000, 10, 1), "image/gif").is_none());
     }
@@ -507,6 +531,17 @@ mod tests {
         // '%' then a character of more than one byte used to panic.
         assert_eq!(percent_decode("%a\u{e9}x"), "%a\u{e9}x");
         assert_eq!(percent_decode("100%\u{2713}"), "100%\u{2713}");
+    }
+
+    #[test]
+    fn svgs_too_big_to_draw_are_refused() {
+        let svg = |w: u32, h: u32| format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"/>"#);
+        assert!(decode(svg(60000, 60000).into_bytes(), "image/svg+xml").is_none());
+        assert!(data_url(&format!("data:image/svg+xml,{}", svg(60000, 60000))).is_none());
+        assert!(decode(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100000 100000"/>"#.as_bytes().to_vec(), "image/svg+xml").is_none());
+        for (w, h) in [(88, 20), (1200, 800), (4096, 4096)] {
+            assert!(decode(svg(w, h).into_bytes(), "image/svg+xml").is_some(), "{w}x{h}");
+        }
     }
 
     #[test]

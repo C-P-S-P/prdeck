@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MasterPushers/prdeck/internal/cache"
@@ -23,12 +24,16 @@ import (
 )
 
 type Service struct {
-	cfg     *config.Config
+	// cfg is replaced, never changed in place (Reload, SetClonePath), so a *Config
+	// read from it can be used without a lock.
+	cfg     atomic.Pointer[config.Config]
 	cfgPath string
 	cache   *cache.Cache
 
 	ghMu sync.RWMutex
 	gh   *github.Client // nil until the user signs in to GitHub
+
+	cfgMu sync.Mutex // one config change at a time
 
 	mu    sync.RWMutex
 	index *repos.Index
@@ -47,22 +52,23 @@ var ErrSignedOut = errors.New("not signed in to GitHub; run `gh auth login`")
 // New wires the service. cfgPath is where SetClonePath saves repo paths. gh may be
 // nil when nobody is signed in yet; Connect picks the login up later.
 func New(cfg *config.Config, cfgPath string, gh *github.Client, c *cache.Cache) *Service {
-	s := &Service{cfg: cfg, cfgPath: cfgPath, gh: gh, cache: c}
+	s := &Service{cfgPath: cfgPath, gh: gh, cache: c}
+	s.cfg.Store(cfg)
 	s.Rescan()
 	return s
 }
 
-func (s *Service) Config() *config.Config { return s.cfg }
+// Config is the config now. Keep the pointer for a whole request rather than calling
+// Config again: Reload may swap it in between.
+func (s *Service) Config() *config.Config { return s.cfg.Load() }
 
 // Viewer is the signed-in GitHub login, as last seen by a search.
 func (s *Service) Viewer() string { return s.cache.Viewer() }
 
 // Rescan rebuilds the map of local clones.
 func (s *Service) Rescan() {
-	s.mu.RLock()
-	scan, paths := s.cfg.Repos.Scan, s.cfg.Repos.Paths
-	s.mu.RUnlock()
-	ix := repos.Build(scan, paths)
+	cfg := s.Config()
+	ix := repos.Build(cfg.Repos.Scan, cfg.Repos.Paths)
 	s.mu.Lock()
 	s.index = ix
 	s.mu.Unlock()
@@ -83,7 +89,7 @@ func (s *Service) Search(ctx context.Context, query string) ([]github.PR, error)
 	if gh == nil {
 		return nil, ErrSignedOut
 	}
-	prs, viewer, err := gh.Search(ctx, query, s.cfg.GitHub.Limit)
+	prs, viewer, err := gh.Search(ctx, query, s.Config().GitHub.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -215,9 +221,9 @@ func (s *Service) Reload() error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	*s.cfg = *cfg
-	s.mu.Unlock()
+	s.cfgMu.Lock()
+	s.cfg.Store(cfg)
+	s.cfgMu.Unlock()
 	s.Rescan()
 	s.diskMu.Lock()
 	s.disk = nil
@@ -243,8 +249,8 @@ type Folder struct {
 	OwnBranch bool `json:"ownBranch"`
 }
 
-// ResolveFolder finds where commands for pr run, without changing anything (it only
-// drops a worktree of the PR whose folder was deleted). Commands run in the user's
+// ResolveFolder finds where commands for pr run, without changing anything. It runs
+// whenever a PR is selected. Commands run in the user's
 // clone, or in a worktree that already has the PR's branch. A new worktree is planned
 // only when asked for (wantWorktree) or turned on in config.
 func (s *Service) ResolveFolder(pr github.PR, wantWorktree bool) (Folder, error) {
@@ -254,16 +260,21 @@ func (s *Service) ResolveFolder(pr github.PR, wantWorktree bool) (Folder, error)
 	}
 	f := Folder{Path: c.Path, Clone: c.Path, Remote: c.Remote, Exists: true}
 	f.OwnBranch = pr.IsCrossRepo && repos.OwnBranch(c.Path, c.Remote, pr.Repo, pr.HeadRefName)
-	if p := repos.BranchWorktree(c.Path, pr.HeadRefName); p != "" && !f.OwnBranch {
-		f.Path, f.Worktree = p, p != c.Path
-	} else if wantWorktree || s.cfg.Editor.UseWorktree() {
-		dir := s.cfg.Editor.WorktreeDir
+	cfg := s.Config()
+	have := ""
+	if local := LocalBranch(pr, f); local != "" {
+		have = repos.BranchWorktree(c.Path, local)
+	}
+	if have != "" {
+		f.Path, f.Worktree = have, have != c.Path
+	} else if wantWorktree || cfg.Editor.UseWorktree() {
+		dir := cfg.Editor.WorktreeDir
 		f.Path, f.Worktree = repos.WorktreePath(dir, pr.Repo, pr.Number), true
 		st, err := os.Stat(f.Path)
 		if err == nil && st.IsDir() && !repos.SameClone(f.Path, c.Path) {
 			// <name>-<number> is taken by another repo of the same name (another org's
-			// api): use <owner>-<name>-<number>. WorktreePath drops what is before the "/".
-			f.Path = repos.WorktreePath(dir, "/"+pr.Owner()+"-"+pr.Name(), pr.Number)
+			// api): use <owner>-<name>-<number>.
+			f.Path = repos.WorktreePathFor(dir, pr.Owner()+"-"+pr.Name(), pr.Number)
 			st, err = os.Stat(f.Path)
 		}
 		f.Exists = err == nil && st.IsDir()
@@ -280,6 +291,11 @@ func (s *Service) ResolveFolder(pr github.PR, wantWorktree bool) (Folder, error)
 // needed, then run its Pre commands (stash or drop changes, check out the branch).
 func (s *Service) Setup(ctx context.Context, p Plan) (string, error) {
 	var log []string
+	// A worktree of the PR's branch deleted by hand still holds the branch; drop it
+	// now that a checkout needs the branch (never on mere selection).
+	if b := LocalBranch(p.PR, p.Folder); b != "" && p.Folder.Clone != "" && (p.Pre != "" || (p.Folder.Worktree && !p.Folder.Exists)) {
+		repos.DropMissingWorktree(p.Folder.Clone, b)
+	}
 	if p.Folder.Worktree && !p.Folder.Exists && p.Action != "browse" && p.Action != "clone" {
 		out, err := s.createWorktree(ctx, p.PR, p.Folder)
 		if out != "" {
@@ -343,39 +359,40 @@ func (s *Service) Execute(ctx context.Context, p Plan) Result {
 	}
 	if p.Action == "open" {
 		c := runner.Command(context.Background(), p.Script, p.Dir(), true)
-		// The output goes to a file, not a pipe, so an editor left running never keeps
-		// Wait from returning. A command that fails at once (no such editor) is reported.
-		tmp, _ := os.CreateTemp("", "prdeck-open-*")
-		output := func() string { // reads and closes the file
-			if tmp == nil {
-				return ""
-			}
-			defer tmp.Close()
-			b, _ := io.ReadAll(io.NewSectionReader(tmp, 0, 1<<20))
-			return strings.TrimRight(string(b), "\n")
-		}
-		if tmp != nil {
-			c.Stdout, c.Stderr = tmp, tmp
-			// The editor keeps the file open, so its name can go on return: nothing is
-			// left behind when prdeck quits before the editor does.
-			defer os.Remove(tmp.Name())
+		// The output goes to our own pipe (an *os.File, so Wait never waits on it), read
+		// by a goroutine that keeps the first 64 KB and drops the rest: an editor left
+		// running can log for as long as it likes without filling memory or disk. A
+		// command that fails at once (no such editor) is reported with its output.
+		var out cappedBuffer
+		copied := make(chan struct{})
+		if r, w, err := os.Pipe(); err == nil {
+			c.Stdout, c.Stderr = w, w
+			defer w.Close() // the editor has its own copy
+			go func() {
+				_, _ = io.Copy(&out, r)
+				r.Close()
+				close(copied)
+			}()
+		} else {
+			close(copied)
 		}
 		if err := c.Start(); err != nil {
-			output()
 			return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
 		}
-		var out string
 		done := make(chan error, 1)
-		go func() {
-			err := c.Wait()
-			out = output()
-			done <- err
-		}()
+		go func() { done <- c.Wait() }()
 		select {
 		case err := <-done:
 			if err != nil {
-				if out != "" {
-					log = append(log, out)
+				if w, ok := c.Stdout.(*os.File); ok {
+					w.Close() // so the copy ends once the editor's children let go too
+				}
+				select {
+				case <-copied:
+				case <-time.After(200 * time.Millisecond):
+				}
+				if s := strings.TrimRight(out.String(), "\n"); s != "" {
+					log = append(log, s)
 				}
 				return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
 			}
@@ -431,9 +448,8 @@ func (s *Service) ListClones(ctx context.Context) []repos.DiskClone {
 		return nil
 	}
 	roots := []string{home, filepath.Join(home, "go", "src", "github.com")}
-	s.mu.RLock()
-	scan, paths := s.cfg.Repos.Scan, s.cfg.Repos.Paths
-	s.mu.RUnlock()
+	cfg := s.Config()
+	scan, paths := cfg.Repos.Scan, cfg.Repos.Paths
 	for _, d := range scan {
 		roots = append(roots, config.ExpandHome(d))
 	}
@@ -475,15 +491,16 @@ func (s *Service) SetClonePath(repo, path string) (string, error) {
 	if err := config.SaveRepoPath(s.cfgPath, repo, top); err != nil {
 		return "", fmt.Errorf("saving to config: %w", err)
 	}
-	// A new map, not an edit: Rescan and ListClones may still be reading the old one.
-	s.mu.Lock()
-	paths := maps.Clone(s.cfg.Repos.Paths)
-	if paths == nil {
-		paths = map[string]string{}
+	// A new config with a new map, not an edit: requests in flight keep the old one.
+	s.cfgMu.Lock()
+	cfg := *s.Config()
+	cfg.Repos.Paths = maps.Clone(cfg.Repos.Paths)
+	if cfg.Repos.Paths == nil {
+		cfg.Repos.Paths = map[string]string{}
 	}
-	paths[repo] = top
-	s.cfg.Repos.Paths = paths
-	s.mu.Unlock()
+	cfg.Repos.Paths[repo] = top
+	s.cfg.Store(&cfg)
+	s.cfgMu.Unlock()
 	s.Rescan()
 	s.diskMu.Lock()
 	s.disk = nil // pick up a clone that was outside the last scan
@@ -508,4 +525,26 @@ func contains(l []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// cappedBuffer keeps the first 64 KB written to it and drops the rest. It is safe for
+// one writer and readers on other goroutines.
+type cappedBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if room := 64<<10 - len(c.b); room > 0 {
+		c.b = append(c.b, p[:min(len(p), room)]...)
+	}
+	return len(p), nil
+}
+
+func (c *cappedBuffer) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return string(c.b)
 }

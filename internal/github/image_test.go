@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,9 +44,6 @@ func TestTokenNeverOverPlainHTTP(t *testing.T) {
 }
 
 func TestPRImagesNeverReachThisMachine(t *testing.T) {
-	if os.Getenv("HTTPS_PROXY")+os.Getenv("https_proxy")+os.Getenv("HTTP_PROXY")+os.Getenv("http_proxy") != "" {
-		t.Skip("a proxy is set, so the proxy does the dialing")
-	}
 	var hit atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit.Store(true) }))
 	defer srv.Close()
@@ -66,5 +62,23 @@ func TestGitHubImagesShareOneLoggedInClient(t *testing.T) {
 	}
 	if hc.CheckRedirect == nil || hc.Timeout != 30*time.Second {
 		t.Error("the logged-in client lost its redirect policy or timeout")
+	}
+}
+
+// With a proxy set, loopback requests still never go out: Go dials them directly
+// (it never proxies localhost), so the guard must stay on. Only the proxy's own
+// address may be dialed.
+func TestProxyDoesNotTurnOffTheLocalGuard(t *testing.T) {
+	var hit atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit.Store(true) }))
+	defer srv.Close()
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	client := &http.Client{Transport: imageTransport()}
+	if _, _, err := fetch(context.Background(), client, srv.URL+"/x.png"); err == nil || hit.Load() {
+		t.Fatalf("reached %s through the image client with a proxy set (err=%v)", srv.URL, err)
+	}
+	if !proxyAddrs()["127.0.0.1:1"] {
+		t.Errorf("proxy address not allowed: %v", proxyAddrs())
 	}
 }

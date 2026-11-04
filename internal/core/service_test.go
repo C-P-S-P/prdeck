@@ -203,3 +203,54 @@ func TestWorktreeOfSameNamedRepo(t *testing.T) {
 		}
 	}
 }
+
+// Every placeholder the config knows (and warns about when quoted) is filled, and
+// nothing is filled that the config does not know.
+func TestPlaceholdersMatchConfig(t *testing.T) {
+	got := values(github.PR{}, Folder{}, "")
+	if len(got) != len(config.Placeholders) {
+		t.Errorf("values fills %d placeholders, config lists %d", len(got), len(config.Placeholders))
+	}
+	for _, p := range config.Placeholders {
+		if _, ok := got[p]; !ok {
+			t.Errorf("config lists {%s} but values does not fill it", p)
+		}
+	}
+}
+
+// A fork PR from the base's default branch is checked out by gh as <owner>/main. On
+// that branch, prdeck is on the PR: no checkout, and edits are not "in the way".
+// On the user's own main, it must switch.
+func TestForkPRFromMainCountsAsCheckedOut(t *testing.T) {
+	cfg := config.Default()
+	push := config.Command{Name: "Push", Key: "p", Run: "git push", Branch: true}
+	pr := github.PR{Number: 7, Repo: "acme/api", URL: "https://github.com/acme/api/pull/7", HeadRefName: "main", HeadOwner: "rdavis", IsCrossRepo: true}
+	on := Folder{Path: "/x", Clone: "/x", Exists: true, OwnBranch: true, Branch: "rdavis/main", Changes: []string{" M a.go"}}
+	p, err := BuildPlan(cfg, push, pr, on, "")
+	if err != nil || p.Pre != "" || len(p.Changes) != 0 {
+		t.Errorf("on rdavis/main: pre=%q changes=%v err=%v", p.Pre, p.Changes, err)
+	}
+	own := on
+	own.Branch = "main"
+	if p, _ := BuildPlan(cfg, push, pr, own, ""); !strings.Contains(p.Pre, "gh pr checkout") || len(p.Changes) == 0 {
+		t.Errorf("on the user's own main: pre=%q changes=%v", p.Pre, p.Changes)
+	}
+	pr.HeadOwner = "" // an older cached PR: the local name is unknown, so always check out
+	if p, _ := BuildPlan(cfg, push, pr, on, ""); !strings.Contains(p.Pre, "gh pr checkout") {
+		t.Errorf("without the head owner: pre=%q", p.Pre)
+	}
+}
+
+func TestCappedBufferKeepsTheStart(t *testing.T) {
+	var b cappedBuffer
+	big := strings.Repeat("x", 100<<10)
+	if n, _ := b.Write([]byte("start ")); n != 6 {
+		t.Fatal(n)
+	}
+	if n, _ := b.Write([]byte(big)); n != len(big) {
+		t.Errorf("Write reported %d of %d bytes", n, len(big))
+	}
+	if s := b.String(); len(s) != 64<<10 || !strings.HasPrefix(s, "start ") {
+		t.Errorf("kept %d bytes", len(s))
+	}
+}

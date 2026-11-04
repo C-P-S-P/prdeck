@@ -150,6 +150,11 @@ var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 // never the branch name, so a branch like "../../x" cannot escape the folder.
 func WorktreePath(dir, repo string, number int) string {
 	_, name, _ := strings.Cut(repo, "/")
+	return WorktreePathFor(dir, name, number)
+}
+
+// WorktreePathFor is the worktree folder named <name>-<number> in dir.
+func WorktreePathFor(dir, name string, number int) string {
 	name = strings.Trim(unsafeChars.ReplaceAllString(name, "-"), ".-")
 	if name == "" {
 		name = "repo"
@@ -173,12 +178,18 @@ func commonDir(dir string) string {
 	return p
 }
 
-// BranchWorktree returns the worktree (or the clone itself) that has branch checked out.
-// A worktree whose folder was deleted by hand is still registered with git and keeps
-// the branch from being checked out anywhere else, so it is removed and "" returned.
-// Only that one: `git worktree prune` would also drop worktrees on a disk that is not
-// mounted right now.
+// BranchWorktree returns the worktree (or the clone itself) that has branch checked out,
+// or "" when there is none or its folder is gone. It changes nothing: it runs whenever
+// a PR is selected.
 func BranchWorktree(clone, branch string) string {
+	path := branchWorktree(clone, branch)
+	if st, err := os.Stat(path); path == "" || err != nil || !st.IsDir() {
+		return ""
+	}
+	return path
+}
+
+func branchWorktree(clone, branch string) string {
 	out, err := exec.Command("git", "-C", clone, "worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return ""
@@ -189,14 +200,29 @@ func BranchWorktree(clone, branch string) string {
 		case strings.HasPrefix(line, "worktree "):
 			path = strings.TrimPrefix(line, "worktree ")
 		case line == "branch refs/heads/"+branch:
-			if st, err := os.Stat(path); err != nil || !st.IsDir() {
-				_ = exec.Command("git", "-C", clone, "worktree", "remove", "--force", path).Run()
-				return ""
-			}
 			return path
 		}
 	}
 	return ""
+}
+
+// DropMissingWorktree unregisters the worktree that has branch checked out when its
+// folder was deleted by hand: git keeps the branch reserved for it, so neither the
+// clone nor a new worktree could check the branch out. Called just before a checkout
+// needs the branch, never on selection. A worktree whose parent folder is gone too (a
+// disk that is not mounted right now) is left alone, as are locked ones.
+func DropMissingWorktree(clone, branch string) {
+	path := branchWorktree(clone, branch)
+	if path == "" {
+		return
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		return
+	}
+	if st, err := os.Stat(filepath.Dir(path)); err != nil || !st.IsDir() {
+		return
+	}
+	_ = exec.Command("git", "-C", clone, "worktree", "remove", "--force", path).Run()
 }
 
 // OwnBranch reports whether a fork PR whose head is branch is checked out by gh under
@@ -204,27 +230,85 @@ func BranchWorktree(clone, branch string) string {
 // gh does that when branch is the base repo's default branch and no remote points at
 // the fork. That is only certain when the remote's HEAD names branch and every remote
 // points at repo, the base.
+//
+// It runs on every PR selection, so it reads the clone's files where it can instead of
+// starting git: .git/refs/remotes/<remote>/HEAD and .git/config.
 func OwnBranch(clone, remote, repo, branch string) bool {
-	out, err := exec.Command("git", "-C", clone, "symbolic-ref", "--short", "refs/remotes/"+remote+"/HEAD").Output()
-	if err != nil || strings.TrimSpace(string(out)) != remote+"/"+branch {
+	if remoteHead(clone, remote) != remote+"/"+branch {
 		return false
 	}
-	out, err = exec.Command("git", "-C", clone, "remote", "-v").Output()
-	if err != nil {
+	urls := remoteURLs(clone)
+	if len(urls) == 0 {
 		return false
 	}
-	n := 0
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 0 || f[len(f)-1] != "(fetch)" {
-			continue
-		}
-		if r, ok := ParseRemote(f[1]); len(f) != 3 || !ok || !strings.EqualFold(r, repo) {
+	for _, u := range urls {
+		if r, ok := ParseRemote(u); !ok || !strings.EqualFold(r, repo) {
 			return false
 		}
-		n++
 	}
-	return n > 0
+	return true
+}
+
+// remoteHead is what refs/remotes/<remote>/HEAD points at ("origin/main"), or "".
+func remoteHead(clone, remote string) string {
+	gitDir := filepath.Join(clone, ".git")
+	if st, err := os.Stat(gitDir); err == nil && st.IsDir() {
+		b, err := os.ReadFile(filepath.Join(gitDir, "refs", "remotes", remote, "HEAD"))
+		if err != nil {
+			return ""
+		}
+		ref, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "ref: refs/remotes/")
+		if !ok {
+			return ""
+		}
+		return ref
+	}
+	out, err := exec.Command("git", "-C", clone, "symbolic-ref", "--short", "refs/remotes/"+remote+"/HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// remoteURLs is every remote's fetch URL, by name.
+func remoteURLs(clone string) map[string]string {
+	urls := map[string]string{}
+	gitDir := filepath.Join(clone, ".git")
+	if st, err := os.Stat(gitDir); err == nil && st.IsDir() {
+		f, err := os.Open(filepath.Join(gitDir, "config"))
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		current := ""
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if strings.HasPrefix(line, "[") {
+				current = ""
+				if m := remoteHeader.FindStringSubmatch(line); m != nil {
+					current = m[1]
+				}
+				continue
+			}
+			if k, v, ok := strings.Cut(line, "="); ok && current != "" && strings.TrimSpace(k) == "url" {
+				if _, seen := urls[current]; !seen {
+					urls[current] = strings.TrimSpace(v)
+				}
+			}
+		}
+		return urls
+	}
+	out, err := exec.Command("git", "-C", clone, "remote", "-v").Output()
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if f := strings.Fields(line); len(f) == 3 && f[2] == "(fetch)" {
+			urls[f[0]] = f[1]
+		}
+	}
+	return urls
 }
 
 // CurrentBranch returns the checked-out branch, or "HEAD" when detached (mid-rebase).

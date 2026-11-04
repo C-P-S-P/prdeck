@@ -729,3 +729,19 @@ func TestTerminalCommandGetsTheTerminal(t *testing.T) {
 		t.Error("a stdout the command set itself was replaced")
 	}
 }
+
+// A terminal command replaced by a newer one while its setup ran must not take over
+// the terminal when that setup finishes; the newer one's setup still runs it.
+func TestReplacedTerminalCommandNeverRuns(t *testing.T) {
+	_, m := newTest(t)
+	m.runID = 2
+	old := preparedMsg{id: 1, plan: core.Plan{Title: "nvim", Terminal: true}}
+	if _, cmd := m.Update(old); cmd != nil {
+		t.Error("a replaced command's setup started it anyway")
+	}
+	m.running = "Run tests"
+	nm, cmd := m.Update(preparedMsg{id: 2, plan: core.Plan{Title: "Run tests", Terminal: true}})
+	if cmd == nil || nm.(Model).running != "" {
+		t.Errorf("the current command did not run (running=%q)", nm.(Model).running)
+	}
+}

@@ -339,8 +339,12 @@ func (c *Config) validate() {
 	}
 }
 
-// fills matches, at its start, a placeholder that commands fill (see DefaultCommands).
-var fills = regexp.MustCompile(`^\{(number|branch|base|repo|owner|name|title|author|url|remote|path|input)\}`)
+// Placeholders are the {names} a run line can use; core fills each of them (a test
+// there keeps the two in step).
+var Placeholders = []string{"number", "branch", "base", "repo", "owner", "name", "title", "author", "url", "remote", "path", "input"}
+
+// fills matches, at its start, a placeholder that commands fill.
+var fills = regexp.MustCompile(`^\{(` + strings.Join(Placeholders, "|") + `)\}`)
 
 // quotedPlaceholder returns the first placeholder that run puts inside '...' or "...",
 // or "". Values are shell-quoted already, and quoting them again turns the quotes

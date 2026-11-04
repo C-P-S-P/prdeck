@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,21 +26,55 @@ var plainHTTP = &http.Client{Timeout: 30 * time.Second, Transport: imageTranspor
 // imageTransport is Go's default transport, except that it never connects to this
 // machine or its link-local network: anyone who can comment could otherwise make
 // opening a PR send GET requests to local servers (github.com proxies images, so
-// they cannot show there either). With a proxy set, the proxy does the dialing.
+// they cannot show there either). The one local address it does dial is a proxy set
+// in the environment (often on localhost); Go never sends loopback requests through
+// a proxy, so those are still checked here.
 func imageTransport() *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	if os.Getenv("HTTPS_PROXY")+os.Getenv("https_proxy")+os.Getenv("HTTP_PROXY")+os.Getenv("http_proxy") != "" {
-		return t // the proxy is often on localhost
-	}
+	proxies := sync.OnceValue(proxyAddrs)
 	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: func(_, addr string, _ syscall.RawConn) error {
 		host, _, _ := net.SplitHostPort(addr)
-		if ip, err := netip.ParseAddr(host); err == nil && (ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
-			return fmt.Errorf("%s is a local address", host)
+		ip, err := netip.ParseAddr(host)
+		if err != nil || !(ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
+			return nil
 		}
-		return nil
+		if proxies()[addr] {
+			return nil
+		}
+		return fmt.Errorf("%s is a local address", host)
 	}}
 	t.DialContext = d.DialContext
 	return t
+}
+
+// proxyAddrs are the addresses ("127.0.0.1:3128") of the proxies set in the environment.
+func proxyAddrs() map[string]bool {
+	out := map[string]bool{}
+	for _, v := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		raw := os.Getenv(v)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "://") {
+			raw = "http://" + raw
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Hostname() == "" {
+			continue
+		}
+		port := u.Port()
+		if port == "" {
+			port = map[string]string{"https": "443", "socks5": "1080", "socks5h": "1080"}[u.Scheme]
+			if port == "" {
+				port = "80"
+			}
+		}
+		ips, _ := net.LookupIP(u.Hostname())
+		for _, ip := range ips {
+			out[net.JoinHostPort(ip.String(), port)] = true
+		}
+	}
+	return out
 }
 
 // FetchImage downloads an image from a PR or comment body. Images hosted by GitHub

@@ -5,21 +5,42 @@ package runner
 import (
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
-// killGroup gives c its own process group and makes cancelling it signal the whole
-// group, so every command of the script stops, not only the shell.
-func killGroup(c *exec.Cmd) {
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+// killGrace is how long a cancelled script gets to stop on SIGTERM before SIGKILL.
+const killGrace = 3 * time.Second
+
+// killGroup starts c in a session of its own and makes cancelling it signal the whole
+// group, so every command of the script stops, not only the shell. done must be called
+// once c has finished.
+//
+// Its own session also means no controlling terminal, as a captured command should
+// have: something that would ask on /dev/tty (an ssh passphrase, an unknown host key)
+// fails at once with its own message instead of stopping in the background until
+// cancelled.
+func killGroup(c *exec.Cmd) (done func()) {
+	var finished atomic.Bool
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// After a cancel, Wait gives up on the process and its pipes after this long.
+	c.WaitDelay = killGrace + time.Second
 	c.Cancel = func() error {
-		err := syscall.Kill(-c.Process.Pid, syscall.SIGTERM)
-		// A command stopped for reading the terminal (ssh asking for a passphrase, now
-		// that it is not in the terminal's group) only gets the SIGTERM once it runs.
-		_ = syscall.Kill(-c.Process.Pid, syscall.SIGCONT)
+		pid := c.Process.Pid
+		err := syscall.Kill(-pid, syscall.SIGTERM)
+		// A stopped process only gets the SIGTERM once it runs again.
+		_ = syscall.Kill(-pid, syscall.SIGCONT)
+		// Whatever ignores SIGTERM (a trap, a slow graceful shutdown) is killed.
+		time.AfterFunc(killGrace, func() {
+			if !finished.Load() {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+			}
+		})
 		if err == syscall.ESRCH {
 			return os.ErrProcessDone // the script ended as ctx was cancelled
 		}
 		return err
 	}
+	return func() { finished.Store(true) }
 }

@@ -518,9 +518,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case preparedMsg:
-		if msg.id == m.runID {
-			m.running, m.cancel = "", nil
+		if msg.id != m.runID {
+			// Replaced by a newer command while it was being set up: never let it take
+			// over the terminal (the newer one may be on another PR).
+			return m, nil
 		}
+		m.running, m.cancel = "", nil
 		if msg.err != nil {
 			m.out = &output{title: msg.plan.Title, ok: false, lines: outputLines(msg.out, msg.err)}
 			return m, nil

@@ -55,9 +55,10 @@ func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
 // keep Run waiting on its output.
 func Run(ctx context.Context, script, dir string) (string, error) {
 	c := Command(ctx, script, dir, true)
-	killGroup(c)
+	done := killGroup(c)
 	var buf bytes.Buffer
 	c.Stdout, c.Stderr = &buf, &buf
 	err := c.Run()
+	done()
 	return strings.TrimRight(buf.String(), "\n"), err
 }

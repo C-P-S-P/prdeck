@@ -293,3 +293,17 @@ func TestHTMLBlockEntitiesRead(t *testing.T) {
 		t.Errorf("an escape reached the output: %q", out)
 	}
 }
+
+// Bidi overrides would let a suggestion show text in another order than it runs.
+func TestBidiControlsAreDropped(t *testing.T) {
+	src := "```suggestion\nrm -rf ~ ‮ # ⁦safe⁩\n```\nfamily: 👨‍👩‍👧"
+	out := ansi.Strip(Render(src, Options{Width: 60}))
+	for _, r := range []rune{'‮', '⁦', '⁩'} {
+		if strings.ContainsRune(out, r) {
+			t.Errorf("bidi control %U reached the terminal:\n%s", r, out)
+		}
+	}
+	if !strings.Contains(out, "👨‍👩‍👧") {
+		t.Errorf("zero-width joiner was dropped from an emoji:\n%s", out)
+	}
+}

@@ -71,6 +71,9 @@ pub struct Pr {
     pub base: String,
     #[serde(rename = "isCrossRepository")]
     pub cross_repo: bool,
+    /// Owner of the head repo (the fork); sent back so the core knows the local branch name.
+    #[serde(rename = "headOwner")]
+    pub head_owner: String,
     pub mergeable: String,
     #[serde(rename = "reviewDecision")]
     pub review_decision: String,

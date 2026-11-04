@@ -75,7 +75,7 @@ const searchQuery = `query PRDeckSearch($q: String!, $n: Int!) {
     nodes {
       ... on PullRequest {
         number title url isDraft state updatedAt createdAt
-        headRefName baseRefName isCrossRepository mergeable reviewDecision
+        headRefName baseRefName isCrossRepository headRepositoryOwner { login } mergeable reviewDecision
         author { login }
         repository { nameWithOwner }
         comments { totalCount }
@@ -100,6 +100,7 @@ type prNode struct {
 	HeadRefName    string    `json:"headRefName"`
 	BaseRefName    string    `json:"baseRefName"`
 	IsCrossRepo    bool      `json:"isCrossRepository"`
+	HeadOwner      *login    `json:"headRepositoryOwner"`
 	Mergeable      string    `json:"mergeable"`
 	ReviewDecision string    `json:"reviewDecision"`
 	Author         *login    `json:"author"`
@@ -124,7 +125,7 @@ func (n prNode) toPR() PR {
 	p := PR{
 		Number: n.Number, Title: n.Title, URL: n.URL, IsDraft: n.IsDraft, State: n.State,
 		UpdatedAt: n.UpdatedAt, CreatedAt: n.CreatedAt, HeadRefName: n.HeadRefName, BaseRefName: n.BaseRefName,
-		IsCrossRepo: n.IsCrossRepo, Mergeable: n.Mergeable, ReviewDecision: n.ReviewDecision,
+		IsCrossRepo: n.IsCrossRepo, HeadOwner: loginOf(n.HeadOwner), Mergeable: n.Mergeable, ReviewDecision: n.ReviewDecision,
 		Author: loginOf(n.Author), Repo: n.Repository.NameWithOwner, Comments: n.Comments.TotalCount,
 	}
 	if len(n.Commits.Nodes) > 0 && n.Commits.Nodes[0].Commit.StatusCheckRollup != nil {
@@ -175,7 +176,7 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       id number title url body isDraft state updatedAt createdAt
-      headRefName baseRefName isCrossRepository mergeable reviewDecision
+      headRefName baseRefName isCrossRepository headRepositoryOwner { login } mergeable reviewDecision
       additions deletions changedFiles
       author { login }
       repository { nameWithOwner }
