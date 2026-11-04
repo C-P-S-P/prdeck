@@ -47,6 +47,7 @@ The same window, data and keys everywhere; GPUI already draws on Windows (Direct
 - **The Windows title bar stays.** Drawing our own minimize, maximize and close there means telling Windows which pixels are buttons and which drag the window, and the clickable search box in the header sits in that area. The native bar costs a few pixels and is always right. On Linux GPUI asks for the window manager's title bar; only when it gets none does the header draw the buttons (gpui-component already draws the shadow and resize edges then).
 - **No console windows on Windows.** The release app is a Windows (GUI) program, and it starts `prdeck serve` with `CREATE_NO_WINDOW`; the git, gh and sh that the core starts share that hidden console.
 - **Fonts.** A family that is not installed makes GPUI fall back to a proportional font, so off the Mac the code font is the theme's default, which gpui-component checks against the installed fonts. The interface font is the system's (`.SystemUIFont`) everywhere.
+- **CI builds, starts and packages it** (`.github/workflows/desktop-builds.yml`, on Ubuntu and Windows): the release build, the Rust and Go tests, then the app with `--demo` for 20 seconds, and the two packages and a screenshot kept as artifacts. Hosted runners have no GPU, so Linux draws with lavapipe (Mesa's software Vulkan) under Xvfb and Windows with WARP. The check is that the app is still running and got answers from `prdeck serve`; a missing screenshot is only a warning. The packages are artifacts, not releases: nothing is signed or versioned yet.
 
 ## Consequences
 
@@ -54,7 +55,7 @@ The same window, data and keys everywhere; GPUI already draws on Windows (Direct
 - Windows needs Git for Windows. Custom commands are written for sh on every system; a command that calls a Windows-only tool still works, since sh runs `.exe` files.
 - The Linux terminal list and the Windows install folders are lists to keep up to date; a terminal that is not on the list makes a terminal editor in the desktop app fail with a clear message.
 - Windows behavior is checked by unit tests of the pure functions on every machine and by CI on Windows; the Mac keeps its old code paths, which the tests pin down.
-- The desktop app builds for Windows and Linux (`cargo check --target` from a Mac), but its windows there are checked by people and CI, not by its tests. Building it on Linux needs a C compiler, pkg-config and the fontconfig, libxkbcommon-x11 and libxcb development files; on Windows, the MSVC build tools with the Windows SDK (GPUI compiles its resource file and, for release builds, its DirectX shaders with them).
+- The desktop app builds for Windows and Linux (`cargo check --target` from a Mac), but its windows there are checked by people and by CI starting it, not by its tests. Building it on Linux needs a C compiler, pkg-config and the fontconfig, xkbcommon, xkbcommon-x11 and xcb development files (Wayland, Vulkan and EGL are loaded when the app starts); on Windows, the MSVC build tools with the Windows SDK (GPUI compiles its resource file and, for release builds, its DirectX shaders with them).
 - PR Deck has no app icon yet, on any system: the Linux launcher uses the pull request icon from the app, and the Windows exe has none.
 
 ## Alternatives considered

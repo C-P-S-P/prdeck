@@ -1,0 +1,158 @@
+# Builds, tests and starts the desktop app on Linux and Windows, and keeps the
+# packages (the tar.gz and the zip from desktop/scripts) and a screenshot of each
+# as build artifacts. Nothing is released.
+#
+# Hosted runners have no GPU, so the app draws in software: on Linux with lavapipe
+# (Mesa's Vulkan) under Xvfb, on Windows with WARP (Direct3D's). The check is that
+# the app is still running after 20 seconds and got answers from `prdeck serve`;
+# a screenshot that fails is only a warning.
+name: Desktop builds
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to the same branch or PR cancels the run still going.
+concurrency:
+  group: desktop-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      # build.rs builds the Go core next to the app.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # What GPUI links (fontconfig, xkbcommon, xcb; Wayland, Vulkan and EGL are
+      # loaded at run time; README lists the same), then for the smoke test Xvfb,
+      # the Vulkan loader with Mesa's software driver, and ImageMagick's import.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            xvfb libvulkan1 mesa-vulkan-drivers imagemagick
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - run: cargo build --release --locked
+      - name: Smoke test
+        env:
+          PRDECK_DEBUG: "1" # the app logs each reply from prdeck serve
+          RUST_BACKTRACE: "1"
+        run: |
+          Xvfb :99 -screen 0 1440x900x24 &
+          export DISPLAY=:99
+          sleep 2
+          ./target/release/prdeck-desktop --demo 2> app.log &
+          app=$!
+          sleep 20
+          import -window root linux-demo.png || echo "::warning::no screenshot"
+          if ! kill -0 "$app" 2> /dev/null; then
+            code=0
+            wait "$app" || code=$?
+            cat app.log
+            echo "::error::PR Deck quit within 20 seconds (exit code $code)"
+            exit 1
+          fi
+          kill "$app"
+          if ! grep -q '^rpc .*"result"' app.log; then
+            cat app.log
+            echo "::error::PR Deck got no answer from prdeck serve"
+            exit 1
+          fi
+      - name: Package
+        run: scripts/package-linux.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          path: desktop/dist/*.tar.gz
+          archive: false
+          overwrite: true # a re-run uploads again
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          path: desktop/linux-demo.png
+          archive: false
+          overwrite: true
+      # Tests come last, so a failing test still leaves the package and the
+      # screenshot to look at. --release reuses the build above.
+      - run: cargo test --release --locked
+      - run: go test ./...
+        working-directory: .
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The MSVC toolchain; the runner has the Build Tools and the Windows SDK,
+      # whose rc and fxc GPUI uses.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - run: cargo build --release --locked
+      - name: Smoke test
+        env:
+          PRDECK_DEBUG: "1"
+          RUST_BACKTRACE: "1"
+        run: |
+          $app = Start-Process -FilePath "$PWD\target\release\prdeck-desktop.exe" -ArgumentList '--demo' -PassThru `
+            -RedirectStandardOutput app-out.log -RedirectStandardError app.log
+          $null = $app.Handle # keeps the exit code readable after it quits
+          Start-Sleep -Seconds 20
+          try {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+            [System.Drawing.Graphics]::FromImage($bitmap).CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+            $bitmap.Save("$PWD\windows-demo.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          } catch {
+            Write-Host "::warning::no screenshot: $_"
+          }
+          if ($app.HasExited) {
+            Get-Content app.log
+            Write-Host "::error::PR Deck quit within 20 seconds (exit code $($app.ExitCode))"
+            exit 1
+          }
+          Stop-Process -Id $app.Id
+          if (-not (Select-String -Path app.log -Pattern '^rpc .*"result"' -Quiet)) {
+            Get-Content app.log
+            Write-Host "::error::PR Deck got no answer from prdeck serve"
+            exit 1
+          }
+      - name: Package
+        run: ./scripts/package-windows.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          path: desktop/dist/*.zip
+          archive: false
+          overwrite: true
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          path: desktop/windows-demo.png
+          archive: false
+          overwrite: true
+      - run: cargo test --release --locked
+      # sh for the commands is Git for Windows', which the runner has.
+      - run: go test ./...
+        working-directory: .

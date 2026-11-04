@@ -37,7 +37,7 @@ The terminal app works the same on Linux and Windows, with the same config file 
 - **Windows** needs [Git for Windows](https://gitforwindows.org) as well as `gh` (`winget install --id GitHub.cli`). Commands are shell commands, so prdeck runs them with Git for Windows' `sh.exe` (found on PATH, next to `git.exe`, or in `Program Files\Git`); write your own commands as you would on a Mac (`&&`, `$(…)`, `'quotes'`). Build with `go build -o prdeck.exe ./cmd/prdeck` and put it on your PATH. `b` opens the PR in your default browser, `y` copies to the Windows clipboard, `esc` on a running command stops everything it started, and paths can be typed as `C:\code\x` or `~\code\x`.
 - **Linux** runs commands with `/bin/sh`, opens links with `xdg-open`, and copies with `wl-copy` or `xclip`.
 
-The desktop app runs there too: see [Desktop app on Windows and Linux](#on-windows-and-linux).
+The desktop app runs there too, downloaded from CI or built yourself: see [Desktop app on Windows and Linux](#on-windows-and-linux).
 
 Why and how: [ADR 0016](docs/adr/0016-windows-and-linux.md).
 
@@ -134,8 +134,15 @@ cargo run --release             # your PRs (uses your gh login)
 
 The same app, with `Ctrl` wherever the Mac uses `⌘` (`Ctrl+K`, `Ctrl+Enter`, …; the hints in the app say so). There is no menu bar: its items are the shortcuts below, the window's title bar, and a gear at the top right that opens setup. Setup installs `gh` with winget on Windows; on Linux it shows the command for your distribution.
 
-- **Windows**: needs [Git for Windows](https://gitforwindows.org), Go, and Rust with the MSVC build tools (Visual Studio Build Tools, "Desktop development with C++"). `cargo run --release` works as above; `desktop\scripts\package-windows.ps1` builds a zip with `PR Deck.exe` and the `prdeck.exe` it starts (keep them together).
-- **Linux**: needs Go, Rust, a C compiler, `pkg-config`, and the fontconfig, libxkbcommon-x11 and libxcb development files (Debian and Ubuntu: `sudo apt install build-essential pkg-config libfontconfig-dev libxkbcommon-x11-dev libx11-xcb-dev`; Fedora: `sudo dnf install gcc gcc-c++ pkgconf fontconfig-devel libxkbcommon-x11-devel libxcb-devel`). It draws with Vulkan, or OpenGL without it, on Wayland or X11. `desktop/scripts/package-linux.sh` builds a tar.gz whose `install.sh` puts PR Deck in your applications menu.
+**Download it.** Every push to main and every pull request builds PR Deck for Windows and Linux ([Desktop builds](.github/workflows/desktop-builds.yml)): open a finished run in the repo's Actions tab, signed in to GitHub, and download the package from its artifacts, next to a screenshot of the app on each system. These are test builds, not releases. You also need `git` and the GitHub CLI (`gh`); PR Deck's setup signs you in.
+
+- **Windows**: `prdeck-desktop-<version>-windows-amd64.zip`. Install [Git for Windows](https://gitforwindows.org) (its `sh` runs PR Deck's commands), unzip anywhere and run `PR Deck.exe`, keeping `prdeck.exe` next to it. Setup installs `gh` with winget when it is missing. The exe is not signed, so Windows may ask first (More info, Run anyway).
+- **Linux**: `prdeck-desktop-<version>-linux-x86_64.tar.gz`. Install git and gh with your package manager, then `tar xzf prdeck-desktop-*-linux-x86_64.tar.gz` and run `install.sh` in the folder it makes: PR Deck appears in your applications (files go to `~/.local`). It draws with Vulkan, or OpenGL without it, on Wayland or X11.
+
+**Build it.** The same packages come from the scripts in `desktop/scripts`, into `desktop/dist`:
+
+- **Windows**: needs Git for Windows, Go, and Rust with the MSVC build tools (Visual Studio Build Tools, "Desktop development with C++"). `cargo run --release` works as above; `powershell -ExecutionPolicy Bypass -File desktop\scripts\package-windows.ps1` builds the zip.
+- **Linux**: needs Go, Rust, a C compiler, `pkg-config`, and the fontconfig, xkbcommon and xcb development files (Debian and Ubuntu: `sudo apt install build-essential pkg-config libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev`; Fedora: `sudo dnf install gcc gcc-c++ pkgconf fontconfig-devel libxkbcommon-x11-devel libxcb-devel`). `desktop/scripts/package-linux.sh` builds the tar.gz.
 
 Window sizes are saved in `%APPDATA%\prdeck` on Windows and `~/.config/prdeck` on Linux. Why and how: [ADR 0016](docs/adr/0016-windows-and-linux.md).
 
