@@ -41,6 +41,7 @@ var (
 	sBadge  = lipgloss.NewStyle().Background(cBlue).Foreground(cInk).Bold(true).Padding(0, 1)
 	sKey    = lipgloss.NewStyle().Background(cKeyBg).Foreground(cText).Padding(0, 1)
 	sKeyHot = lipgloss.NewStyle().Background(cYellow).Foreground(cInk).Padding(0, 1)
+	sNew    = lipgloss.NewStyle().Background(cBlue).Foreground(cInk).Bold(true)
 	sSel    = lipgloss.NewStyle().Background(cSelBg).Foreground(lipgloss.Color("#ffffff"))
 	sSelDim = lipgloss.NewStyle().Background(cSelDim).Foreground(cText)
 )
@@ -112,11 +113,16 @@ func ago(t time.Time) string {
 	}
 }
 
+// stateGlyph is ● for an open PR and ◌ for a draft, blue while it is unread.
 func stateGlyph(p github.PR) string {
+	g, st := "●", sGreen
 	if p.IsDraft {
-		return sDim.Render("◌")
+		g, st = "◌", sDim
 	}
-	return sGreen.Render("●")
+	if p.Unread {
+		st = sBlue
+	}
+	return st.Render(g)
 }
 
 func ciGlyph(state string) string {
@@ -162,6 +168,15 @@ func reviewWord(state string) (string, lipgloss.Style) {
 func rule(label string, w int, st lipgloss.Style) string {
 	head := "── " + label + " "
 	return st.Render(head + strings.Repeat("─", max(0, w-ansi.StringWidth(head))))
+}
+
+// eventRule is rule with a "new" tag after the label when isNew.
+func eventRule(label string, w int, st lipgloss.Style, isNew bool) string {
+	if !isNew {
+		return rule(label, w, st)
+	}
+	head, tag := "── "+label+" ", sNew.Render(" new ")+" "
+	return st.Render(head) + tag + st.Render(strings.Repeat("─", max(0, w-ansi.StringWidth(head)-ansi.StringWidth(tag))))
 }
 
 // wrapItems lays out items left to right, wrapping at w, two spaces apart.

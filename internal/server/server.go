@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -508,6 +509,7 @@ func (s *server) hello() any {
 	for name := range cfg.Editor.Editors {
 		editors = append(editors, name)
 	}
+	sort.Strings(editors) // the same order every time
 	return map[string]any{
 		"version":    s.info.Version,
 		"demo":       s.info.Demo,

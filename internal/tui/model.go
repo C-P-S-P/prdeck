@@ -70,6 +70,7 @@ type output struct {
 	ok    bool
 	lines []string
 	dir   string
+	wrap  bool // GitHub's answer to a write: wrapped, not cut, so all of it shows
 }
 
 type Model struct {
@@ -100,6 +101,12 @@ type Model struct {
 	folders  map[string]string
 	vp       viewport.Model
 	vpKey    string
+	newAt    int // the PR view's line of the first new comment, review or reply; -1 if none
+	// The PR on screen, and when you had last seen it as you opened it: loading it
+	// again while it stays on screen keeps what was new then.
+	openKey   string
+	openSince time.Time
+	start     tea.Cmd // what the first PR needs loaded; Init runs it
 
 	palette bool
 	pin     textinput.Model
@@ -164,9 +171,12 @@ func New(be Backend) Model {
 		detErr: map[string]string{}, folders: map[string]string{},
 		pin: pin, promptIn: pi, spin: sp, md: newMarkdown(),
 		vp:  viewport.New(80, 20),
-		seq: 1, loading: true,
+		seq: 1, loading: true, newAt: -1,
 	}
 	m.loadCached()
+	// The first PR is opened here, not in Init: Init works on a copy of m, so the
+	// first search would count as a second visit and drop its new tags.
+	m.start = m.selectionCmds()
 	return m
 }
 
@@ -234,13 +244,13 @@ func (c ttyCmd) SetStderr(w io.Writer) {
 	}
 }
 
-// Init starts the first search (New already counted it as m.seq).
+// Init starts the first search (New already counted it as m.seq) and loads what the
+// first PR needs.
 //
 // Throughout this file, a method that changes the model is called on its own line before
 // `return m, cmd`: Go does not fix the order between reading m and calling the method.
 func (m Model) Init() tea.Cmd {
-	sel := m.selectionCmds()
-	return tea.Batch(m.fetchSearch(m.seq), m.tick(), m.spin.Tick, sel)
+	return tea.Batch(m.fetchSearch(m.seq), m.tick(), m.spin.Tick, m.start)
 }
 
 func (m Model) tick() tea.Cmd {
@@ -356,9 +366,16 @@ func (m *Model) selectionCmds() tea.Cmd {
 		return nil
 	}
 	key := pr.Key()
+	visit := key != m.openKey // opened now, not a refresh of the PR on screen
+	if visit {
+		m.openKey, m.openSince = key, time.Time{}
+	}
+	m.markRead(key)
 	if d, fresh := m.be.CachedDetail(pr); d != nil {
-		if cur, ok := m.details[key]; !ok || cur.UpdatedAt.Before(d.UpdatedAt) {
-			m.details[key] = d
+		// Opened again, the saved copy replaces the one from your last visit, and
+		// with it that visit's new tags.
+		if cur, ok := m.details[key]; !ok || cur.UpdatedAt.Before(d.UpdatedAt) || visit && !cur.UpdatedAt.After(d.UpdatedAt) {
+			m.showDetail(key, d)
 		}
 		if fresh {
 			return m.folderCmd(pr)
@@ -368,6 +385,31 @@ func (m *Model) selectionCmds() tea.Cmd {
 		tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return wantDetailMsg{key} }),
 		m.folderCmd(pr),
 	)
+}
+
+// showDetail keeps d as the detail for key. While the PR stays on screen, a refresh,
+// CI finishing or your own comment loads it again; what was new when you opened it
+// stays tagged.
+func (m *Model) showDetail(key string, d *github.Detail) {
+	if key == m.openKey {
+		if m.openSince.IsZero() {
+			m.openSince = d.LastSeen
+		} else if m.openSince.Before(d.LastSeen) {
+			d = d.SinceSeen(m.openSince, m.be.Viewer())
+		}
+	}
+	m.details[key] = d
+	m.markRead(key)
+}
+
+// markRead clears a PR's dot: the core marks it seen when it shows its detail, which
+// may come in after the list was refreshed.
+func (m *Model) markRead(key string) {
+	for i := range m.prs {
+		if m.prs[i].Key() == key {
+			m.prs[i].Unread = false
+		}
+	}
 }
 
 func (m Model) detailCmd(pr github.PR) tea.Cmd {
@@ -465,7 +507,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok || pr.Key() != msg.key || m.fetching[msg.key] {
 			return m, nil
 		}
-		if d, ok := m.details[msg.key]; ok && !d.UpdatedAt.Before(pr.UpdatedAt) && !pr.UpdatedAt.IsZero() {
+		if d, ok := m.details[msg.key]; ok && !d.UpdatedAt.Before(pr.UpdatedAt) && !pr.UpdatedAt.IsZero() && d.CheckState == pr.CheckState {
 			return m, nil
 		}
 		m.fetching[msg.key] = true
@@ -477,7 +519,7 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detErr[msg.key] = firstLine(msg.err.Error())
 		} else {
 			delete(m.detErr, msg.key)
-			m.details[msg.key] = msg.d
+			m.showDetail(msg.key, msg.d)
 		}
 		m.vpKey = ""
 		return m, nil
@@ -496,13 +538,18 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.setFlash("✓ " + r.Plan.Title)
 			return m, cmd
 		}
-		m.out = &output{title: r.Plan.Title, ok: r.Err == nil, dir: r.Plan.Dir(), lines: outputLines(r.Output, r.Err)}
+		m.out = &output{title: r.Plan.Title, ok: r.Err == nil, dir: r.Plan.Dir(), lines: outputLines(r.Output, r.Err), wrap: core.Writes(r.Plan.Action)}
 		var cmds []tea.Cmd
 		if pr, ok := m.selected(); ok {
 			cmds = append(cmds, m.folderCmd(pr))
 		}
 		if r.Err == nil && r.Plan.Action != "open" && r.Plan.Action != "browse" {
 			cmds = append(cmds, m.searchCmd())
+		}
+		if r.Err == nil && core.Writes(r.Plan.Action) {
+			// Load the PR again, so the new review, comment or auto-merge shows.
+			m.fetching[r.Plan.PR.Key()] = true
+			cmds = append(cmds, m.detailCmd(r.Plan.PR))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -647,6 +694,32 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startCommand(&cmd, "")
 		}
 	}
+	if key == "n" { // after the commands, so one of yours on n still wins
+		return m.jumpToNew()
+	}
+	return m, nil
+}
+
+// jumpKeyFree reports that n jumps to the first new item: none of your commands is on
+// n, so the PR view and ? help can say so.
+func (m Model) jumpKeyFree() bool {
+	for _, c := range m.cfg.Commands {
+		if c.Key == "n" {
+			return false
+		}
+	}
+	return true
+}
+
+// jumpToNew scrolls the PR view to the first comment, review or reply that came after
+// your last visit.
+func (m Model) jumpToNew() (tea.Model, tea.Cmd) {
+	if m.newAt < 0 {
+		cmd := m.setFlash("Nothing new since you last looked")
+		return m, cmd
+	}
+	m.focus = paneDetail
+	m.vp.SetYOffset(m.newAt)
 	return m, nil
 }
 
@@ -762,9 +835,15 @@ func (m Model) startCommandFor(pr github.PR, c *config.Command, input string) (t
 	if c.Action == "setpath" {
 		return m.askPath(pr.Repo)
 	}
+	if ok, why := core.Allowed(*c, pr, m.be.Viewer()); !ok {
+		// Say so before asking for text that could not be used.
+		cmd := m.setFlash("! " + why)
+		return m, cmd
+	}
 	if c.Prompt != "" && input == "" {
 		m.prompt, m.promptPR = c, pr
 		m.promptIn.Prompt = c.Prompt + ": "
+		m.promptIn.Placeholder = "" // the path prompt's hint would stay otherwise
 		m.promptIn.SetValue("")
 		return m, m.promptIn.Focus()
 	}

@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/MasterPushers/prdeck/internal/cache"
@@ -33,26 +35,41 @@ type fakeBackend struct {
 	noClone  map[string]bool
 	found    []string
 	saved    map[string]string
+	loaded   int  // Detail calls
+	news     bool // Detail marks mlin's thread new since your last visit
+	cached   bool // the list and details are saved; showing a saved detail marks it seen
 }
 
 func (f *fakeBackend) Config() *config.Config { return f.cfg }
 func (f *fakeBackend) Viewer() string         { return "you" }
 func (f *fakeBackend) CachedSearch(string) (cache.SearchEntry, bool) {
-	return cache.SearchEntry{}, false
+	return cache.SearchEntry{PRs: f.prs}, f.cached
 }
 func (f *fakeBackend) Search(_ context.Context, q string) ([]github.PR, error) {
 	f.searched = append(f.searched, q)
 	return f.prs, nil
 }
-func (f *fakeBackend) CachedDetail(github.PR) (*github.Detail, bool) { return nil, false }
+func (f *fakeBackend) CachedDetail(pr github.PR) (*github.Detail, bool) {
+	if !f.cached {
+		return nil, false
+	}
+	d, _ := f.Detail(context.Background(), pr)
+	f.news = false // seen now, as the core marks it
+	return d, true
+}
 func (f *fakeBackend) Detail(_ context.Context, pr github.PR) (*github.Detail, error) {
+	f.loaded++
+	lastSeen := time.Now() // your visit before this load, as the core sets it
+	if f.news {
+		lastSeen = lastSeen.Add(-90 * time.Minute)
+	}
 	return &github.Detail{
-		PR: pr, Body: "## Summary\nAdds a `StreamPushSource`.", Commits: 6, ChangedFiles: 14,
-		Checks:    []github.Check{{Name: "lint", State: "SUCCESS"}, {Name: "integration", State: "FAILURE"}},
+		PR: pr, Body: "## Summary\nAdds a `StreamPushSource`.", Commits: 6, ChangedFiles: 14, LastSeen: lastSeen,
+		Checks:    []github.Check{{Name: "lint", State: "SUCCESS"}, {Name: "integration", State: "FAILURE", URL: "https://github.com/northwind/registry/actions/runs/5/job/9", RunID: 5}},
 		Reviewers: []github.Reviewer{{Login: "mlin", State: "CHANGES_REQUESTED"}},
 		Timeline: []github.Event{
 			{Kind: "review", Author: "mlin", State: "CHANGES_REQUESTED", Body: "One thing first.", At: time.Now().Add(-2 * time.Hour)},
-			{Kind: "thread", Author: "mlin", Path: "push.py", Line: 41, DiffHunk: "@@ -1 +1 @@\n+def push():", Body: "Default to False?", At: time.Now().Add(-time.Hour)},
+			{Kind: "thread", Author: "mlin", Path: "push.py", Line: 41, DiffHunk: "@@ -1 +1 @@\n+def push():", Body: "Default to False?", At: time.Now().Add(-time.Hour), New: f.news},
 		},
 	}, nil
 }
@@ -72,6 +89,18 @@ func (f *fakeBackend) ResolveFolder(pr github.PR, wantWorktree bool) (core.Folde
 func (f *fakeBackend) Prepare(c config.Command, pr github.PR, input string) (core.Plan, error) {
 	if c.Action == "browse" {
 		return core.Plan{Title: c.Name, Action: "browse", Script: "open " + pr.URL, PR: pr}, nil
+	}
+	if c.Action == "rerun" {
+		if ok, why := core.Allowed(c, pr, "you"); !ok {
+			return core.Plan{}, errors.New(why)
+		}
+		return core.RerunPlan(c, pr, nil), nil
+	}
+	if core.Writes(c.Action) {
+		if ok, why := core.Allowed(c, pr, "you"); !ok {
+			return core.Plan{}, errors.New(why)
+		}
+		return core.WritePlan(c, pr, nil, input), nil
 	}
 	folder, err := f.ResolveFolder(pr, c.Worktree)
 	if err != nil {
@@ -193,6 +222,253 @@ func TestListAndDetail(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("detail missing %q\n%s", want, view)
 		}
+	}
+}
+
+func TestFailingChecksLinkAndRerun(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	pr, _ := m.selected()
+	d, _ := m.be.Detail(context.Background(), pr)
+	d.Checks = append(d.Checks, github.Check{Name: "deploy", State: "ACTION_REQUIRED"})
+	nm, _ := m.Update(detailMsg{key: pr.Key(), d: d})
+	m = nm.(Model)
+	link := "\x1b]8;;https://github.com/northwind/registry/actions/runs/5/job/9\x1b\\"
+	if !strings.Contains(m.View(), link) {
+		t.Error("the failing check should link to its log")
+	}
+	// Every check counted in ✕ is named, the same rule as the count.
+	if !strings.Contains(ansi.Strip(m.View()), "failing: integration, deploy") {
+		t.Error("the failing line should name every failed check")
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "F re-run failed") {
+		t.Error("the failing line should say which key re-runs the checks")
+	}
+	m = send(t, m, key("F"))
+	if len(be.ran) != 1 || be.ran[0].Action != "rerun" || be.ran[0].PR.Number != 4821 {
+		t.Fatalf("ran = %+v", be.ran)
+	}
+
+	m = send(t, m, key("j")) // #312, CI passed
+	m = send(t, m, key("F"))
+	if len(be.ran) != 1 || !strings.Contains(m.flash, "Re-run failed only runs on PRs whose CI failed") {
+		t.Errorf("re-run on a green PR: ran %d, flash %q", len(be.ran), m.flash)
+	}
+}
+
+func TestApproveAsksFirstThenReloads(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("a")) // #4821 is yours
+	if m.plan != nil || !strings.Contains(m.flash, "Approve only runs on other people's PRs") {
+		t.Fatalf("approving your own PR: plan %+v, flash %q", m.plan, m.flash)
+	}
+	m = send(t, m, key("j"))
+	m = send(t, m, key("j")) // #77, mlin's
+	m = send(t, m, key("a"))
+	if m.plan == nil || m.plan.Script != "gh pr review 77 --approve -R northwind/sdk" || len(be.ran) != 0 {
+		t.Fatalf("approve should show what it does first: %+v", m.plan)
+	}
+	before := be.loaded
+	m = send(t, m, key("enter"))
+	if len(be.ran) != 1 || be.ran[0].Action != "approve" || m.out == nil || !m.out.ok {
+		t.Fatalf("ran = %+v, out = %+v", be.ran, m.out)
+	}
+	if be.loaded == before || m.fetching[be.ran[0].PR.Key()] {
+		t.Error("the PR was not loaded again after approving")
+	}
+}
+
+func TestReviewTextAsked(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("x")) // your own PR: refused before any typing
+	if m.prompt != nil || !strings.Contains(m.flash, "other people's PRs") {
+		t.Fatalf("prompt %v, flash %q", m.prompt, m.flash)
+	}
+	m = send(t, m, key("L")) // the path prompt has its own hint
+	m = send(t, m, key("esc"))
+	m = send(t, m, key("i"))
+	if m.prompt == nil || !strings.Contains(ansi.Strip(m.View()), "Comment:") {
+		t.Fatal("comment should ask for its text")
+	}
+	if strings.Contains(ansi.Strip(m.View()), "folder name") {
+		t.Error("the comment prompt kept the path prompt's hint")
+	}
+	for _, r := range "rebased, ptal" {
+		m = send(t, m, key(string(r)))
+	}
+	m = send(t, m, key("enter"))
+	if len(be.ran) != 1 || be.ran[0].Action != "comment" || be.ran[0].Input != "rebased, ptal" {
+		t.Errorf("ran = %+v", be.ran)
+	}
+}
+
+func TestCommentGoesToThePRItWasTypedFor(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("i")) // on #4821
+	for _, r := range "lgtm" {
+		m = send(t, m, key(string(r)))
+	}
+	// A refresh while typing: #4821 was merged and left the list.
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: be.prs[1:]})
+	m = send(t, nm.(Model), key("enter"))
+	if len(be.ran) != 1 || be.ran[0].PR.Number != 4821 {
+		t.Errorf("the comment went to %+v", be.ran)
+	}
+}
+
+func TestWriteAnswerWrapsAndBarDims(t *testing.T) {
+	_, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 30})
+	why := "upstream/datakit does not allow auto-merge (an admin can turn on \"Allow auto-merge\" in its settings). Merge it on GitHub once it is ready"
+	nm, _ := m.Update(resultMsg{r: core.Result{Plan: core.Plan{Title: "Merge when ready", Action: "automerge"}, Err: errors.New(why)}})
+	m = nm.(Model)
+	v := strings.Join(strings.Fields(ansi.Strip(m.View())), " ")
+	if !strings.Contains(v, "once it is ready") {
+		t.Errorf("GitHub's answer was cut:\n%s", ansi.Strip(m.View()))
+	}
+	// #4821 is yours: Approve is on the bar but dimmed; Comment is not.
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(0) // termenv.TrueColor; tests have no colors otherwise
+	defer lipgloss.SetColorProfile(old)
+	bar := strings.Join(m.keybar(), "\n")
+	if !strings.Contains(bar, sDim.Render("approve")) || strings.Contains(bar, sDim.Render("comment")) {
+		t.Errorf("bar:\n%q", bar)
+	}
+}
+
+func TestMergeWhenReadyAndAutoMergeShown(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("M"))
+	if m.plan == nil || m.plan.Action != "automerge" || !strings.Contains(m.plan.Script, "gh pr merge 4821 --auto") || len(be.ran) != 0 {
+		t.Fatalf("merge when ready should ask first: %+v", m.plan)
+	}
+	m = send(t, m, key("esc"))
+	m = send(t, m, key("j"))
+	m = send(t, m, key("j")) // #77 is a draft
+	m = send(t, m, key("M"))
+	if m.plan != nil || !strings.Contains(m.flash, "ready for review") {
+		t.Errorf("draft: plan %+v, flash %q", m.plan, m.flash)
+	}
+
+	pr, _ := m.selected()
+	d, _ := m.be.Detail(context.Background(), pr)
+	d.AutoMerge = &github.AutoMerge{Method: "SQUASH", By: "mlin"}
+	nm, _ := m.Update(detailMsg{key: pr.Key(), d: d})
+	m = nm.(Model)
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "merge    auto-merge on · squash and merge · by mlin") {
+		t.Errorf("auto-merge not shown:\n%s", v)
+	}
+	m = send(t, m, key("?"))
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "Merge when ready") || !strings.Contains(v, "approves the PR on GitHub") {
+		t.Errorf("help should list the review commands:\n%s", v)
+	}
+}
+
+func TestUnreadAndJumpToNew(t *testing.T) {
+	be, m := newTest(t)
+	be.news = true
+	be.prs[1].Unread = true // #312
+	m = search(t, m)
+	m = send(t, m, tea.WindowSizeMsg{Width: 140, Height: 20})
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(0) // termenv.TrueColor; tests have no colors otherwise
+	defer lipgloss.SetColorProfile(old)
+	if row := m.prRow(m.prs[1], 1, 56, 5); !strings.Contains(row, sBlue.Render("●")) || !strings.Contains(row, sBold.Render(m.prs[1].Title)) {
+		t.Errorf("an unread PR has a blue dot and a bold title: %q", row)
+	}
+	if row := m.prRow(m.prs[2], 2, 56, 5); !strings.Contains(row, sDim.Render("◌")) || strings.Contains(row, sBold.Render(m.prs[2].Title)) {
+		t.Errorf("a read draft looks as before: %q", row)
+	}
+
+	m = send(t, m, key("j"))
+	if m.prs[1].Unread {
+		t.Error("opening #312 should clear its dot")
+	}
+	pr, _ := m.selected()
+	d, _ := be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "1 since you last looked") || strings.Contains(ansi.Strip(m.vp.View()), "push.py:41") {
+		t.Fatalf("the new thread is below; the header says so:\n%s", v)
+	}
+	m = send(t, m, key("n"))
+	if m.focus != paneDetail || !strings.Contains(ansi.Strip(m.vp.View()), "mlin on push.py:41 · 1h ago  new") {
+		t.Errorf("n should scroll to the new thread:\n%s", ansi.Strip(m.vp.View()))
+	}
+
+	// CI finishes while you read: the PR is loaded again, seen as of now.
+	be.news = false
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "1 since you last looked") {
+		t.Errorf("loaded again while on screen: what was new when you opened it stays tagged:\n%s", v)
+	}
+
+	// A PR's detail coming in after you moved on (your own comment, say) clears its dot.
+	m.prs[0].Unread = true
+	first, _ := be.Detail(context.Background(), m.prs[0])
+	m = send(t, m, detailMsg{key: m.prs[0].Key(), d: first})
+	if m.prs[0].Unread {
+		t.Error("the core marked #4821 seen when it loaded it: its dot should go")
+	}
+
+	m = send(t, m, key("esc")) // back to the list
+	m = send(t, m, key("j"))
+	pr, _ = m.selected()
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	m = send(t, m, key("n"))
+	if m.flash != "Nothing new since you last looked" {
+		t.Errorf("n on #%d with nothing new: flash %q", pr.Number, m.flash)
+	}
+
+	// Back on #312: opened again, its tags from the last visit go.
+	m = send(t, m, key("k"))
+	pr, _ = m.selected()
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	if v := ansi.Strip(m.View()); pr.Number != 312 || strings.Contains(v, "1 since you last looked") {
+		t.Errorf("#%d opened again: nothing is new since the last visit:\n%s", pr.Number, v)
+	}
+
+	// A command of yours on n still runs.
+	be.cfg.Commands = append(be.cfg.Commands, config.Command{Name: "Notes", Key: "n", Run: "echo notes"})
+	m = send(t, m, key("n"))
+	if len(be.ran) != 1 || be.ran[0].Title != "Notes" {
+		t.Errorf("your n command should run: %+v", be.ran)
+	}
+	be.news = true
+	d, _ = be.Detail(context.Background(), pr)
+	m = send(t, m, detailMsg{key: pr.Key(), d: d})
+	m.help = true
+	if v, _ := m.detailContent(100); strings.Contains(ansi.Strip(v), "first new comment") {
+		t.Errorf("? help offers n while your command has it:\n%s", v)
+	}
+	m.help = false
+	if v, _ := m.detailContent(100); !strings.Contains(ansi.Strip(v), "1 since you last looked") || strings.Contains(ansi.Strip(v), "jump to the first") {
+		t.Errorf("the PR view offers n while your command has it:\n%s", v)
+	}
+}
+
+func TestNewTagsOfTheFirstPRStay(t *testing.T) {
+	// At start the list and the first PR are saved ones; the first search finds the
+	// same PR selected, which is not a second visit.
+	be, _ := newTest(t)
+	be.cached, be.news = true, true
+	m := New(be)
+	m = send(t, m, tea.WindowSizeMsg{Width: 140, Height: 40})
+	for _, msg := range collect(m.Init(), 3) {
+		m = send(t, m, msg)
+	}
+	if len(be.searched) == 0 {
+		t.Fatal("Init should search")
+	}
+	if v := ansi.Strip(m.View()); !strings.Contains(v, "1 since you last looked") {
+		t.Errorf("the first PR shown keeps what was new:\n%s", v)
 	}
 }
 

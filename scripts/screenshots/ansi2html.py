@@ -27,6 +27,8 @@ def xterm256(n):
 SGR = re.compile(r"\x1b\[([0-9;:]*)m")
 # Escape sequences other than colors (cursor moves, modes); SGR ends in "m", so leave those.
 OTHER = re.compile(r"\x1b\[[0-9;?]*[A-Za-ln-z]|\x1b[()][A-Z0-9]|\x1b[=>]")
+# OSC sequences such as terminal hyperlinks (OSC 8): the linked text stays, the link goes.
+OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 def color(params, i):
@@ -109,7 +111,7 @@ def convert(text):
         return ";".join(css)
 
     for line in text.rstrip("\n").split("\n"):
-        line = OTHER.sub("", line)
+        line = OTHER.sub("", OSC.sub("", line))
         pos = 0
         for m in SGR.finditer(line):
             chunk = line[pos : m.start()]

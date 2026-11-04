@@ -1,0 +1,271 @@
+{
+  "commands": [
+    {
+      "action": "",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "f",
+      "name": "Fetch",
+      "output": "",
+      "prompt": "",
+      "run": "git fetch {remote} --prune",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "",
+      "bar": true,
+      "branch": true,
+      "clean": false,
+      "confirm": false,
+      "key": "c",
+      "name": "Checkout",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "",
+      "bar": true,
+      "branch": true,
+      "clean": true,
+      "confirm": false,
+      "key": "u",
+      "name": "Pull",
+      "output": "",
+      "prompt": "",
+      "run": "git pull --rebase",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "",
+      "bar": true,
+      "branch": true,
+      "clean": true,
+      "confirm": true,
+      "key": "r",
+      "name": "Rebase",
+      "output": "",
+      "prompt": "",
+      "run": "git fetch {remote} {base} && git rebase {remote}/{base}",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "C",
+      "name": "Continue",
+      "output": "",
+      "prompt": "",
+      "run": "git -c core.editor=true rebase --continue",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": true,
+      "key": "A",
+      "name": "Abort",
+      "output": "",
+      "prompt": "",
+      "run": "git rebase --abort",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "",
+      "bar": true,
+      "branch": true,
+      "clean": false,
+      "confirm": true,
+      "key": "p",
+      "name": "Push",
+      "output": "",
+      "prompt": "",
+      "run": "git push --force-with-lease",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "open",
+      "bar": true,
+      "branch": true,
+      "clean": false,
+      "confirm": false,
+      "key": "o",
+      "name": "Open in editor",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "open",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "w",
+      "name": "Open in worktree",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [],
+      "worktree": true
+    },
+    {
+      "action": "browse",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "b",
+      "name": "Open on GitHub",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "approve",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": true,
+      "key": "a",
+      "name": "Approve",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [
+        "others"
+      ],
+      "worktree": false
+    },
+    {
+      "action": "request_changes",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "x",
+      "name": "Request changes",
+      "output": "",
+      "prompt": "What should change",
+      "run": "",
+      "when": [
+        "others"
+      ],
+      "worktree": false
+    },
+    {
+      "action": "comment",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "i",
+      "name": "Comment",
+      "output": "",
+      "prompt": "Comment",
+      "run": "",
+      "when": [],
+      "worktree": false
+    },
+    {
+      "action": "automerge",
+      "bar": true,
+      "branch": false,
+      "clean": false,
+      "confirm": true,
+      "key": "M",
+      "name": "Merge when ready",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [
+        "ready"
+      ],
+      "worktree": false
+    },
+    {
+      "action": "rerun",
+      "bar": false,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "F",
+      "name": "Re-run failed",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [
+        "ci_failed"
+      ],
+      "worktree": false
+    },
+    {
+      "action": "setpath",
+      "bar": false,
+      "branch": false,
+      "clean": false,
+      "confirm": false,
+      "key": "L",
+      "name": "Set clone path",
+      "output": "",
+      "prompt": "",
+      "run": "",
+      "when": [],
+      "worktree": false
+    }
+  ],
+  "configPath": "",
+  "demo": true,
+  "editor": "zed",
+  "editors": [
+    "cursor",
+    "nvim",
+    "vscode",
+    "zed"
+  ],
+  "filters": [
+    {
+      "name": "Involves me",
+      "query": "involves:@me"
+    },
+    {
+      "name": "Authored",
+      "query": "author:@me"
+    },
+    {
+      "name": "Review requested",
+      "query": "review-requested:@me"
+    },
+    {
+      "name": "Assigned",
+      "query": "assignee:@me"
+    },
+    {
+      "name": "Mentions",
+      "query": "mentions:@me"
+    }
+  ],
+  "refresh": 120,
+  "version": "test",
+  "viewer": "you",
+  "warnings": []
+}

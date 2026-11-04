@@ -1,0 +1,42 @@
+{
+  "action": "clone",
+  "changes": null,
+  "confirm": true,
+  "folder": {
+    "branch": "",
+    "changes": null,
+    "clone": "",
+    "exists": false,
+    "ownBranch": false,
+    "path": "",
+    "rebasing": false,
+    "remote": "",
+    "worktree": false
+  },
+  "input": "",
+  "pr": {
+    "author": "jfoster",
+    "baseRefName": "main",
+    "checkState": "SUCCESS",
+    "comments": 5,
+    "createdAt": "2026-01-02T03:04:05Z",
+    "headOwner": "",
+    "headRefName": "chore/deprecate-flags",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "mergeable": "MERGEABLE",
+    "number": 2398,
+    "repo": "upstream/datakit",
+    "reviewDecision": "APPROVED",
+    "state": "OPEN",
+    "title": "Deprecate legacy CLI flags",
+    "unread": false,
+    "updatedAt": "2026-01-02T03:04:05Z",
+    "url": "https://github.com/upstream/datakit/pull/2398"
+  },
+  "pre": "",
+  "script": "gh repo clone upstream/datakit ~/code/datakit",
+  "silent": false,
+  "terminal": false,
+  "title": "Clone upstream/datakit"
+}

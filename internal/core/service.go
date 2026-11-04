@@ -81,7 +81,11 @@ func (s *Service) clone(repo string) (repos.Clone, bool) {
 }
 
 // CachedSearch returns the last saved results for a filter query.
-func (s *Service) CachedSearch(query string) (cache.SearchEntry, bool) { return s.cache.Search(query) }
+func (s *Service) CachedSearch(query string) (cache.SearchEntry, bool) {
+	e, ok := s.cache.Search(query)
+	e.PRs = s.withUnread(e.PRs)
+	return e, ok
+}
 
 // Search asks GitHub for open PRs matching a filter query and saves them.
 func (s *Service) Search(ctx context.Context, query string) ([]github.PR, error) {
@@ -93,14 +97,39 @@ func (s *Service) Search(ctx context.Context, query string) ([]github.PR, error)
 	if err != nil {
 		return nil, err
 	}
-	s.cache.PutSearch(query, viewer, prs)
-	return prs, nil
+	s.cache.PutSearch(query, viewer, prs) // also picks up the PRs the other app opened
+	return s.withUnread(prs), nil
 }
 
-// CachedDetail returns a saved detail and whether it is current for pr.
-func (s *Service) CachedDetail(pr github.PR) (*github.Detail, bool) { return s.cache.Detail(pr) }
+// withUnread is a copy of prs (which may be the cache's own) with the ones updated
+// since you last opened them marked.
+func (s *Service) withUnread(prs []github.PR) []github.PR {
+	out := make([]github.PR, len(prs))
+	for i, p := range prs {
+		p.Unread = s.cache.Unread(p)
+		out[i] = p
+	}
+	return out
+}
 
-// Detail loads a PR's description, conversation, reviewers and checks.
+// CachedDetail returns a saved detail and whether it is current for pr. Both apps
+// call it to show a PR, so it counts as opening it (see opened).
+func (s *Service) CachedDetail(pr github.PR) (*github.Detail, bool) {
+	d, fresh := s.cache.Detail(pr)
+	if d == nil {
+		return nil, false
+	}
+	return s.opened(d), fresh
+}
+
+// opened marks a PR seen as of the detail shown, and returns that detail with what
+// came after the visit before marked new.
+func (s *Service) opened(d *github.Detail) *github.Detail {
+	return d.SinceSeen(s.cache.MarkSeen(d.Key(), d.Latest()), s.Viewer())
+}
+
+// Detail loads a PR's description, conversation, reviewers and checks. Like
+// CachedDetail, it counts as opening the PR.
 func (s *Service) Detail(ctx context.Context, pr github.PR) (*github.Detail, error) {
 	gh := s.client()
 	if gh == nil {
@@ -110,8 +139,9 @@ func (s *Service) Detail(ctx context.Context, pr github.PR) (*github.Detail, err
 	if err != nil {
 		return nil, err
 	}
-	s.cache.PutDetail(d)
-	return d, nil
+	shown := s.opened(d)
+	s.cache.PutDetail(d) // saves the seen mark too
+	return shown, nil
 }
 
 // FetchImage downloads an image from a PR body, with the gh login for GitHub's hosts.
@@ -349,6 +379,15 @@ func (s *Service) createWorktree(ctx context.Context, pr github.PR, f Folder) (s
 // Execute runs a plan: Setup, then the main command. GUI editors are started and left
 // running.
 func (s *Service) Execute(ctx context.Context, p Plan) Result {
+	if p.Action == "rerun" {
+		return s.rerunFailed(ctx, p)
+	}
+	if p.Action == "automerge" {
+		return s.mergeWhenReady(ctx, p)
+	}
+	if Writes(p.Action) {
+		return s.review(ctx, p)
+	}
 	var log []string
 	out, err := s.Setup(ctx, p)
 	if out != "" {
@@ -411,6 +450,61 @@ func (s *Service) Execute(ctx context.Context, p Plan) Result {
 		s.Rescan()
 	}
 	return Result{Plan: p, Output: strings.Join(log, "\n"), Err: err}
+}
+
+// rerunFailed loads the PR's checks fresh from GitHub, since the ones on screen can be
+// minutes old, then re-runs the failed jobs of each failed GitHub Actions run.
+func (s *Service) rerunFailed(ctx context.Context, p Plan) Result {
+	gh := s.client()
+	if gh == nil {
+		return Result{Plan: p, Err: ErrSignedOut}
+	}
+	d, err := s.Detail(ctx, p.PR)
+	if err != nil {
+		return Result{Plan: p, Err: err}
+	}
+	return RerunFailed(p, d, func(id int64) error { return gh.RerunFailedJobs(ctx, p.PR.Repo, id) })
+}
+
+// review approves, requests changes or comments with the gh login. A PR's node ID
+// never changes, so a saved detail's is used when there is one.
+func (s *Service) review(ctx context.Context, p Plan) Result {
+	d, _ := s.cache.Detail(p.PR)
+	if d == nil || d.NodeID == "" {
+		var err error
+		if d, err = s.Detail(ctx, p.PR); err != nil {
+			return Result{Plan: p, Err: err}
+		}
+	}
+	return PostReview(ctx, p, d.NodeID, s)
+}
+
+// mergeWhenReady asks GitHub for the PR's merge state, since the one on screen can be
+// minutes old, then merges it or turns on auto-merge. GitHub works mergeability out in
+// the background, so an UNKNOWN answer is asked again a couple of times.
+func (s *Service) mergeWhenReady(ctx context.Context, p Plan) Result {
+	gh := s.client()
+	if gh == nil {
+		return Result{Plan: p, Err: ErrSignedOut}
+	}
+	var d *github.Detail
+	for try := 0; ; try++ {
+		var err error
+		if d, err = s.Detail(ctx, p.PR); err != nil {
+			return Result{Plan: p, Err: err}
+		}
+		if d.MergeStatus != "UNKNOWN" || try == 2 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return Result{Plan: p, Err: ctx.Err()}
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return MergeWhenReady(p, d,
+		func(method string) error { return gh.EnableAutoMerge(ctx, d.NodeID, method) },
+		func(method, head string) error { return gh.Merge(ctx, d.NodeID, method, head) })
 }
 
 // TerminalCmd is the process for plans that take over the terminal. Call Setup first.

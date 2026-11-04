@@ -1,0 +1,60 @@
+{
+  "brewFound": false,
+  "configExists": false,
+  "configPath": "",
+  "editor": "zed",
+  "editors": [
+    {
+      "installed": false,
+      "label": "Zed",
+      "name": "zed",
+      "run": ""
+    },
+    {
+      "installed": false,
+      "label": "Cursor",
+      "name": "cursor",
+      "run": ""
+    },
+    {
+      "installed": false,
+      "label": "Visual Studio Code",
+      "name": "vscode",
+      "run": ""
+    },
+    {
+      "installed": false,
+      "label": "Neovim (opens in Terminal)",
+      "name": "nvim",
+      "run": ""
+    }
+  ],
+  "folders": [
+    {
+      "clones": 5,
+      "path": "~/code",
+      "saved": true
+    },
+    {
+      "clones": 1,
+      "path": "~/old",
+      "saved": false
+    },
+    {
+      "clones": 1,
+      "path": "~/scratch",
+      "saved": false
+    },
+    {
+      "clones": 1,
+      "path": "~/work",
+      "saved": false
+    }
+  ],
+  "ghInstalled": true,
+  "ghVersion": "",
+  "login": "you",
+  "signedIn": true,
+  "worktree": false,
+  "worktreeDir": "~/prdeck"
+}

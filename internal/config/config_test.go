@@ -99,6 +99,64 @@ commands:
 	}
 }
 
+func TestRerunFailedOverrides(t *testing.T) {
+	def, _ := find(DefaultCommands(), "Re-run failed")
+	if def.Key == "" || Reserved[def.Key] || def.Action != "rerun" || len(def.When) != 1 || def.When[0] != "ci_failed" {
+		t.Fatalf("built-in = %+v", def)
+	}
+	for _, c := range DefaultCommands() {
+		if c.Name != def.Name && c.Key == def.Key {
+			t.Errorf("%q shares key %q", c.Name, c.Key)
+		}
+	}
+	cfg, err := Load(write(t, "commands:\n  - name: Re-run failed\n    key: x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := find(cfg.Commands, "Re-run failed")
+	if moved.Key != "x" || moved.Action != "rerun" || len(moved.When) != 1 || len(cfg.Warnings) != 0 {
+		t.Errorf("moved key lost the built-in: %+v %v", moved, cfg.Warnings)
+	}
+	cfg, _ = Load(write(t, "commands:\n  - name: Re-run failed\n    hidden: true\n"))
+	if _, ok := find(cfg.Commands, "Re-run failed"); ok {
+		t.Error("hidden Re-run failed still present")
+	}
+}
+
+func TestReviewAndMergeBuiltIns(t *testing.T) {
+	keys := map[string]string{}
+	for _, c := range DefaultCommands() {
+		if other, ok := keys[c.Key]; ok && c.Key != "" {
+			t.Errorf("%q and %q share key %q", other, c.Name, c.Key)
+		}
+		keys[c.Key] = c.Name
+	}
+	for name, action := range map[string]string{"Approve": "approve", "Request changes": "request_changes", "Comment": "comment", "Merge when ready": "automerge"} {
+		c, ok := find(DefaultCommands(), name)
+		if !ok || c.Action != action || c.Key == "" || Reserved[c.Key] || !c.OnBar() {
+			t.Errorf("built-in %s = %+v", name, c)
+		}
+	}
+	// Text first for the two that send some; asking first for the two that cannot be taken back.
+	if rc, _ := find(DefaultCommands(), "Request changes"); rc.Prompt == "" {
+		t.Error("Request changes should ask what should change")
+	}
+	if a, _ := find(DefaultCommands(), "Approve"); !a.Confirm || len(a.When) != 1 || a.When[0] != "others" {
+		t.Errorf("Approve = %+v", a)
+	}
+
+	cfg, err := Load(write(t, "commands:\n  - name: Comment\n    key: K\n  - name: Merge when ready\n    hidden: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := find(cfg.Commands, "Comment"); c.Key != "K" || c.Action != "comment" || c.Prompt == "" {
+		t.Errorf("moved Comment lost the built-in: %+v", c)
+	}
+	if _, ok := find(cfg.Commands, "Merge when ready"); ok {
+		t.Error("hidden Merge when ready still present")
+	}
+}
+
 func TestKeyTakenByUserCommand(t *testing.T) {
 	cfg, err := Load(write(t, "commands:\n  - name: Test\n    key: f\n    run: make test\n"))
 	if err != nil {

@@ -26,6 +26,12 @@ This folder holds the architecture decision records (ADRs): one short file per d
 | Every changed file's diff, each one collapsible | Comment, approve or request changes, reply on threads |
 | ![A commit with its diff](../screenshots/desktop-commit.png) | ![Inline review](../screenshots/desktop-inline.png) |
 | A commit opened: message, author and what it changed | Inline review: comment on lines, pending until submitted |
+| ![Checks](../screenshots/desktop-checks.png) | ![Re-run failed](../screenshots/desktop-rerun.png) |
+| Checks open their logs; Re-run failed when CI failed | Only the failed GitHub Actions jobs run again |
+| ![Merge when ready](../screenshots/desktop-merge.png) | ![Auto-merge on](../screenshots/desktop-automerge.png) |
+| Merge when ready, next to the review buttons, asks first | Auto-merge on: GitHub merges once checks and reviews pass |
+| ![Unread PRs and what is new](../screenshots/desktop-unread.png) | ![Jump to first new](../screenshots/desktop-new.png) |
+| Unread PRs have a dot; the conversation counts what is new | Jump to first new: what came in since your last visit is tagged |
 
 All screenshots use the sample data from `prdeck demo` / `--demo`.
 
@@ -91,7 +97,7 @@ sequenceDiagram
 | `cmd/prdeck` | The binary: the terminal app, `list`, `demo`, `config`, and `serve` for the desktop app. |
 | `internal/config` | Loads `~/.config/prdeck/config.yaml`, merges it over the built-in defaults, and edits it in place (keeping comments). |
 | `internal/github` | GitHub GraphQL with the gh login: search, PR detail, the viewer, image downloads. |
-| `internal/cache` | The last PR lists and PR details as JSON, so both apps open instantly. |
+| `internal/cache` | The last PR lists and PR details as JSON, so both apps open instantly, and when you last opened each PR. |
 | `internal/repos` | Finds clones on disk, reads their branch and uncommitted changes, plans worktrees. |
 | `internal/runner` | Fills `{placeholders}` (shell-quoted) and runs commands with `/bin/sh -c`. |
 | `internal/core` | `Service`: ties the above together; turns a command into a `Plan` and runs it. |
@@ -99,6 +105,8 @@ sequenceDiagram
 | `internal/tui`, `internal/mdrender`, `internal/termout` | The terminal app, its markdown renderer, and its terminal writer. |
 | `internal/demo` | Sample PRs and pretend clones for `prdeck demo`, `--demo` and the screenshots. |
 | `desktop/src` | The desktop app: window (`deck.rs`), setup (`deck/setup.rs`), PR text (`markdown.rs`), the pipe to the core (`rpc.rs`). |
+| `desktop/tests/fixtures` | The replies the desktop app reads, recorded from the demo; both sides' tests check them ([0019](0019-ci-and-a-protocol-contract.md)). |
+| `.github/workflows` | CI: the Go checks on Linux, the desktop app's build and tests on a Mac. |
 
 ## Decisions
 
@@ -119,5 +127,9 @@ sequenceDiagram
 | [0013](0013-diffs-in-the-app.md) | Diffs in the app |
 | [0014](0014-inline-review.md) | Inline review on the diff |
 | [0015](0015-comments-on-several-lines.md) | Comments on several lines |
+| [0016](0016-checks-link-to-their-logs-and-re-run.md) | Checks link to their logs, and Re-run failed |
+| [0017](0017-review-and-merge-commands.md) | Approve, Request changes, Comment and Merge when ready as commands |
+| [0018](0018-unread-since-you-last-looked.md) | Unread PRs and new comments since you last looked |
+| [0019](0019-ci-and-a-protocol-contract.md) | CI, and a contract test between Go and Rust |
 
 To add a record, copy the shape of an existing one (Status, Context, Decision, Consequences, Alternatives) and give it the next number. A record is not rewritten when things change; a new one supersedes it.
