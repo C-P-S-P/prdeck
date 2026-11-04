@@ -46,7 +46,15 @@ func (r *renderer) inlineNode(n ast.Node, base style) []run {
 	case *ast.CodeSpan:
 		st := base
 		st.fg, st.bg, st.bold, st.italic = cCodeFg, cCodeBg, false, false
-		return []run{{text: " " + plainText(n, r.src) + " ", st: st}}
+		// Backslashes in code are literal (`^\d+\.\d+$`). Entities still resolve, so
+		// <code>&lt;T&gt;</code> from the cleanup step reads <T>.
+		var b strings.Builder
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			if t, ok := c.(*ast.Text); ok {
+				b.WriteString(noControls(string(util.ResolveEntityNames(util.ResolveNumericReferences(t.Segment.Value(r.src)))), "\n\t"))
+			}
+		}
+		return []run{{text: " " + b.String() + " ", st: st}}
 	case *ast.Emphasis:
 		st := base
 		if n.Level >= 2 {
@@ -104,7 +112,26 @@ func (r *renderer) inlineNode(n ast.Node, base style) []run {
 
 // textOf is source text as it reads: "schema\\_discovery" → "schema_discovery", "&amp;" → "&".
 func textOf(b []byte) string {
-	return string(util.UnescapePunctuations(util.ResolveEntityNames(util.ResolveNumericReferences(b))))
+	return noControls(string(util.UnescapePunctuations(util.ResolveEntityNames(util.ResolveNumericReferences(b)))), "\n\t")
+}
+
+// noControls drops control characters other than those in keep. PR text is written
+// by anyone who can comment, and ESC, BEL or a C1 code (raw, or as &#27; and the
+// like) would reach the terminal as an escape sequence: a new clipboard (OSC 52),
+// window title or screen contents. Bidi overrides and isolates go too: in a terminal
+// that reorders text they make a code block or suggestion show something other than
+// what it runs (Trojan Source). Joiners stay, as emoji and some scripts need them.
+func noControls(s, keep string) string {
+	return strings.Map(func(r rune) rune {
+		if (unicode.IsControl(r) && !strings.ContainsRune(keep, r)) || isBidiControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func isBidiControl(r rune) bool {
+	return r == '\u061c' || r == '\u200e' || r == '\u200f' || (r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
 }
 
 var genericAlt = map[string]bool{"": true, "image": true, "img": true, "icon": true, "svg": true, "logo": true, "badge": true}
@@ -239,7 +266,8 @@ func pieces(runs []run) []piece {
 					j = len(text)
 				}
 				endWord()
-				sp := strings.Repeat(" ", ansi.StringWidth(strings.ReplaceAll(text[:j], "\n", " ")))
+				// A tab has no width of its own, but still parts the words around it.
+				sp := strings.Repeat(" ", max(ansi.StringWidth(strings.ReplaceAll(text[:j], "\n", " ")), 1))
 				out = append(out, piece{parts: []run{{text: sp, st: rn.st}}, space: true, width: len(sp)})
 				text = text[j:]
 				continue

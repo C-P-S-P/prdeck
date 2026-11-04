@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +48,7 @@ type Backend interface {
 	SetClonePath(repo, path string) (string, error)
 	ClonePath(repo string) string
 	ListClones(ctx context.Context) []repos.DiskClone
+	SetWorktreeDir(dir string) (string, error)
 }
 
 // writer is a backend that can comment on and review PRs.
@@ -120,11 +123,19 @@ func Serve(b Backend, info Info, in io.Reader, out io.Writer) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// A bug in one request fails that request, not every other one with it.
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "prdeck serve: %s panicked: %v\n%s", req.Method, r, debug.Stack())
+					s.send(response{ID: req.ID, Error: &respError{Code: "error", Message: fmt.Sprintf("internal error in %s: %v", req.Method, r)}})
+				}
+			}()
 			s.handle(req)
 		}()
 	}
+	s.close() // first, since a waiting loginWait returns only once gh stops
 	wg.Wait()
-	s.close()
+	s.close() // again, for a gh a loginStart started meanwhile
 	return sc.Err()
 }
 
@@ -273,7 +284,8 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		// Room for fetch's three tries of up to 30 seconds each.
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 		defer cancel()
 		var data []byte
 		var kind string
@@ -388,6 +400,17 @@ func (s *server) call(method string, raw json.RawMessage) (any, error) {
 			return nil, err
 		}
 		return map[string]any{"note": note, "path": s.b.ClonePath(p.Repo)}, nil
+
+	case "setWorktreeDir":
+		p, err := decode[struct{ Path string }](raw)
+		if err != nil {
+			return nil, err
+		}
+		dir, err := s.b.SetWorktreeDir(p.Path)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"dir": dir}, nil
 
 	case "clonePath":
 		p, err := decode[struct{ Repo string }](raw)

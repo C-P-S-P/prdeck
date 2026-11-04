@@ -177,13 +177,12 @@ const SHELL_VARS: [&str; 4] = ["PATH", "XDG_CONFIG_HOME", "PRDECK_CONFIG", "GH_C
 
 /// The SHELL_VARS the login shell sets differently from this process.
 fn login_env() -> Vec<(&'static str, String)> {
-    let script = SHELL_VARS.iter().map(|v| format!("printf '%s\\0' \"${v}\"")).collect::<Vec<_>>().join("; ");
-    let Some(out) = login_shell(&script) else { return vec![] };
+    let Some(shell) = login_shell_for(std::env::consts::OS, std::env::var("SHELL").ok()) else { return vec![] };
+    let Some(env) = shell_values(&shell) else { return vec![] };
     SHELL_VARS
         .iter()
-        .zip(out.split('\0'))
-        .filter(|(name, value)| !value.is_empty() && std::env::var(name).ok().as_deref() != Some(*value))
-        .map(|(name, value)| (*name, value.to_string()))
+        .filter_map(|name| Some((*name, env.get(*name)?.clone())))
+        .filter(|(name, value)| !value.is_empty() && std::env::var(name).ok().as_deref() != Some(value.as_str()))
         .collect()
 }
 
@@ -197,9 +196,18 @@ fn login_shell_for(os: &str, shell: Option<String>) -> Option<String> {
     }
 }
 
-/// Runs a script in the user's login shell (3 seconds at most) and returns its output.
-fn login_shell(script: &str) -> Option<String> {
-    let shell = login_shell_for(std::env::consts::OS, std::env::var("SHELL").ok())?;
+/// The environment `shell` exports after a login. It is printed by `env -0`, not the
+/// shell, so fish (whose "$PATH" is a list joined with spaces) gives a real PATH too.
+/// Dotfiles can print as well (`eval "$(ssh-agent -s)"` prints "Agent pid 1234"), so
+/// the output is read from between markers.
+fn shell_values(shell: &str) -> Option<std::collections::HashMap<String, String>> {
+    let out = login_shell(shell, "printf _PRDECK_ENV_; /usr/bin/env -0; printf _PRDECK_ENV_")?;
+    let env = out.split("_PRDECK_ENV_").nth(1)?;
+    Some(env.split('\0').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect())
+}
+
+/// Runs a script in `shell` as a login shell (3 seconds at most) and returns its output.
+fn login_shell(shell: &str, script: &str) -> Option<String> {
     let mut child = Command::new(shell)
         .args(["-l", "-c", script])
         .stdin(Stdio::null())
@@ -216,6 +224,7 @@ fn login_shell(script: &str) -> Option<String> {
             }
             _ => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return None;
             }
         }
@@ -247,6 +256,10 @@ fn sidecar() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::login_shell_for;
+    #[cfg(unix)]
+    use super::shell_values;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn login_shell_per_os() {
@@ -257,5 +270,35 @@ mod tests {
         assert_eq!(login_shell_for("linux", None), None);
         assert_eq!(login_shell_for("linux", Some(String::new())), None);
         assert_eq!(login_shell_for("windows", zsh()), None);
+    }
+
+    #[cfg(unix)] // the test shells are sh scripts
+    #[test]
+    fn login_path_ignores_what_dotfiles_print() {
+        // A login shell whose dotfiles print before and after the command.
+        let sh = std::env::temp_dir().join(format!("prdeck-test-shell-{}", std::process::id()));
+        std::fs::write(&sh, "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n").unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS checks a new executable the first time it runs, which can take longer
+        // than login_shell waits; do that first.
+        let _ = std::process::Command::new(&sh).output();
+        let values = shell_values(sh.to_str().unwrap());
+        let _ = std::fs::remove_file(&sh);
+        assert_eq!(values.as_ref().and_then(|v| v.get("PATH")).map(String::as_str), Some("/opt/homebrew/bin:/usr/bin"));
+    }
+
+    #[cfg(unix)] // the test shells are sh scripts
+    #[test]
+    fn path_comes_from_env_not_the_shells_own_syntax() {
+        // A shell like fish, where "$PATH" would join a list with spaces: the value
+        // must come from the exported environment instead.
+        let sh = std::env::temp_dir().join(format!("prdeck-test-fish-{}", std::process::id()));
+        std::fs::write(&sh, "#!/bin/sh\nexport PATH=/opt/homebrew/bin:/usr/bin\nPATH_LIST='/opt/homebrew/bin /usr/bin'\neval \"$3\"\n").unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::process::Command::new(&sh).output();
+        let values = shell_values(sh.to_str().unwrap());
+        let _ = std::fs::remove_file(&sh);
+        let path = values.as_ref().and_then(|v| v.get("PATH")).cloned().unwrap_or_default();
+        assert_eq!(path, "/opt/homebrew/bin:/usr/bin");
     }
 }

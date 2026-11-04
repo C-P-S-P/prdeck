@@ -17,9 +17,10 @@ import (
 const keepDetails = 30 * 24 * time.Hour
 
 type Cache struct {
-	path string
-	mu   sync.Mutex
-	data file
+	path   string
+	mu     sync.Mutex
+	saveMu sync.Mutex // one save at a time
+	data   file
 }
 
 type file struct {
@@ -111,7 +112,12 @@ func (c *Cache) PutDetail(d *github.Detail) {
 	c.save()
 }
 
+// save writes the cache. Saves take turns, so an older snapshot never lands last,
+// and each writes its own temp file, so the TUI and the desktop app saving at once
+// never mix their bytes into one file.
 func (c *Cache) save() {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
 	c.mu.Lock()
 	raw, err := json.Marshal(c.data)
 	c.mu.Unlock()
@@ -121,8 +127,18 @@ func (c *Cache) save() {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o700); err != nil {
 		return
 	}
-	tmp := c.path + ".tmp"
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, c.path)
+	f, err := os.CreateTemp(filepath.Dir(c.path), filepath.Base(c.path)+"-*.tmp")
+	if err != nil {
+		return
+	}
+	_, err = f.Write(raw)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), c.path)
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
 	}
 }

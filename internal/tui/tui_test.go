@@ -1,7 +1,11 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -16,6 +20,7 @@ import (
 	"github.com/MasterPushers/prdeck/internal/core"
 	"github.com/MasterPushers/prdeck/internal/github"
 	"github.com/MasterPushers/prdeck/internal/repos"
+	"github.com/MasterPushers/prdeck/internal/termout"
 )
 
 type fakeBackend struct {
@@ -81,9 +86,9 @@ func (f *fakeBackend) Execute(_ context.Context, p core.Plan) core.Result {
 	f.ran = append(f.ran, p)
 	return core.Result{Plan: p, Output: "ok"}
 }
-func (f *fakeBackend) Setup(context.Context, core.Plan) (string, error) { return "", nil }
-func (f *fakeBackend) TerminalCmd(core.Plan) *exec.Cmd                  { return exec.Command("true") }
-func (f *fakeBackend) FindClones(context.Context, string) []string      { return f.found }
+func (f *fakeBackend) Setup(ctx context.Context, _ core.Plan) (string, error) { return "", ctx.Err() }
+func (f *fakeBackend) TerminalCmd(core.Plan) *exec.Cmd                        { return exec.Command("true") }
+func (f *fakeBackend) FindClones(context.Context, string) []string            { return f.found }
 func (f *fakeBackend) SetClonePath(repo, path string) (string, error) {
 	if f.saved == nil {
 		f.saved = map[string]string{}
@@ -191,6 +196,26 @@ func TestListAndDetail(t *testing.T) {
 	}
 }
 
+func TestCarriageReturnsNeverReachTheTerminal(t *testing.T) {
+	be, m := newTest(t)
+	be.prs[0].Title = "Add streaming\r push source\v"
+	m = search(t, m)
+	pr, _ := m.selected()
+	d, _ := m.be.Detail(context.Background(), pr)
+	d.Timeline[1].DiffHunk = "@@ -1 +1 @@\r\n-def pull():\r\n+def push():\r\n"
+	nm, _ := m.Update(detailMsg{key: pr.Key(), d: d})
+	m = nm.(Model)
+	view := m.View()
+	if strings.ContainsAny(view, "\r\v") {
+		t.Errorf("a \\r or \\v reached the terminal:\n%q", view)
+	}
+	for _, want := range []string{"Add streaming push source", "+def push():"} {
+		if !strings.Contains(ansi.Strip(view), want) {
+			t.Errorf("view missing %q\n%s", want, ansi.Strip(view))
+		}
+	}
+}
+
 func TestMoveAndRepoFilter(t *testing.T) {
 	_, m := newTest(t)
 	m = search(t, m)
@@ -205,6 +230,48 @@ func TestMoveAndRepoFilter(t *testing.T) {
 	}
 }
 
+func TestRepoFilterAfterRefresh(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, key("h"))
+	m = send(t, m, key("j"))
+	m = send(t, m, key("j"))
+	if m.repoSel != "northwind/registry" {
+		t.Fatalf("repoSel = %q", m.repoSel)
+	}
+	// operator's PR closes: registry moves up a row, and the cursor goes with it.
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: []github.PR{be.prs[0], be.prs[2]}})
+	m = nm.(Model)
+	if rows := m.repoRows(); rows[m.repoCursor].name != "northwind/registry" {
+		t.Errorf("repo cursor on %q, filter on %q", rows[m.repoCursor].name, m.repoSel)
+	}
+	// registry's PR closes too: back to all repositories rather than an empty list.
+	nm, _ = m.Update(searchMsg{seq: m.seq, prs: []github.PR{be.prs[2]}})
+	m = nm.(Model)
+	if m.repoSel != "" || m.repoCursor != 0 || len(m.visible()) != 1 {
+		t.Errorf("repoSel=%q repoCursor=%d visible=%d", m.repoSel, m.repoCursor, len(m.visible()))
+	}
+}
+
+func TestListScrollsBackWhenItShrinks(t *testing.T) {
+	be, m := newTest(t)
+	var prs []github.PR
+	for i := 1; i <= 60; i++ {
+		prs = append(prs, github.PR{Number: i, Title: fmt.Sprintf("Change %d", i), Repo: "northwind/registry"})
+	}
+	be.prs = prs
+	m = search(t, m)
+	m = send(t, m, key("G"))
+	if m.listTop == 0 {
+		t.Fatal("the list did not scroll")
+	}
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: prs[:10]})
+	m = nm.(Model)
+	if m.listTop != 0 || !strings.Contains(ansi.Strip(m.View()), "Change 1 ") {
+		t.Errorf("listTop = %d; all 10 PRs fit, so the list should show from the top", m.listTop)
+	}
+}
+
 func TestFilterSwitchSearches(t *testing.T) {
 	be, m := newTest(t)
 	m = search(t, m)
@@ -214,6 +281,20 @@ func TestFilterSwitchSearches(t *testing.T) {
 	}
 	if len(be.searched) == 0 || be.searched[len(be.searched)-1] != "author:@me" {
 		t.Errorf("searched = %v", be.searched)
+	}
+}
+
+func TestFilterKeysApplyInOrder(t *testing.T) {
+	_, m := newTest(t)
+	m = search(t, m)
+	// Bubble Tea runs commands in their own goroutines, in no fixed order, so the
+	// switch must not wait for one.
+	for _, k := range []string{"2", "3"} {
+		nm, _ := m.Update(key(k))
+		m = nm.(Model)
+	}
+	if m.active != 2 {
+		t.Errorf("active = %d, want the last filter pressed", m.active)
 	}
 }
 
@@ -258,6 +339,20 @@ func TestFetchRunsAtOnce(t *testing.T) {
 	m = send(t, m, key("f"))
 	if len(be.ran) != 1 || be.ran[0].Title != "Fetch" {
 		t.Errorf("ran = %+v", be.ran)
+	}
+}
+
+func TestNavigationKeyCommandWarns(t *testing.T) {
+	cfg := config.Default()
+	cfg.Commands = append(cfg.Commands, config.Command{Name: "Lint", Key: "l", Run: "make lint", Bar: cfg.Commands[0].Bar})
+	m := New(&fakeBackend{cfg: cfg})
+	if len(m.cfg.Warnings) != 1 || !strings.Contains(m.cfg.Warnings[0], `"Lint"`) {
+		t.Errorf("warnings = %v", m.cfg.Warnings)
+	}
+	for _, it := range m.barItems() {
+		if it.key == "l" {
+			t.Error("the key bar offers l, which only switches panes here")
+		}
 	}
 }
 
@@ -454,6 +549,45 @@ func TestMissingCloneFoundAndSaved(t *testing.T) {
 	}
 }
 
+func TestMissingCloneRunsOnItsPR(t *testing.T) {
+	be, m := newTest(t)
+	be.noClone = map[string]bool{"northwind/registry": true}
+	be.found = []string{"/elsewhere/registry"}
+	m = search(t, m)
+	m = send(t, m, key("f"))
+	if m.missing == nil {
+		t.Fatal("no missing-clone dialog")
+	}
+	l := m.layout()
+	m = send(t, m, click(5, 1+l.reposH+2+2)) // the row of #77
+	if pr, _ := m.selected(); pr.Number != 4821 {
+		t.Fatalf("a click behind the dialog selected #%d", pr.Number)
+	}
+	// A refresh that drops the PR moves the selection too.
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: be.prs[1:]})
+	m = nm.(Model)
+	m = send(t, m, key("1"))
+	if len(be.ran) != 1 || be.ran[0].PR.Number != 4821 {
+		t.Errorf("the command should run on #4821: ran=%+v", be.ran)
+	}
+}
+
+func TestPromptRunsOnItsPR(t *testing.T) {
+	be, m := newTest(t)
+	m.cfg.Commands = append(m.cfg.Commands, config.Command{Name: "Commit", Key: "m", Prompt: "Message", Run: "git commit -m {input}"})
+	m = search(t, m)
+	m = send(t, m, key("m"))
+	nm, _ := m.Update(searchMsg{seq: m.seq, prs: be.prs[1:]})
+	m = nm.(Model)
+	for _, r := range "wip" {
+		m = send(t, m, key(string(r)))
+	}
+	m = send(t, m, key("enter"))
+	if len(be.ran) != 1 || be.ran[0].PR.Number != 4821 {
+		t.Errorf("the command should run on #4821: ran=%+v", be.ran)
+	}
+}
+
 func TestSetClonePathPrompt(t *testing.T) {
 	be, m := newTest(t)
 	m = search(t, m)
@@ -509,5 +643,105 @@ func TestPathPromptArrowsAndClick(t *testing.T) {
 	want := m.be.(*fakeBackend).saved["northwind/registry"]
 	if want == "" || m.pathRepo != "" {
 		t.Errorf("click did not pick a clone: saved=%v", be.saved)
+	}
+}
+
+func TestFirstResultKeepsSecondRunning(t *testing.T) {
+	_, m := newTest(t)
+	m = search(t, m)
+	nm, fetch := m.Update(key("f"))
+	m = nm.(Model)
+	nm, _ = m.Update(key("b"))
+	m = nm.(Model)
+	nm, _ = m.Update(fetch())
+	m = nm.(Model)
+	if m.running != "Open on GitHub" || m.cancel == nil {
+		t.Errorf("Fetch's result cleared the command still running: running=%q cancel=%v", m.running, m.cancel != nil)
+	}
+	if m.out == nil || m.out.title != "Fetch" {
+		t.Errorf("Fetch's output not kept: %+v", m.out)
+	}
+}
+
+func TestEscCancelsTerminalSetup(t *testing.T) {
+	_, m := newTest(t)
+	m.cfg.Commands = append(m.cfg.Commands, config.Command{Name: "Tests", Key: "T", Run: "make test", Output: "terminal"})
+	m = search(t, m)
+	nm, setup := m.Update(key("T"))
+	m = nm.(Model)
+	if m.running != "Tests" {
+		t.Fatalf("running = %q", m.running)
+	}
+	nm, _ = m.Update(key("esc"))
+	m = nm.(Model)
+	nm, _ = m.Update(setup())
+	m = nm.(Model)
+	if m.running != "" || m.out == nil || m.out.ok {
+		t.Errorf("esc should cancel the setup: running=%q out=%+v", m.running, m.out)
+	}
+}
+
+func TestClickInViewTallerThanTerminal(t *testing.T) {
+	be, m := newTest(t)
+	m = search(t, m)
+	m = send(t, m, tea.WindowSizeMsg{Width: 100, Height: 12})
+	m = send(t, m, key("L"))
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	if len(lines) <= m.h {
+		t.Fatalf("view is %d lines, want more than %d", len(lines), m.h)
+	}
+	lines = lines[len(lines)-m.h:] // Bubble Tea shows the last lines
+	row := -1
+	for i, l := range lines {
+		if strings.Contains(l, "odh-feast") {
+			row = i
+		}
+	}
+	m = send(t, m, click(4, row))
+	if got := be.saved["northwind/registry"]; got != "/home/me/projects/odh-feast" {
+		t.Errorf("clicked odh-feast on row %d, saved %q", row, got)
+	}
+}
+
+func TestTerminalCommandGetsTheTerminal(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "tty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := termout.New(f)
+	defer out.Close()
+
+	c := ttyCmd{exec.Command("true")}
+	c.SetStdout(out)
+	if c.Stdout != io.Writer(f) {
+		t.Errorf("stdout is %T, want the terminal file itself", c.Stdout)
+	}
+	var buf bytes.Buffer
+	c = ttyCmd{exec.Command("true")}
+	c.SetStdout(&buf)
+	if c.Stdout != io.Writer(&buf) {
+		t.Errorf("stdout is %T, want the writer it was given", c.Stdout)
+	}
+	c = ttyCmd{exec.Command("true")}
+	c.Stdout = &buf
+	c.SetStdout(out)
+	if c.Stdout != io.Writer(&buf) {
+		t.Error("a stdout the command set itself was replaced")
+	}
+}
+
+// A terminal command replaced by a newer one while its setup ran must not take over
+// the terminal when that setup finishes; the newer one's setup still runs it.
+func TestReplacedTerminalCommandNeverRuns(t *testing.T) {
+	_, m := newTest(t)
+	m.runID = 2
+	old := preparedMsg{id: 1, plan: core.Plan{Title: "nvim", Terminal: true}}
+	if _, cmd := m.Update(old); cmd != nil {
+		t.Error("a replaced command's setup started it anyway")
+	}
+	m.running = "Run tests"
+	nm, cmd := m.Update(preparedMsg{id: 2, plan: core.Plan{Title: "Run tests", Terminal: true}})
+	if cmd == nil || nm.(Model).running != "" {
+		t.Errorf("the current command did not run (running=%q)", nm.(Model).running)
 	}
 }

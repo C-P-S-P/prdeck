@@ -2,6 +2,7 @@ package repos
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -89,5 +90,66 @@ func TestWorktreePath(t *testing.T) {
 		if got := WorktreePath("/w", repo, 42); got != filepath.FromSlash(want) { // \w\feast-42 on Windows
 			t.Errorf("WorktreePath(%q) = %q, want %q", repo, got, want)
 		}
+	}
+}
+
+// A worktree folder deleted by hand is still registered with git. BranchWorktree must
+// not use it, and must change nothing (it runs on every selection); DropMissingWorktree,
+// run before a checkout, frees the branch, also when the folder around it was deleted
+// too (a temp folder cleaned up), but leaves a worktree on a disk that is not mounted
+// right now alone.
+func TestBranchWorktreeDeletedByHand(t *testing.T) {
+	clone := realClone(t, "https://github.com/acme/tool.git")
+	wt := filepath.Join(t.TempDir(), "tool-42")
+	git(t, clone, "worktree", "add", "-q", "-b", "feat", wt)
+	unmounted := filepath.Join(t.TempDir(), "Volumes", "Ext")
+	other := filepath.Join(unmounted, "tool-43")
+	git(t, clone, "worktree", "add", "-q", "-b", "other", other)
+	scratch := filepath.Join(t.TempDir(), "session", "scratchpad")
+	tmp := filepath.Join(scratch, "tool-44")
+	git(t, clone, "worktree", "add", "-q", "-b", "temp", tmp)
+	if got := BranchWorktree(clone, "feat"); got == "" {
+		t.Fatal("worktree not found")
+	}
+	for _, dir := range []string{wt, unmounted, filepath.Dir(scratch)} {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed := func() string {
+		out, _ := exec.Command("git", "-C", clone, "worktree", "list").Output()
+		return string(out)
+	}
+	if got := BranchWorktree(clone, "feat"); got != "" {
+		t.Errorf("BranchWorktree = %q, a folder that is gone", got)
+	}
+	if !strings.Contains(listed(), "tool-42") {
+		t.Error("BranchWorktree unregistered a worktree; looking up must change nothing")
+	}
+	DropMissingWorktree(clone, "feat")
+	DropMissingWorktree(clone, "other")
+	DropMissingWorktree(clone, "temp")
+	if l := listed(); strings.Contains(l, "tool-42") || !strings.Contains(l, "tool-43") || strings.Contains(l, "tool-44") {
+		t.Errorf("after DropMissingWorktree:\n%s", l)
+	}
+	git(t, clone, "checkout", "-q", "feat")
+	git(t, clone, "checkout", "-q", "temp")
+}
+
+func TestOwnBranch(t *testing.T) {
+	clone := realClone(t, "https://github.com/acme/tool.git")
+	if OwnBranch(clone, "origin", "acme/tool", "main") {
+		t.Error("true with the default branch unknown")
+	}
+	git(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	if !OwnBranch(clone, "origin", "acme/tool", "main") {
+		t.Error("false for the default branch of a clone with only the base remote")
+	}
+	if OwnBranch(clone, "origin", "acme/tool", "feat") {
+		t.Error("true for a branch that is not the default")
+	}
+	git(t, clone, "remote", "add", "fork", "git@github.com:alice/tool.git")
+	if OwnBranch(clone, "origin", "acme/tool", "main") {
+		t.Error("true with a remote that may be the fork")
 	}
 }

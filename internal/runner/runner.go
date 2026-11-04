@@ -65,12 +65,16 @@ func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
 	return c
 }
 
-// Run runs a script in dir and returns its combined output.
+// Run runs a script in dir and returns its combined output. Cancelling ctx stops the
+// whole script: in `a && b` the shell is only the parent, and b would keep running and
+// keep Run waiting on its output.
 func Run(ctx context.Context, script, dir string) (string, error) {
 	c := Command(ctx, script, dir, true)
+	done := killGroup(c)
 	var buf bytes.Buffer
 	c.Stdout, c.Stderr = &buf, &buf
 	err := c.Run()
+	done()
 	out := buf.String()
 	if runtime.GOOS == "windows" {
 		out = strings.ReplaceAll(out, "\r\n", "\n") // what Windows programs end lines with

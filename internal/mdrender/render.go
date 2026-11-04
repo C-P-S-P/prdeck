@@ -1,6 +1,7 @@
 package mdrender
 
 import (
+	"html"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,9 +31,14 @@ type renderer struct {
 	quoted   int                // blockquote nesting
 }
 
+// lineEnds turns \r\n and a lone \r (both line ends, as on GitHub) into \n. A \r that
+// reached the terminal, in a code block say, would move back to the start of the line
+// and let the rest of it overwrite what was shown.
+var lineEnds = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
 // Render turns GitHub markdown into terminal lines, joined with newlines.
 func Render(markdown string, o Options) string {
-	src := []byte(GitHubToMarkdown(markdown))
+	src := []byte(GitHubToMarkdown(noControls(lineEnds.Replace(markdown), "\n\t")))
 	doc := parser.Parser().Parse(text.NewReader(src))
 	r := &renderer{src: src, links: o.Links, override: map[ast.Node]style{}}
 	w := max(o.Width, 20)
@@ -69,6 +75,7 @@ func (r *renderer) text() style {
 }
 
 func (r *renderer) block(n ast.Node, w int) []string {
+	w = max(w, 1) // each quote or list level takes columns; deep nesting would go below zero
 	switch n := n.(type) {
 	case *ast.Paragraph, *ast.TextBlock:
 		return r.wrap(r.inline(n, r.text()), w)
@@ -138,9 +145,6 @@ func (r *renderer) list(n *ast.List, w int) []string {
 	defer func() { r.depth-- }()
 	count := n.ChildCount()
 	start := n.Start
-	if start == 0 {
-		start = 1
-	}
 	numW := len(strconv.Itoa(start + count - 1))
 	var out []string
 	i := 0
@@ -197,7 +201,8 @@ func (r *renderer) html(n *ast.HTMLBlock, w int) []string {
 		seg := n.Lines().At(i)
 		b.Write(seg.Value(r.src))
 	}
-	t := strings.TrimSpace(spaceRe.ReplaceAllString(tagRe.ReplaceAllString(b.String(), " "), " "))
+	// Entities are decoded after the tags go, so an escaped &lt;tag&gt; stays as text.
+	t := strings.TrimSpace(spaceRe.ReplaceAllString(noControls(html.UnescapeString(tagRe.ReplaceAllString(b.String(), " ")), "\n\r\t"), " "))
 	if t == "" {
 		return nil
 	}

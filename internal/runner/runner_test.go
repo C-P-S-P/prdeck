@@ -140,3 +140,15 @@ func TestCancelStopsTreeOnWindows(t *testing.T) {
 		t.Errorf("Run returned after %v, err=%v", took, err)
 	}
 }
+
+// Cancelling must stop every command of a script, not only the shell, so a hung
+// `git fetch` after `&&` cannot keep Run waiting.
+func TestCancelStopsWholeScript(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	start := time.Now()
+	_, err := Run(ctx, "sleep 5 && echo done", t.TempDir())
+	if took := time.Since(start); err == nil || took > time.Second {
+		t.Errorf("Run returned after %v, err=%v", took, err)
+	}
+}

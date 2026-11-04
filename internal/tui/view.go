@@ -42,6 +42,9 @@ func (m *Model) syncViewport() {
 	m.vp.Width, m.vp.Height = l.rightW-2, l.bodyH-2
 
 	listH := l.prsH - 3
+	if listH > 0 { // no empty rows below the list while rows above are hidden
+		m.listTop = max(0, min(m.listTop, len(m.visible())-listH))
+	}
 	if m.cursor < m.listTop {
 		m.listTop = m.cursor
 	}
@@ -92,8 +95,14 @@ func (m Model) View() string {
 	l := m.layout()
 	left := lipgloss.JoinVertical(lipgloss.Left, m.reposBox(l.leftW, l.reposH), m.prsBox(l.leftW, l.prsH))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, m.detailBox(l.rightW, l.bodyH))
-	return m.topBar() + "\n" + body + "\n" + strings.Join(l.bottom, "\n")
+	return cursorMoves.Replace(m.topBar() + "\n" + body + "\n" + strings.Join(l.bottom, "\n"))
 }
+
+// cursorMoves are the control characters besides \n and \t that text from GitHub still
+// carries (gh's API client turns ESC and the rest into ^[): a diff hunk from a file with
+// \r\n line ends, say. On the terminal they move the cursor, and the rest of the line
+// overwrites another pane. The UI never draws them itself.
+var cursorMoves = strings.NewReplacer("\r", "", "\v", "")
 
 func (m Model) topBar() string {
 	left := sBadge.Render("prdeck") + " " + sGreen.Render("❯") + " " + sText.Render("is:open "+m.query())
@@ -699,7 +708,7 @@ type barItem struct {
 func (m Model) barItems() []barItem {
 	var items []barItem
 	for _, c := range m.cfg.Commands {
-		if !c.OnBar() || c.Key == "" {
+		if !c.OnBar() || c.Key == "" || navKeys[c.Key] {
 			continue
 		}
 		st := sKey
