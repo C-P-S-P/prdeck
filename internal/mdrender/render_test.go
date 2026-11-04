@@ -169,3 +169,141 @@ func TestGitHubForDesktop(t *testing.T) {
 		}
 	}
 }
+
+func TestHostileTextIsHarmless(t *testing.T) {
+	// Each quote or list level takes columns; deep nesting used to panic.
+	deep := strings.Repeat("> ", 50) + "---\n\n" + strings.Repeat("- ", 30) + "# x\n\n" + strings.Repeat("> ", 30) + "```\ncode\n```"
+	for _, w := range []int{20, 97} {
+		for _, l := range strings.Split(Render(deep, Options{Width: w}), "\n") {
+			if ansi.StringWidth(l) > w {
+				t.Errorf("width %d: %q is %d wide", w, plain(l), ansi.StringWidth(l))
+			}
+		}
+	}
+
+	// Escape sequences in PR text, written as entities or raw, never reach the terminal.
+	src := "a &#27;]52;c;eA==&#7; &#155;2J `&#27;]0;t&#7;` raw\x1b]0;t\x07 ![al&#27;[2Jt](u)\n\n```\nx\x1b[2J\n```\n\n# h&#13;i" +
+		"\n\n```suggestion\nrm -rf ~\recho safe\n```"
+	out := Render(src, Options{Width: 80, Links: true})
+	for _, bad := range []string{"\x1b]52", "\x1b]0", "\x1b[2J", "\a", "\u009b", "\r"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("%q reached the output:\n%q", bad, out)
+		}
+	}
+	if !strings.Contains(plain(out), "]52;c;eA==") || !strings.Contains(plain(out), "hi") {
+		t.Errorf("text around the escapes went missing:\n%s", plain(out))
+	}
+	// A lone \r ends a line, as on GitHub, so a suggestion can't hide its first part.
+	if !strings.Contains(plain(out), " rm -rf ~ ") || !strings.Contains(plain(out), " echo safe ") {
+		t.Errorf("a \\r in a code block hid part of it:\n%s", plain(out))
+	}
+}
+
+func TestFencesFollowCommonMark(t *testing.T) {
+	// ```npm install``` on its own line is inline code, not a fence, so the cleanup
+	// goes on after it. A fence closes only with the same character, at least as
+	// many of them, and nothing after.
+	toMarkdown := map[string]string{
+		"```npm install```\ncc @foo <b>x</b>":     "```npm install```\ncc **@foo** **x**",
+		"````md\n```go\n@foo <b>x</b>\n```\n````": "````md\n```go\n@foo <b>x</b>\n```\n````",
+		"```\n```go\n@foo\n```\nafter @bar":       "```\n```go\n@foo\n```\nafter **@bar**",
+		"~~~\n```\n@foo\n~~~\n@bar":               "~~~\n```\n@foo\n~~~\n**@bar**",
+		"```suggestion\nreturn x\n````\n@bar":     "**Suggested change**\n\n```\nreturn x\n````\n**@bar**",
+		// A fence inside a template's HTML comment is only text, so "``` -->" ends it.
+		"<!--\n```toml\nx\n``` -->\n@bar": "\n**@bar**",
+	}
+	for in, want := range toMarkdown {
+		if got := GitHubToMarkdown(in); got != want {
+			t.Errorf("GitHubToMarkdown(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	forDesktop := map[string]string{
+		"```npm install```\ncc @foo":      "```npm install```\ncc [@foo](https://github.com/foo)",
+		"````md\n```go\n@foo\n```\n````":  "````md\n```go\n@foo\n```\n````",
+		"<!--\n```toml\nx\n``` -->\n@bar": "\n[@bar](https://github.com/bar)",
+	}
+	for in, want := range forDesktop {
+		if got := GitHubForDesktop(in); got != want {
+			t.Errorf("GitHubForDesktop(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+func TestCodeSpanKeepsBackslashes(t *testing.T) {
+	// Backslashes in code are literal. Entities still read as characters, so HTML
+	// <code>&lt;T&gt;</code> from the cleanup step shows <T>.
+	out := plain(Render("match `^\\d+\\.\\d+$` in `a\\_b`, not schema\\_x, and <code>&lt;T&gt;</code>", Options{Width: 80}))
+	for _, want := range []string{" ^\\d+\\.\\d+$ ", " a\\_b ", "schema_x", " <T>"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+}
+
+func TestHTMLCodeReadsEscapes(t *testing.T) {
+	// HTML <code> is markdown on GitHub, so \_ reads _ there, unlike in a code span.
+	out := plain(Render("<code>a\\_b</code> <kbd>Ctrl+\\\\</kbd> `c\\_d`", Options{Width: 80}))
+	for _, want := range []string{"a_b ", " Ctrl+\\ ", " c\\_d"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+}
+
+func TestTabsSeparateWords(t *testing.T) {
+	if out := plain(Render("BenchmarkFoo\t1234 ns/op\ta\tb", Options{Width: 80})); out != "BenchmarkFoo 1234 ns/op a b" {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestListCanStartAtZero(t *testing.T) {
+	if out := plain(Render("0. zero\n1. one", Options{Width: 40})); out != "0. zero\n1. one" {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestCodeCutAtEdgeKeepsPanelWidth(t *testing.T) {
+	// A token that ends exactly at the edge, and wide characters across it.
+	for _, src := range []string{
+		"```python\naaaaaaaaaaaaaaaaaa = 1\n```",
+		"```go\nx := \"日本語日本語日本語日本語\"\n```",
+		"```\n日本語日本語日本語日本語日本語\n```",
+	} {
+		out := Render(src, Options{Width: 20})
+		for _, l := range strings.Split(out, "\n") {
+			if ansi.StringWidth(l) != 20 {
+				t.Errorf("%q: code panel line is %d wide, want 20: %q", src, ansi.StringWidth(l), plain(l))
+			}
+		}
+		if lines := strings.Split(plain(out), "\n"); !strings.HasSuffix(strings.TrimRight(lines[len(lines)-1], " "), "…") {
+			t.Errorf("%q: long code line should end in …: %q", src, lines[len(lines)-1])
+		}
+	}
+	// The "…" has its own style, not the bold or italic of the token it cuts.
+	if out := Render("```go\nfunc aaaaaaaaaaaaaaaaaaaa() {}\n```", Options{Width: 12}); !strings.Contains(out, "\x1b[0m"+paint("…", style{fg: cDim, bg: cPanel}, false)) {
+		t.Errorf("the … should follow a reset: %q", out)
+	}
+}
+
+func TestHTMLBlockEntitiesRead(t *testing.T) {
+	if out := plain(Render("<table><tr><td>a &amp; b &#x2705; &lt;br&gt;</td></tr></table>", Options{Width: 60})); out != "a & b ✅ <br>" {
+		t.Errorf("got %q", out)
+	}
+	if out := Render("<table><tr><td>&#27;]0;t&#7;</td></tr></table>", Options{Width: 60}); strings.Contains(out, "\x1b]") || strings.Contains(out, "\a") {
+		t.Errorf("an escape reached the output: %q", out)
+	}
+}
+
+// Bidi overrides would let a suggestion show text in another order than it runs.
+func TestBidiControlsAreDropped(t *testing.T) {
+	src := "```suggestion\nrm -rf ~ ‮ # ⁦safe⁩\n```\nfamily: 👨‍👩‍👧"
+	out := ansi.Strip(Render(src, Options{Width: 60}))
+	for _, r := range []rune{'‮', '⁦', '⁩'} {
+		if strings.ContainsRune(out, r) {
+			t.Errorf("bidi control %U reached the terminal:\n%s", r, out)
+		}
+	}
+	if !strings.Contains(out, "👨‍👩‍👧") {
+		t.Errorf("zero-width joiner was dropped from an emoji:\n%s", out)
+	}
+}

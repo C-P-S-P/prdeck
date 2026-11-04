@@ -6,6 +6,7 @@
   ],
   "clone": "~/code/registry",
   "exists": true,
+  "ownBranch": false,
   "path": "~/code/registry",
   "rebasing": false,
   "remote": "origin",

@@ -78,6 +78,9 @@ pub struct Pr {
     pub base: String,
     #[serde(rename = "isCrossRepository")]
     pub cross_repo: bool,
+    /// Owner of the head repo (the fork); sent back so the core knows the local branch name.
+    #[serde(rename = "headOwner")]
+    pub head_owner: String,
     pub mergeable: String,
     #[serde(rename = "reviewDecision")]
     pub review_decision: String,
@@ -314,6 +317,9 @@ pub struct Folder {
     #[serde(deserialize_with = "null_vec")]
     pub changes: Vec<String>,
     pub rebasing: bool,
+    // Kept for the trip back: the core names a fork PR's branch by it when it runs.
+    #[serde(rename = "ownBranch")]
+    pub own_branch: bool,
 }
 
 /// A command ready to show and run. It goes back to the server unchanged to run.
@@ -343,6 +349,10 @@ impl Plan {
             (false, true) => self.pre.clone(),
             (false, false) => format!("{} && {}", self.pre, self.script),
         }
+    }
+    /// The plan makes a new worktree for the PR before it runs.
+    pub fn new_worktree(&self) -> bool {
+        self.folder.worktree && !self.folder.exists && self.action != "browse" && self.action != "clone"
     }
     /// Where it runs, for display.
     pub fn dir(&self) -> String {
@@ -428,6 +438,8 @@ pub struct SetupStatus {
     pub editors: Vec<EditorChoice>,
     pub editor: String,
     pub worktree: bool,
+    /// Where new worktrees go (editor.worktree_dir).
+    pub worktree_dir: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

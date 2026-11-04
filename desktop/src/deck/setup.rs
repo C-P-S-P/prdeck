@@ -29,6 +29,8 @@ pub(super) struct Setup {
     add: Entity<InputState>,
     editor: String,
     worktree: bool,
+    /// Where new worktrees go; saved as soon as it is changed.
+    pub(super) worktree_dir: String,
     saving: bool,
     error: Option<String>,
     _sub: Subscription,
@@ -57,6 +59,7 @@ impl Deck {
             add,
             editor: self.hello.editor.clone(),
             worktree: false,
+            worktree_dir: String::new(),
             saving: false,
             error: None,
             _sub: sub,
@@ -84,6 +87,7 @@ impl Deck {
                                 .map(|(i, f)| (f.path.clone(), f.clones, f.saved || (!any_saved && i == 0 && f.clones > 0)))
                                 .collect();
                             setup.worktree = st.worktree;
+                            setup.worktree_dir = st.worktree_dir.clone();
                             let current = st.editors.iter().find(|e| e.name == st.editor && e.installed);
                             setup.editor = current
                                 .or_else(|| st.editors.iter().find(|e| e.installed))
@@ -328,6 +332,10 @@ impl Deck {
                                     this.layout.onboarded = true;
                                     this.layout.save();
                                     this.focus.focus(window, cx);
+                                    // Nobody was signed in at launch, so the list was never loaded.
+                                    if this.synced.is_none() && !this.loading {
+                                        this.load(cx);
+                                    }
                                     cx.notify();
                                 }))
                                 .child("Skip and keep my current settings"),
@@ -346,9 +354,11 @@ impl Deck {
             return div().flex().flex_col().gap(px(12.)).child(title).child(blurb).child(div().text_color(rgb(DIM)).child("Checking…")).into_any_element();
         };
         let mut col = div().flex().flex_col().gap(px(14.)).child(title).child(blurb);
+        let failed = if let LoginState::Failed(e) = &s.login { Some(e.clone()) } else { None };
 
         if !st.gh_installed {
             col = col.child(div().text_color(rgb(YELLOW)).child("The GitHub CLI (gh) is not installed."));
+            col = col.when_some(failed, |c, e| c.child(div().text_color(rgb(RED)).child(e)));
             col = match &s.login {
                 LoginState::Installing => col.child(div().text_color(rgb(SOFT)).child("Installing gh with Homebrew…")),
                 _ => col.child(
@@ -373,7 +383,8 @@ impl Deck {
                         .child(button_look("check-gh").on_click(cx.listener(|this, _, _, cx| this.refresh_setup(cx))).child("Check again")),
                 ),
             };
-        } else if st.signed_in {
+        } else if st.signed_in && !matches!(s.login, LoginState::Starting | LoginState::Code(_)) {
+            // Signing in to another account shows its code below, as when signed out.
             col = col
                 .child(
                     div()
@@ -394,6 +405,7 @@ impl Deck {
                         )
                         .child(div().ml_auto().text_color(rgb(GREEN)).child("✓")),
                 )
+                .when_some(failed, |c, e| c.child(div().text_color(rgb(RED)).child(e)))
                 .child(
                     div()
                         .flex()
@@ -408,7 +420,6 @@ impl Deck {
         } else {
             col = match &s.login {
                 LoginState::Idle | LoginState::Failed(_) => {
-                    let failed = if let LoginState::Failed(e) = &s.login { Some(e.clone()) } else { None };
                     col.when_some(failed, |c, e| c.child(div().text_color(rgb(RED)).child(e))).child(
                         div().flex().child(
                             primary_look("sign-in")
@@ -561,6 +572,7 @@ impl Deck {
                 }))
         });
         let worktree = s.worktree;
+        let worktree_dir = if s.worktree_dir.is_empty() { "~/prdeck".to_string() } else { s.worktree_dir.clone() };
         div()
             .flex()
             .flex_col()
@@ -594,6 +606,24 @@ impl Deck {
                             .child(div().text_size(px(12.)).text_color(rgb(DIM)).child(
                                 "Keeps your clone untouched while you review. Off: PR Deck switches your clone's branch, and asks before touching uncommitted work.",
                             )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .pl(px(26.))
+                    .text_size(px(12.))
+                    .child(div().flex_none().text_color(rgb(SOFT)).child("Worktrees go in"))
+                    .child(div().flex_1().min_w(px(0.)).truncate().font_family(MONO).text_color(rgb(TEXT)).child(worktree_dir))
+                    .child(
+                        button_look("setup-worktree-dir")
+                            .h(px(26.))
+                            .text_size(px(12.))
+                            .on_click(cx.listener(|this, _, window, cx| this.pick_worktree_dir(window, cx)))
+                            .child(icon("folder-open", 13., SOFT))
+                            .child("Change folder…"),
                     ),
             )
             .child(

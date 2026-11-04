@@ -49,10 +49,6 @@ func TestCheckLinksAndRuns(t *testing.T) {
 	}
 }
 
-type roundTrip func(*http.Request) (*http.Response, error)
-
-func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
 // A token that may not read Actions gets an error for each check's workflowRun with
 // the rest of the PR. The PR view must still load; other errors still fail.
 func TestDetailWithoutActionsAccess(t *testing.T) {

@@ -55,6 +55,7 @@ type setupStatus struct {
 	Editors      []editorChoice `json:"editors"`
 	Editor       string         `json:"editor"`
 	Worktree     bool           `json:"worktree"`
+	WorktreeDir  string         `json:"worktreeDir"`
 }
 
 // editors PR Deck knows how to open: config name, label, command-line tool, app.
@@ -67,7 +68,7 @@ var knownEditors = []struct{ name, label, cli, app string }{
 
 func (s *server) setupStatus() (any, error) {
 	cfg := s.b.Config()
-	st := setupStatus{ConfigPath: s.info.ConfigPath, Editor: cfg.Editor.Default, Worktree: cfg.Editor.UseWorktree()}
+	st := setupStatus{ConfigPath: s.info.ConfigPath, Editor: cfg.Editor.Default, Worktree: cfg.Editor.UseWorktree(), WorktreeDir: cfg.Editor.WorktreeDir}
 	if _, err := os.Stat(s.info.ConfigPath); err == nil {
 		st.ConfigExists = true
 	}

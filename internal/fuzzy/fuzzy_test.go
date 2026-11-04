@@ -2,6 +2,7 @@ package fuzzy
 
 import (
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,34 @@ func TestIndexes(t *testing.T) {
 	_, idx, ok := Match("cp", "~/projects/cp")
 	if !ok || len(idx) != 2 || idx[0] != 11 || idx[1] != 12 {
 		t.Errorf("idx = %v", idx)
+	}
+}
+
+func TestIndexesPointIntoTheText(t *testing.T) {
+	// The Kelvin sign lowercases to a one-byte k, so offsets in the lowercased text
+	// are not offsets in s. İ gets one byte shorter and Ⱥ one longer, which leaves the
+	// length as it was.
+	for _, s := range []string{"~/K/feast", "~/İfeastȺ"} {
+		_, idx, ok := Match("feast", s)
+		if !ok {
+			t.Fatalf("feast should match %q", s)
+		}
+		for _, i := range idx {
+			if !strings.ContainsRune("feast", rune(s[i])) {
+				t.Errorf("%q: idx = %v marks byte %q", s, idx, s[i])
+			}
+		}
+	}
+}
+
+func TestWordStartAfterNonASCII(t *testing.T) {
+	score := func(s string) int { sc, _, _ := Match("x", s); return sc }
+	// The last byte of à is 0xA0, which is not a space.
+	if a, b := score("~/àx"), score("~/ax"); a != b {
+		t.Errorf("x after à scores %d, after a %d", a, b)
+	}
+	if a, b := score("~/a x"), score("~/a x"); a != b {
+		t.Errorf("x after a no-break space scores %d, after a space %d", a, b)
 	}
 }
 

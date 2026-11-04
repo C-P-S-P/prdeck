@@ -4,21 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	ghconfig "github.com/cli/go-gh/v2/pkg/config"
 )
 
 // Client runs PR Deck's GraphQL queries. Auth comes from gh (`gh auth login`) or GH_TOKEN.
 type Client struct {
 	gql  *api.GraphQLClient
 	rest *api.RESTClient // diffs and re-runs: GraphQL has neither
+
+	imgMu sync.Mutex
+	img   *http.Client // images on GitHub's hosts, with the login; made on first use
 }
 
 func NewClient() (*Client, error) {
+	// go-gh reads gh's config once per process; read it again so a login made
+	// since then (Connect after sign-in) is the one used.
+	_ = ghconfig.Reload(nil)
 	opts := api.ClientOptions{Timeout: 30 * time.Second}
 	gql, err := api.NewGraphQLClient(opts)
 	if err != nil {
@@ -68,7 +77,7 @@ const searchQuery = `query PRDeckSearch($q: String!, $n: Int!) {
     nodes {
       ... on PullRequest {
         number title url isDraft state updatedAt createdAt
-        headRefName baseRefName isCrossRepository mergeable reviewDecision
+        headRefName baseRefName isCrossRepository headRepositoryOwner { login } mergeable reviewDecision
         author { login }
         repository { nameWithOwner }
         comments { totalCount }
@@ -93,6 +102,7 @@ type prNode struct {
 	HeadRefName    string    `json:"headRefName"`
 	BaseRefName    string    `json:"baseRefName"`
 	IsCrossRepo    bool      `json:"isCrossRepository"`
+	HeadOwner      *login    `json:"headRepositoryOwner"`
 	Mergeable      string    `json:"mergeable"`
 	ReviewDecision string    `json:"reviewDecision"`
 	Author         *login    `json:"author"`
@@ -117,7 +127,7 @@ func (n prNode) toPR() PR {
 	p := PR{
 		Number: n.Number, Title: n.Title, URL: n.URL, IsDraft: n.IsDraft, State: n.State,
 		UpdatedAt: n.UpdatedAt, CreatedAt: n.CreatedAt, HeadRefName: n.HeadRefName, BaseRefName: n.BaseRefName,
-		IsCrossRepo: n.IsCrossRepo, Mergeable: n.Mergeable, ReviewDecision: n.ReviewDecision,
+		IsCrossRepo: n.IsCrossRepo, HeadOwner: loginOf(n.HeadOwner), Mergeable: n.Mergeable, ReviewDecision: n.ReviewDecision,
 		Author: loginOf(n.Author), Repo: n.Repository.NameWithOwner, Comments: n.Comments.TotalCount,
 	}
 	if len(n.Commits.Nodes) > 0 && n.Commits.Nodes[0].Commit.StatusCheckRollup != nil {
@@ -169,8 +179,14 @@ func (c *Client) Search(ctx context.Context, filter string, limit int) ([]PR, st
 		} `json:"search"`
 	}
 	vars := map[string]any{"q": SearchQuery(filter), "n": limit}
-	if err := c.gql.DoWithContext(ctx, searchQuery, vars, &resp); err != nil {
-		return nil, "", err
+	err := c.gql.DoWithContext(ctx, searchQuery, vars, &resp)
+	if err != nil {
+		// Orgs with SAML or OAuth app limits the login is not cleared for come back
+		// as null nodes with FORBIDDEN errors; show the rest, as gh does.
+		var ge *api.GraphQLError
+		if !errors.As(err, &ge) || !ge.Match("FORBIDDEN", "search.nodes.") {
+			return nil, "", err
+		}
 	}
 	out := make([]PR, 0, len(resp.Search.Nodes))
 	for _, n := range resp.Search.Nodes {
@@ -179,6 +195,9 @@ func (c *Client) Search(ctx context.Context, filter string, limit int) ([]PR, st
 		}
 		out = append(out, n.toPR())
 	}
+	if err != nil && len(out) == 0 {
+		return nil, "", err // none of them can be shown, so say why
+	}
 	return out, resp.Viewer.Login, nil
 }
 
@@ -186,7 +205,7 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       id number title url body isDraft state updatedAt createdAt
-      headRefName baseRefName isCrossRepository mergeable reviewDecision
+      headRefName baseRefName isCrossRepository headRepositoryOwner { login } mergeable reviewDecision
       additions deletions changedFiles mergeStateStatus
       autoMergeRequest { mergeMethod enabledAt enabledBy { login } }
       baseRepository { autoMergeAllowed viewerDefaultMergeMethod mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed }

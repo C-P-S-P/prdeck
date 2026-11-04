@@ -147,6 +147,7 @@
       "path": "sdk/python/tests/integration/test_redis_push.py"
     }
   ],
+  "headOwner": "",
   "headRefName": "feat/stream-push-source",
   "isCrossRepository": false,
   "isDraft": false,

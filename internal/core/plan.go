@@ -132,7 +132,7 @@ func (s *Service) Prepare(c config.Command, pr github.PR, input string) (Plan, e
 	if err != nil {
 		return Plan{}, err
 	}
-	return BuildPlan(s.cfg, c, pr, f, input)
+	return BuildPlan(s.Config(), c, pr, f, input)
 }
 
 // BuildPlan is Prepare once the folder is known. It decides whether the PR's branch
@@ -163,7 +163,7 @@ func BuildPlan(cfg *config.Config, c config.Command, pr github.PR, f Folder, inp
 	if !f.Exists || f.Rebasing {
 		return p, nil
 	}
-	switchBranch := c.Branch && f.Branch != pr.HeadRefName
+	switchBranch := c.Branch && (LocalBranch(pr, f) == "" || f.Branch != LocalBranch(pr, f))
 	if switchBranch {
 		p.Pre = "gh pr checkout " + runner.Quote(pr.URL)
 	}
@@ -363,8 +363,8 @@ func MergeWord(method string) string {
 // ClonePlan offers to clone a repo that has no local clone yet.
 func (s *Service) ClonePlan(pr github.PR) Plan {
 	dir := "~"
-	if len(s.cfg.Repos.Scan) > 0 {
-		dir = s.cfg.Repos.Scan[0]
+	if scan := s.Config().Repos.Scan; len(scan) > 0 {
+		dir = scan[0]
 	}
 	target := filepath.Join(config.ExpandHome(dir), pr.Name())
 	return Plan{
@@ -402,4 +402,18 @@ func openURLCommand() string {
 		return "open"
 	}
 	return "xdg-open"
+}
+
+// LocalBranch is the name the PR's branch has in the clone once checked out: its head
+// branch, or <head owner>/<branch> for a fork PR from the base's default branch, which
+// gh renames so it can't clash with the user's own (Folder.OwnBranch). "" when that
+// name is not known (an older cached PR without its head owner).
+func LocalBranch(pr github.PR, f Folder) string {
+	if !f.OwnBranch {
+		return pr.HeadRefName
+	}
+	if pr.HeadOwner == "" {
+		return ""
+	}
+	return pr.HeadOwner + "/" + pr.HeadRefName
 }

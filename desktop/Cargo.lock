@@ -5099,6 +5099,7 @@ dependencies = [
  "gpui-pre-macos",
  "serde",
  "serde_json",
+ "usvg 0.46.0",
 ]
 
 [[package]]

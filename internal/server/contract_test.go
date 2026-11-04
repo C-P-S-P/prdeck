@@ -2,18 +2,18 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MasterPushers/prdeck/internal/demo"
 	"github.com/MasterPushers/prdeck/internal/github"
 )
 
@@ -30,24 +30,27 @@ var update = flag.Bool("update", false, "rewrite the protocol fixtures in deskto
 
 const fixtures = "../../desktop/tests/fixtures"
 
-// pixel is a 1×1 PNG, served locally for the image method so nothing goes online.
+// pixel is a 1×1 PNG, the answer to every image so nothing goes online.
 const pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+// pixelImages is the demo backend with every image fetched as pixel. A local test
+// server would not do: image fetches refuse local addresses.
+type pixelImages struct{ *demo.Backend }
+
+func (pixelImages) FetchImage(context.Context, string) ([]byte, string, error) {
+	b, err := base64.StdEncoding.DecodeString(pixel)
+	return b, "image/png", err
+}
 
 func TestContract(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // setupStatus lists folders that exist under home
-	img := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		b, _ := base64.StdEncoding.DecodeString(pixel)
-		w.Header().Set("Content-Type", "image/png")
-		_, _ = w.Write(b)
-	}))
-	defer img.Close()
 	if *update {
 		if err := os.MkdirAll(fixtures, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	c := start(t)
+	c := startWith(t, func(b *demo.Backend) Backend { return pixelImages{b} })
 	// golden calls method, checks its reply against the saved file, and returns the
 	// reply as sent, for the calls that follow.
 	golden := func(method string, params any) json.RawMessage {
@@ -116,7 +119,7 @@ func TestContract(t *testing.T) {
 	golden("clonePlan", map[string]any{"pr": noClone})
 	golden("findClones", map[string]any{"repo": noClone.Repo})
 	golden("setClonePath", map[string]any{"repo": noClone.Repo, "path": "~/work/datakit"})
-	golden("image", map[string]any{"url": img.URL + "/chart.png"})
+	golden("image", map[string]any{"url": "https://github.com/northwind/registry/assets/chart.png"})
 	golden("prDiff", map[string]any{"pr": pr})
 	golden("commitDiff", map[string]any{"repo": pr.Repo, "sha": d.CommitList[4].OID})
 

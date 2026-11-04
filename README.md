@@ -97,9 +97,9 @@ Commands run in **your existing clone** of the PR's repo. The PR view's `folder`
 
 - **Branch:** checkout, pull, rebase, push and open first check out the PR's branch (`gh pr checkout`, which also handles PRs from forks). Fetch, continue and abort run as they are.
 - **Uncommitted changes:** when a command would switch branches or needs a clean tree (pull, rebase), prdeck lists the changes and asks: `s` stash them (`git stash push --include-untracked`, so nothing is lost), `d` drop them (asks a second time, then `git reset --hard` and `git clean -fd`), or `esc` to cancel.
-- **Worktrees** are made only when you ask: `w` opens the PR in `~/prdeck/<repo>-<number>`, leaving your clone alone. Set `editor.worktree: true` to use a worktree for every command. If the PR's branch is already checked out in a worktree, prdeck uses that one.
+- **Worktrees** are made only when you ask: `w` opens the PR in `~/prdeck/<repo>-<number>`, leaving your clone alone. Set `editor.worktree: true` to use a worktree for every command. If the PR's branch is already checked out in a worktree, prdeck uses that one. The desktop app shows where a new worktree will go before making it, and "Change folder…" moves new worktrees elsewhere (saved as `editor.worktree_dir`).
 
-**Finding your clone.** prdeck scans `~/projects`, `~/code` and `~/src` (two levels deep) for GitHub remotes. If a repo isn't there, the first command on it searches your home folder and lists the clones it finds; pick one with `1`–`9`, search for it with `p`, or clone it with `c`. Press `L` any time to point a repo at a different clone.
+**Finding your clone.** prdeck scans `~/projects`, `~/code` and `~/src` (two levels deep) for GitHub remotes. If a repo isn't there, the first command on it searches your home folder and lists the clones it finds; pick one with `1`–`9`, search for it with `p`, or clone it with `c`. Press `L` any time to point a repo at a different clone (in the desktop app: "Use another clone…" under Local clone).
 
 The clone search (`L` or `p`) is fuzzy, like fzf: it lists every git clone under your home folder, with clones of this repo first, and narrows as you type (`odh fea` finds `~/projects/odh-feast/feast`). Pick with `↑↓` and `enter` or a click; `tab` copies the path into the box to edit; a typed path (`~/work/x`) can be used as is. Your choice is saved under `repos.paths` in the config, so you only do it once.
 
@@ -137,7 +137,8 @@ The same PRs and commands in a native window, built with [GPUI](https://www.gpui
 - **Inline review**: click a line number in Files changed to comment on that line, or drag across line numbers (or Shift-click) to comment on several. The comment box can copy the selected lines or turn them into a suggested change. Add a single comment, or start a review: comments stay pending under their lines until you Submit review, Approve or Request changes, and go to GitHub together. Existing review threads show at their lines with Reply.
 - **Checks**: every check opens its log in the browser; the side panel lists the first few failing ones. When CI failed, **Re-run failed** (or `F`) re-runs only the failed GitHub Actions jobs.
 - **What's new**: a blue dot and a bold title on PRs updated since you last opened them, in either app. In the conversation, comments, reviews and replies from others since your last visit are tagged New, and a bar at the top counts them, with Jump to first new (or `n`).
-- **Profile photos** from GitHub next to every author and reviewer.
+- **Profile photos** from GitHub next to every author and reviewer. Photos download separately from PR images, so a PR full of screenshots never holds them up; downloads that stall or fail are tried again, and an image that still does not load says so (⌘R tries again).
+- **Your clones and worktrees**: Local clone in the PR's side panel shows which clone commands run in; `L` (or File → Use Another Clone…) points the repo at another one, picked from the clones found on disk, a folder picker or a typed path. A command that makes a new worktree shows where it will go first, with Change folder… to put worktrees somewhere else.
 - **Resizable panes**: drag the edges of the sidebar, the repositories list and the PR's side panel. Sizes are remembered.
 - **First-run setup** signs you in with GitHub's device code in the browser (via the GitHub CLI, so PR Deck never stores a token), finds the folders that hold your clones, and picks your editor. It shows on first launch or when signed out, and from PR Deck → Set Up….
 
@@ -165,10 +166,11 @@ cargo run --release             # your PRs (uses your gh login)
 | `n` | jump to the first new comment, review or reply |
 | `esc` | back from a commit to the list |
 | `⌘B` | hide the sidebar |
+| `L` or `⌘⇧L` | use another clone for the PR's repo (as `L` in the terminal) |
 | `⌘,` | edit the config |
 | your command keys | run that command; `esc` closes the command bar |
 
-Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|new|pick:312|goto|palette|changes|noclone]`; add `--signed-out --setup --state setup-signin` for setup.
+Screenshots: `cargo run --features snapshot -- --demo --snapshot out.png [--state commits|checks|checks,rerun|compose,merge|compose,merge,confirm|new|pick:312|goto|palette|changes|noclone|worktree|changeclone]`; add `--signed-out --setup --state setup-signin` for setup.
 
 ## Configuration
 
@@ -205,7 +207,7 @@ commands:
 
 **Command fields:** `name`, `key`, `run`, `bar` (show in the bottom bar), `confirm`, `prompt` (asks for text, fills `{input}`), `output`, `branch` (check out the PR's branch first), `clean` (needs no uncommitted changes), `worktree` (run in a worktree for the PR), `when` (`authored`, `others`, `draft`, `ready`, `ci_failed`, `conflict`), `hidden`.
 
-**Placeholders:** `{number}` `{branch}` `{base}` `{repo}` `{owner}` `{name}` `{title}` `{author}` `{url}` `{remote}` (the remote that points at the PR's repo) `{path}` (the PR folder) `{input}`. Values are shell-quoted, so a PR title can never run as a command.
+**Placeholders:** `{number}` `{branch}` `{base}` `{repo}` `{owner}` `{name}` `{title}` `{author}` `{url}` `{remote}` (the remote that points at the PR's repo) `{path}` (the PR folder) `{input}`. Values are shell-quoted, so a PR title can never run as a command. Write placeholders bare (`git commit -m {title}`), never inside `'...'` or `"..."`: those quotes undo the quoting, and prdeck warns about them.
 
 Keys `j k q ? / R 1-9` are kept for navigation.
 

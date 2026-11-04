@@ -56,8 +56,12 @@ func New(cfg *config.Config) *Backend {
 	return b
 }
 
-func (b *Backend) Config() *config.Config { return b.cfg }
-func (b *Backend) Viewer() string         { return "you" }
+func (b *Backend) Config() *config.Config {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cfg
+}
+func (b *Backend) Viewer() string { return "you" }
 
 func (b *Backend) match(query string) []github.PR {
 	want := ""
@@ -208,7 +212,7 @@ func (b *Backend) ResolveFolder(pr github.PR, wantWorktree bool) (core.Folder, e
 		return core.Folder{}, fmt.Errorf("%w of %s", core.ErrNoClone, pr.Repo)
 	}
 	if wantWorktree || b.cfg.Editor.UseWorktree() {
-		p := "~/prdeck/" + pr.Name() + "-" + strconv.Itoa(pr.Number)
+		p := strings.TrimSuffix(b.cfg.Editor.WorktreeDir, "/") + "/" + pr.Name() + "-" + strconv.Itoa(pr.Number)
 		f := core.Folder{Path: p, Clone: c.path, Remote: "origin", Worktree: true, Exists: b.worktrees[p]}
 		if f.Exists {
 			f.Branch = pr.HeadRefName
@@ -278,6 +282,20 @@ func (b *Backend) SetClonePath(repo, path string) (string, error) {
 	return "", nil
 }
 
+// SetWorktreeDir changes where new worktrees go, for this run only.
+func (b *Backend) SetWorktreeDir(dir string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	dir = config.ShortenHome(config.ExpandHome(strings.TrimSpace(dir)))
+	if dir == "" {
+		return "", fmt.Errorf("no folder given")
+	}
+	cfg := *b.cfg
+	cfg.Editor.WorktreeDir = dir
+	b.cfg = &cfg
+	return dir, nil
+}
+
 func (b *Backend) ClonePath(repo string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -299,6 +317,9 @@ func (b *Backend) Setup(_ context.Context, p core.Plan) (string, error) {
 		out = append(out, "Created worktree "+p.Folder.Path, "Switched to a new branch '"+pr.HeadRefName+"'")
 	}
 	c := b.clones[pr.Repo]
+	if c == nil { // no pretend clone to change
+		return strings.Join(out, "\n"), nil
+	}
 	if strings.Contains(p.Pre, "git stash") {
 		out = append(out, "Saved working directory and index state On "+c.branch+": prdeck: before "+strings.ToLower(p.Title)+" on #"+strconv.Itoa(pr.Number))
 		c.changes = nil

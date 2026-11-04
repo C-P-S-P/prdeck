@@ -55,5 +55,6 @@
   "ghVersion": "",
   "login": "you",
   "signedIn": true,
-  "worktree": false
+  "worktree": false,
+  "worktreeDir": "~/prdeck"
 }

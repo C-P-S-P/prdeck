@@ -18,9 +18,10 @@ import (
 const keepDetails = 30 * 24 * time.Hour
 
 type Cache struct {
-	path string
-	mu   sync.Mutex
-	data file
+	path   string
+	mu     sync.Mutex
+	saveMu sync.Mutex // one save at a time
+	data   file
 }
 
 type file struct {
@@ -164,10 +165,15 @@ func (c *Cache) MarkSeen(key string, at time.Time) time.Time {
 	return last
 }
 
+// save writes the cache. Saves take turns, so an older snapshot never lands last,
+// and each writes its own temp file, so the TUI and the desktop app saving at once
+// never mix their bytes into one file.
 func (c *Cache) save() {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
 	// The terminal and desktop apps share this file: keep the PRs the other one
-	// opened since this one read it. Two saving at the same moment can still lose a
-	// mark, which only shows that PR as unread again.
+	// opened since this one read it. Two apps saving at the same moment can still
+	// lose a mark, which only shows that PR as unread again.
 	var disk seenFile
 	if raw, err := os.ReadFile(c.path); err == nil {
 		_ = json.Unmarshal(raw, &disk)
@@ -194,15 +200,18 @@ func (c *Cache) save() {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o700); err != nil {
 		return
 	}
-	// A temp file of its own: both apps, and searches running side by side, save
-	// at once, and a shared one could be renamed into place half written.
-	f, err := os.CreateTemp(filepath.Dir(c.path), "cache-*.tmp")
+	f, err := os.CreateTemp(filepath.Dir(c.path), filepath.Base(c.path)+"-*.tmp")
 	if err != nil {
 		return
 	}
 	_, err = f.Write(raw)
-	if f.Close() == nil && err == nil && os.Rename(f.Name(), c.path) == nil {
-		return
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	_ = os.Remove(f.Name())
+	if err == nil {
+		err = os.Rename(f.Name(), c.path)
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+	}
 }

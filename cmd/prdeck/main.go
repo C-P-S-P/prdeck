@@ -90,6 +90,9 @@ func run(args []string) error {
 		return runUI(tui.New(demo.New(cfg)), cfg)
 	case "serve":
 		return serve(args[1:])
+	case "", "list": // below, once the config and the login are read
+	default:
+		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
 
 	cfg, err := config.Load(config.DefaultPath())

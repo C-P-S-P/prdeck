@@ -99,3 +99,103 @@ func TestSaveSetupNewFile(t *testing.T) {
 		t.Errorf("got scan %v editor %+v", cfg.Repos.Scan, cfg.Editor)
 	}
 }
+
+func TestSaveKeepsACommentsOnlyFile(t *testing.T) {
+	p := write(t, "# github:\n#   limit: 20\n# my notes\n")
+	if err := SaveRepoPath(p, "a/b", "/x/y"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRepoPath(p, "c/d", "/z"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(p)
+	for _, want := range []string{"# github:", "#   limit: 20", "# my notes", "a/b: /x/y", "c/d: /z"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("missing %q in\n%s", want, raw)
+		}
+	}
+	cfg, err := Load(p)
+	if err != nil || cfg.Repos.Paths["a/b"] != "/x/y" {
+		t.Errorf("paths = %v, err = %v", cfg.Repos.Paths, err)
+	}
+}
+
+func TestSaveWritesThroughASymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "dotfiles.yaml")
+	if err := os.WriteFile(real, []byte("ui:\n  mouse: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config.yaml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRepoPath(link, "a/b", "/x/y"); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Lstat(link); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink was replaced: %v %v", st.Mode(), err)
+	}
+	raw, _ := os.ReadFile(real)
+	if !strings.Contains(string(raw), "a/b: /x/y") || !strings.Contains(string(raw), "mouse: true") {
+		t.Errorf("target not updated:\n%s", raw)
+	}
+	if st, _ := os.Stat(real); st.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", st.Mode().Perm())
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*.tmp")); len(left) > 0 {
+		t.Errorf("temp files left: %v", left)
+	}
+}
+
+func TestSaveThroughALinkIntoAReadOnlyFolder(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	dir := t.TempDir()
+	store := filepath.Join(dir, "store")
+	if err := os.Mkdir(store, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(store, "config.yaml")
+	if err := os.WriteFile(real, []byte("ui:\n  mouse: true\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(store, 0o555)
+	defer os.Chmod(store, 0o755)
+	link := filepath.Join(dir, "config.yaml")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRepoPath(link, "a/b", "/x/y"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(link)
+	if !strings.Contains(string(raw), "a/b: /x/y") || !strings.Contains(string(raw), "mouse: true") {
+		t.Errorf("config not saved:\n%s", raw)
+	}
+	if st, _ := os.Lstat(link); !st.Mode().IsRegular() || st.Mode().Perm()&0o200 == 0 {
+		t.Errorf("mode = %v, want a writable file", st.Mode())
+	}
+}
+
+func TestSaveWorktreeDirKeepsTheRest(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	orig := "editor:\n  default: zed # my editor\n  worktree_dir: ~/prdeck\nrepos:\n  scan: [~/src]\n"
+	if err := os.WriteFile(file, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	if err := SaveWorktreeDir(file, filepath.Join(home, "trees")); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(file)
+	for _, want := range []string{"default: zed # my editor", "worktree_dir: ~/trees", "scan: [~/src]"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Count(string(got), "worktree_dir") != 1 {
+		t.Errorf("worktree_dir written twice:\n%s", got)
+	}
+}
