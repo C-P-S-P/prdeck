@@ -43,15 +43,22 @@ func Quote(s string) string {
 // process gets no terminal: prompts are turned off so it can never hang waiting for input.
 func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
 	sh, err := Shell()
-	c := exec.CommandContext(ctx, sh, "-c", script)
+	arg := script
+	if runtime.GOOS == "windows" {
+		// Git's sh splits its command line by Cygwin's rules, not the ones Go quotes
+		// it for (a \\ in quotes becomes \), so the script travels in the environment.
+		arg = `eval "$PRDECK_SCRIPT"`
+	}
+	c := exec.CommandContext(ctx, sh, "-c", arg)
 	if err != nil {
 		c.Err = err // Start says what is missing
 	}
-	if runtime.GOOS == "windows" {
-		c.Cancel = func() error { return killTree(c) }
-	}
 	c.Dir = dir
 	c.Env = os.Environ()
+	if runtime.GOOS == "windows" {
+		c.Cancel = func() error { return killTree(c) }
+		c.Env = append(c.Env, "PRDECK_SCRIPT="+script)
+	}
 	if captured {
 		c.Env = append(c.Env, "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "GIT_EDITOR=true", "NO_COLOR=1")
 	}

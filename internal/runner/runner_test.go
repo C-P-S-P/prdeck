@@ -61,6 +61,16 @@ func TestFilledTitleStaysText(t *testing.T) {
 	}
 }
 
+// Git for Windows' sh reads its command line by Cygwin's rules, which halve a \\ that Go
+// writes as is: a UNC path or a regex must still reach the script whole.
+func TestRunKeepsBackslashes(t *testing.T) {
+	const s = `\\server\share\x "q" a\\b\`
+	out, err := Run(context.Background(), "printf '%s' "+Quote(s), t.TempDir())
+	if err != nil || out != s {
+		t.Errorf("out=%q err=%v, want %q", out, err, s)
+	}
+}
+
 func TestRunNoPrompt(t *testing.T) {
 	out, err := Run(context.Background(), `echo "$GIT_TERMINAL_PROMPT $GIT_EDITOR"`, t.TempDir())
 	if err != nil || strings.TrimSpace(out) != "0 true" {
