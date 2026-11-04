@@ -1,4 +1,4 @@
-# 0016. Windows and Linux
+# 0020. Windows and Linux
 
 - Status: accepted
 - Date: 2026-11-04
@@ -55,7 +55,7 @@ The same window, data and keys everywhere; GPUI already draws on Windows (Direct
 - Windows needs Git for Windows. Custom commands are written for sh on every system; a command that calls a Windows-only tool still works, since sh runs `.exe` files.
 - The Linux terminal list and the Windows install folders are lists to keep up to date; a terminal that is not on the list makes a terminal editor in the desktop app fail with a clear message.
 - Windows behavior is checked by unit tests of the pure functions on every machine and by CI on Windows; the Mac keeps its old code paths, which the tests pin down.
-- The desktop app builds for Windows and Linux (`cargo check --target` from a Mac), but its windows there are checked by people and by CI starting it, not by its tests. Building it on Linux needs a C compiler, pkg-config and the fontconfig, xkbcommon, xkbcommon-x11 and xcb development files (Wayland, Vulkan and EGL are loaded when the app starts); on Windows, the MSVC build tools with the Windows SDK (GPUI compiles its resource file and, for release builds, its DirectX shaders with them).
+- The desktop app's windows on Windows and Linux are checked by people and by CI starting it, not by its tests. `cargo check --target` from a Mac only works with that target's C tools (a resource compiler for Windows; a Linux C/C++ cross compiler and fontconfig for Linux), so CI is where it really builds. Building it on Linux needs a C compiler, pkg-config and the fontconfig, xkbcommon, xkbcommon-x11 and xcb development files (Wayland, Vulkan and EGL are loaded when the app starts); on Windows, the MSVC build tools with the Windows SDK (GPUI compiles its resource file and, for release builds, its DirectX shaders with them).
 - PR Deck has no app icon yet, on any system: the Linux launcher uses the pull request icon from the app, and the Windows exe has none.
 
 ## Alternatives considered

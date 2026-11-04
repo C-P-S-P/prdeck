@@ -34,12 +34,12 @@ go build -o ~/.local/bin/prdeck ./cmd/prdeck
 
 The terminal app works the same on Linux and Windows, with the same config file (`~/.config/prdeck/config.yaml`, which is `%USERPROFILE%\.config\prdeck\config.yaml` on Windows) and the same commands.
 
-- **Windows** needs [Git for Windows](https://gitforwindows.org) as well as `gh` (`winget install --id GitHub.cli`). Commands are shell commands, so prdeck runs them with Git for Windows' `sh.exe` (found on PATH, next to `git.exe`, or in `Program Files\Git`); write your own commands as you would on a Mac (`&&`, `$(…)`, `'quotes'`). Build with `go build -o prdeck.exe ./cmd/prdeck` and put it on your PATH. `b` opens the PR in your default browser, `y` copies to the Windows clipboard, `esc` on a running command stops everything it started, and paths can be typed as `C:\code\x` or `~\code\x`.
+- **Windows** needs [Git for Windows](https://gitforwindows.org) as well as `gh` (`winget install --id GitHub.cli`). Commands are shell commands, so prdeck runs them with Git for Windows' `sh.exe` (found on PATH, next to `git.exe`, or in `Program Files\Git`); write your own commands as you would on a Mac (`&&`, `$(…)`, `'quotes'`). Build with `go build -o prdeck.exe ./cmd/prdeck` and put it on your PATH. `b` opens the PR in your default browser, `y` copies to the Windows clipboard, `esc` on a running command stops everything it started, and paths can be typed as `C:\code\x` or `~\code\x`. As in Git Bash, `sh` turns arguments that look like Unix paths into Windows ones, so write `gh api repos/…` without the leading slash.
 - **Linux** runs commands with `/bin/sh`, opens links with `xdg-open`, and copies with `wl-copy` or `xclip`.
 
 The desktop app runs there too, downloaded from CI or built yourself: see [Desktop app on Windows and Linux](#on-windows-and-linux).
 
-Why and how: [ADR 0016](docs/adr/0016-windows-and-linux.md).
+Why and how: [ADR 0020](docs/adr/0020-windows-and-linux.md).
 
 ## Use
 
@@ -144,7 +144,7 @@ The same app, with `Ctrl` wherever the Mac uses `⌘` (`Ctrl+K`, `Ctrl+Enter`, �
 - **Windows**: needs Git for Windows, Go, and Rust with the MSVC build tools (Visual Studio Build Tools, "Desktop development with C++"). `cargo run --release` works as above; `powershell -ExecutionPolicy Bypass -File desktop\scripts\package-windows.ps1` builds the zip.
 - **Linux**: needs Go, Rust, a C compiler, `pkg-config`, and the fontconfig, xkbcommon and xcb development files (Debian and Ubuntu: `sudo apt install build-essential pkg-config libfontconfig-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev`; Fedora: `sudo dnf install gcc gcc-c++ pkgconf fontconfig-devel libxkbcommon-x11-devel libxcb-devel`). `desktop/scripts/package-linux.sh` builds the tar.gz.
 
-Window sizes are saved in `%APPDATA%\prdeck` on Windows and `~/.config/prdeck` on Linux. Why and how: [ADR 0016](docs/adr/0016-windows-and-linux.md).
+Window sizes are saved in `%APPDATA%\prdeck` on Windows and `~/.config/prdeck` on Linux. Why and how: [ADR 0020](docs/adr/0020-windows-and-linux.md).
 
 | Keys | |
 | --- | --- |
