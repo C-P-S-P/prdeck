@@ -114,7 +114,8 @@ func TestCancelKillsWhatIgnoresTerm(t *testing.T) {
 func TestCapturedScriptHasNoTerminal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := Run(ctx, "exec 3</dev/tty && echo has-tty || echo no-tty", t.TempDir())
+	// In a subshell: dash, Linux's sh, exits when exec's redirection fails.
+	out, err := Run(ctx, "(exec 3</dev/tty) && echo has-tty || echo no-tty", t.TempDir())
 	if err != nil || !strings.Contains(out, "no-tty") {
 		t.Errorf("out=%q err=%v", out, err)
 	}
