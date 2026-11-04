@@ -261,6 +261,27 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    /// Writes an executable sh script to stand in for a login shell, and runs it once.
+    /// On Linux a script can't run ("text file busy") while a process forked by another
+    /// test still holds it open for writing, so the tests take turns writing and retry
+    /// that first run; macOS checks a new executable the first time it runs, which can
+    /// take longer than login_shell waits.
+    #[cfg(unix)]
+    fn test_shell(name: &str, body: &str) -> std::path::PathBuf {
+        static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        let sh = std::env::temp_dir().join(format!("prdeck-test-{name}-{}", std::process::id()));
+        std::fs::write(&sh, body).unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..50 {
+            if std::process::Command::new(&sh).output().is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        sh
+    }
+
     #[test]
     fn login_shell_per_os() {
         let zsh = || Some("/usr/bin/zsh".to_string());
@@ -276,12 +297,7 @@ mod tests {
     #[test]
     fn login_path_ignores_what_dotfiles_print() {
         // A login shell whose dotfiles print before and after the command.
-        let sh = std::env::temp_dir().join(format!("prdeck-test-shell-{}", std::process::id()));
-        std::fs::write(&sh, "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n").unwrap();
-        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // macOS checks a new executable the first time it runs, which can take longer
-        // than login_shell waits; do that first.
-        let _ = std::process::Command::new(&sh).output();
+        let sh = test_shell("shell", "#!/bin/sh\necho Agent pid 1234\nPATH=/opt/homebrew/bin:/usr/bin\neval \"$3\"\necho bye\n");
         let values = shell_values(sh.to_str().unwrap());
         let _ = std::fs::remove_file(&sh);
         assert_eq!(values.as_ref().and_then(|v| v.get("PATH")).map(String::as_str), Some("/opt/homebrew/bin:/usr/bin"));
@@ -292,10 +308,7 @@ mod tests {
     fn path_comes_from_env_not_the_shells_own_syntax() {
         // A shell like fish, where "$PATH" would join a list with spaces: the value
         // must come from the exported environment instead.
-        let sh = std::env::temp_dir().join(format!("prdeck-test-fish-{}", std::process::id()));
-        std::fs::write(&sh, "#!/bin/sh\nexport PATH=/opt/homebrew/bin:/usr/bin\nPATH_LIST='/opt/homebrew/bin /usr/bin'\neval \"$3\"\n").unwrap();
-        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _ = std::process::Command::new(&sh).output();
+        let sh = test_shell("fish", "#!/bin/sh\nexport PATH=/opt/homebrew/bin:/usr/bin\nPATH_LIST='/opt/homebrew/bin /usr/bin'\neval \"$3\"\n");
         let values = shell_values(sh.to_str().unwrap());
         let _ = std::fs::remove_file(&sh);
         let path = values.as_ref().and_then(|v| v.get("PATH")).cloned().unwrap_or_default();
