@@ -126,11 +126,11 @@ func TestFindShell(t *testing.T) {
 	}
 }
 
-// Windows has no process groups: cancelling has to stop the commands sh started, or a
-// hung command after && keeps Run waiting on its output.
+// On Windows the commands sh started must stop too, not only the ones taskkill finds
+// under it: by 500ms sleep runs, from a process whose Windows parent has exited.
 func TestCancelStopsTreeOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
-		t.Skip("Windows only: there the process tree is killed with taskkill")
+		t.Skip("Windows only: there the script runs in a job object")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(500*time.Millisecond, cancel)

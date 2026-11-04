@@ -56,7 +56,6 @@ func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
 	c.Dir = dir
 	c.Env = os.Environ()
 	if runtime.GOOS == "windows" {
-		c.Cancel = func() error { return killTree(c) }
 		c.Env = append(c.Env, "PRDECK_SCRIPT="+script)
 	}
 	if captured {
@@ -70,10 +69,14 @@ func Command(ctx context.Context, script, dir string, captured bool) *exec.Cmd {
 // keep Run waiting on its output.
 func Run(ctx context.Context, script, dir string) (string, error) {
 	c := Command(ctx, script, dir, true)
-	done := killGroup(c)
+	started, done := killGroup(c)
 	var buf bytes.Buffer
 	c.Stdout, c.Stderr = &buf, &buf
-	err := c.Run()
+	err := c.Start()
+	if err == nil {
+		started()
+		err = c.Wait()
+	}
 	done()
 	out := buf.String()
 	if runtime.GOOS == "windows" {

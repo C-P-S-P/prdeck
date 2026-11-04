@@ -15,6 +15,7 @@ require (
 	github.com/yuin/goldmark v1.8.5
 	github.com/yuin/goldmark-emoji v1.0.6
 	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/sys v0.49.0
 )
 
 require (
@@ -38,7 +39,6 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/thlib/go-timezone-local v0.0.9 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/term v0.47.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

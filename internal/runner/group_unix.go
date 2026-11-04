@@ -14,14 +14,14 @@ import (
 const killGrace = 3 * time.Second
 
 // killGroup starts c in a session of its own and makes cancelling it signal the whole
-// group, so every command of the script stops, not only the shell. done must be called
-// once c has finished.
+// group, so every command of the script stops, not only the shell. started must be
+// called once c has started (it does nothing here), done once it has finished.
 //
 // Its own session also means no controlling terminal, as a captured command should
 // have: something that would ask on /dev/tty (an ssh passphrase, an unknown host key)
 // fails at once with its own message instead of stopping in the background until
 // cancelled.
-func killGroup(c *exec.Cmd) (done func()) {
+func killGroup(c *exec.Cmd) (started, done func()) {
 	var finished atomic.Bool
 	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// After a cancel, Wait gives up on the process and its pipes after this long.
@@ -42,5 +42,5 @@ func killGroup(c *exec.Cmd) (done func()) {
 		}
 		return err
 	}
-	return func() { finished.Store(true) }
+	return func() {}, func() { finished.Store(true) }
 }

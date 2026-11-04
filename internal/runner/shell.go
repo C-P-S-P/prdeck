@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"sync"
 )
 
@@ -56,14 +55,4 @@ func findShell(goos string, lookPath func(string) (string, error), getenv func(s
 func isFile(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && !st.IsDir()
-}
-
-// killTree stops a script and every command it started. Windows has no process groups
-// to signal, and stopping only sh.exe would leave a hung git running and holding the
-// output open.
-func killTree(c *exec.Cmd) error {
-	if exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(c.Process.Pid)).Run() == nil {
-		return nil
-	}
-	return c.Process.Kill()
 }
