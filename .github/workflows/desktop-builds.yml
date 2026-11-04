@@ -74,15 +74,23 @@ jobs:
             exit 1
           fi
       - name: Package
-        run: scripts/package-linux.sh
+        id: package
+        run: |
+          scripts/package-linux.sh
+          echo "file=$(basename dist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+      # With archive: false the artifact is named after the file, but overwrite
+      # deletes the artifact called name; so name is the file's, and a re-run
+      # uploads again instead of failing with a conflict.
       - uses: actions/upload-artifact@v7
         with:
-          path: desktop/dist/*.tar.gz
+          name: ${{ steps.package.outputs.file }}
+          path: desktop/dist/${{ steps.package.outputs.file }}
           archive: false
-          overwrite: true # a re-run uploads again
+          overwrite: true
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
+          name: linux-demo.png
           path: desktop/linux-demo.png
           archive: false
           overwrite: true
@@ -140,15 +148,20 @@ jobs:
             exit 1
           }
       - name: Package
-        run: ./scripts/package-windows.ps1
+        id: package
+        run: |
+          ./scripts/package-windows.ps1
+          "file=$((Get-Item dist\*.zip).Name)" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@v7
         with:
-          path: desktop/dist/*.zip
+          name: ${{ steps.package.outputs.file }}
+          path: desktop/dist/${{ steps.package.outputs.file }}
           archive: false
           overwrite: true
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
+          name: windows-demo.png
           path: desktop/windows-demo.png
           archive: false
           overwrite: true
