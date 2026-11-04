@@ -135,6 +135,12 @@ pub struct Deck {
     want: Option<String>,
     /// Scroll position of the PR's conversation; back to the top on a new PR.
     detail_scroll: ScrollHandle,
+    /// Set by n or Jump to first new: the first new item in the conversation scrolls
+    /// itself to the top the next time it is laid out.
+    jump_new: std::rc::Rc<std::cell::Cell<bool>>,
+    /// The selected PR once its detail has come in: loading it again while it stays
+    /// selected keeps what was new when you opened it.
+    looked: Option<String>,
     /// Diffs loaded from GitHub (by "pr:…" or "commit:…"), the commit open in
     /// Commits, and files opened or closed by hand in a diff.
     diffs: HashMap<String, DiffState>,
@@ -188,6 +194,8 @@ impl Deck {
             closed: vec![],
             want: None,
             detail_scroll: ScrollHandle::new(),
+            jump_new: Default::default(),
+            looked: None,
             setup: None,
             diffs: HashMap::new(),
             commit: None,
@@ -386,6 +394,11 @@ impl Deck {
             }
         }
         self.prs = prs;
+        // The PR on screen changed since it was loaded (a comment, or your own push):
+        // load it again, as the terminal does, which tags what is new and marks it seen.
+        if let Some(pr) = self.selected_pr().filter(|p| p.unread) {
+            self.load_detail(pr, false, cx); // updated since it was saved, so it is fetched
+        }
         if let Some(want) = self.want.clone() {
             if let Some(pr) = self.prs.iter().find(|p| p.key() == want).cloned() {
                 self.want = None;
@@ -426,6 +439,8 @@ impl Deck {
         if self.selected.as_ref() != Some(&key) {
             self.detail_scroll.set_offset(point(px(0.), px(0.)));
             self.commit = None;
+            self.jump_new.set(false);
+            self.looked = None;
         }
         self.selected = Some(key.clone());
         match self.tabs.iter_mut().find(|t| t.key() == key) {
@@ -485,7 +500,7 @@ impl Deck {
                     let fresh = c.fresh;
                     if let Some(d) = c.detail {
                         let _ = this.update(cx, |this, cx| {
-                            this.details.insert(d.pr.key(), d);
+                            this.put_detail(d);
                             cx.notify();
                         });
                     }
@@ -498,7 +513,7 @@ impl Deck {
                 let _ = this.update(cx, |this, _| match res {
                     Ok(d) => {
                         this.detail_err.remove(&pr.key());
-                        this.details.insert(pr.key(), d);
+                        this.put_detail(d);
                     }
                     Err(e) => {
                         this.detail_err.insert(pr.key(), e.message);
@@ -511,6 +526,38 @@ impl Deck {
             });
         })
         .detach();
+    }
+
+    /// Shows a PR's detail. The core counts that as opening the PR, so its dot goes.
+    /// A refresh or your own comment loads the selected PR again; the New tags stay.
+    fn put_detail(&mut self, mut d: Detail) {
+        let key = d.pr.key();
+        for p in self.prs.iter_mut().chain(self.tabs.iter_mut()) {
+            if p.key() == key {
+                p.unread = false;
+            }
+        }
+        if self.selected.as_ref() == Some(&key) {
+            if let Some(shown) = self.details.get(&key).filter(|_| self.looked.as_ref() == Some(&key)) {
+                d.keep_new(shown);
+            }
+            if d.new_count() == 0 {
+                self.jump_new.set(false); // n pressed on the last visit's copy: nothing to jump to
+            }
+            self.looked = Some(key.clone());
+        }
+        self.details.insert(key, d);
+    }
+
+    /// Scrolls to the first comment, review or reply after your last visit (n, or
+    /// Jump to first new), in Conversation.
+    fn jump_to_new(&mut self, cx: &mut Context<Self>) {
+        if !self.selected.as_ref().and_then(|k| self.details.get(k)).is_some_and(|d| d.new_count() > 0) {
+            return self.say_done("Nothing new since you last looked", cx);
+        }
+        self.section = Section::Conversation;
+        self.jump_new.set(true);
+        cx.notify();
     }
 
     fn load_folder(&mut self, pr: Pr, cx: &mut Context<Self>) {
@@ -545,6 +592,11 @@ impl Deck {
             cx.notify();
             return;
         };
+        if cmd.reviews() {
+            // The review box comments and reviews here, with a preview and line
+            // comments; its keys open it rather than asking again in the command bar.
+            return self.focus_composer(window, cx);
+        }
         if cmd.prompt.is_empty() {
             self.prepare(pr, cmd, String::new(), window, cx);
             return;
@@ -605,6 +657,8 @@ impl Deck {
         let res = rpc.call::<ExecResult>("execute", json!({ "plan": plan, "changes": changes }));
         let pr = plan.pr.clone();
         let reload = plan.action == "clone" || !plan.pre.is_empty() || plan.action.is_empty();
+        let refresh = plan.action == "rerun" || plan.action == "automerge";
+        let merge = plan.action == "automerge";
         let silent = plan.silent;
         self.set_stage(Stage::Running(plan));
         cx.notify();
@@ -612,6 +666,10 @@ impl Deck {
         cx.spawn(async move |this, cx| {
             let res = res.await;
             let _ = this.update(cx, |this, cx| {
+                if merge && res.as_ref().is_ok_and(|r| r.ok) {
+                    // A PR merged at once leaves the list of open ones.
+                    this.load(cx);
+                }
                 let stage = match res {
                     Ok(r) => {
                         let mut out = r.output.trim().to_string();
@@ -627,6 +685,10 @@ impl Deck {
                 };
                 if this.run_id == id {
                     this.set_stage(stage);
+                }
+                if refresh {
+                    // Show the re-run jobs as queued, or auto-merge as on.
+                    this.refresh_detail(pr.clone(), cx);
                 }
                 if reload {
                     this.load_folder(pr, cx);
@@ -1078,6 +1140,9 @@ impl Deck {
         }
         if let Some(cmd) = self.find_cmd(|c| !c.key.is_empty() && c.key == ch) {
             self.start(cmd, window, cx);
+        } else if ch == "n" {
+            // After the commands, so one of yours on n still wins.
+            self.jump_to_new(cx);
         }
     }
 }
@@ -1422,6 +1487,7 @@ impl Deck {
         let pr = p.clone();
         div()
             .id(("pr", i))
+            .relative()
             .flex_none()
             .px(px(12.))
             .py(px(8.))
@@ -1433,6 +1499,8 @@ impl Deck {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(BG_HOVER)))
             .on_click(cx.listener(move |this, _, _, cx| this.select(pr.clone(), cx)))
+            // Unread: a blue dot in the left margin, as in Mail.
+            .when(p.unread, |d| d.child(div().absolute().left(px(2.)).top(px(13.)).size(px(6.)).rounded(px(3.)).bg(rgb(BLUE))))
             .child(
                 div()
                     .pt(px(2.))
@@ -1449,8 +1517,16 @@ impl Deck {
                         div()
                             .flex()
                             .gap(px(8.))
-                            .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(p.title.clone()))
-                            .child(div().flex_none().text_size(px(11.)).text_color(rgb(DIM)).child(ago(&p.updated_at))),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_color(rgb(if p.unread { TEXT_BRIGHT } else { TEXT }))
+                                    .when(p.unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                                    .child(p.title.clone()),
+                            )
+                            .child(div().flex_none().text_size(px(11.)).text_color(rgb(if p.unread { BLUE } else { DIM })).child(ago(&p.updated_at))),
                     )
                     .child(
                         div()
@@ -1574,12 +1650,16 @@ impl Deck {
         let detail = self.details.get(&key);
         let editor = if self.hello.editor.is_empty() { "editor".to_string() } else { self.hello.editor.clone() };
         let commits = detail.map(|d| d.commits).unwrap_or(0);
-        let (state_label, state_bg) = if pr.is_draft {
-            ("Draft", BG_HOVER)
+        // Merged from here (Merge when ready on a ready PR): the PR as loaded again says so.
+        let merged = detail.is_some_and(|d| d.pr.state == "MERGED");
+        let (state_label, state_bg, state_icon, state_fg) = if merged {
+            ("Merged", 0x241f30, "git-merge", PURPLE)
+        } else if pr.is_draft {
+            ("Draft", BG_HOVER, "git-pull-request-draft", state_color(&pr))
         } else if pr.conflict() {
-            ("Conflict", 0x2a2418)
+            ("Conflict", 0x2a2418, "git-pull-request", state_color(&pr))
         } else {
-            ("Open", 0x1c2a1f)
+            ("Open", 0x1c2a1f, "git-pull-request", state_color(&pr))
         };
 
         let header = div()
@@ -1630,13 +1710,9 @@ impl Deck {
                                             .gap(px(5.))
                                             .bg(rgb(state_bg))
                                             .border_1()
-                                            .border_color(rgb(state_color(&pr)))
-                                            .text_color(rgb(state_color(&pr)))
-                                            .child(icon(
-                                                if pr.is_draft { "git-pull-request-draft" } else { "git-pull-request" },
-                                                12.,
-                                                state_color(&pr),
-                                            ))
+                                            .border_color(rgb(state_fg))
+                                            .text_color(rgb(state_fg))
+                                            .child(icon(state_icon, 12., state_fg))
                                             .child(state_label),
                                     )
                                     .child(
@@ -1644,10 +1720,10 @@ impl Deck {
                                             .flex()
                                             .gap(px(4.))
                                             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(pr.author.clone()))
-                                            .child(if commits > 0 {
-                                                format!("wants to merge {commits} commit{} into", if commits == 1 { "" } else { "s" })
-                                            } else {
-                                                "wants to merge into".to_string()
+                                            .child(match (merged, commits) {
+                                                (true, _) => "merged into".to_string(),
+                                                (false, 0) => "wants to merge into".to_string(),
+                                                (false, n) => format!("wants to merge {n} commit{} into", if n == 1 { "" } else { "s" }),
                                             }),
                                     )
                                     .child(code_chip(pr.base.clone(), TEXT_SOFT))
@@ -1804,10 +1880,28 @@ impl Deck {
     fn section_body(&self, d: &Detail, cx: &mut Context<Self>) -> AnyElement {
         match self.section {
             Section::Conversation => self.conversation(d, cx).into_any_element(),
-            Section::Checks => checks_view(d).into_any_element(),
+            Section::Checks => checks_view(d, self.rerun_button("rerun-checks", d, cx)).into_any_element(),
             Section::Commits => self.commits_view(d, cx),
             Section::Files => self.files_view(d, cx),
         }
+    }
+
+    /// The Re-run failed button, when checks failed and the command is set up. The
+    /// PR list's rollup must say failed too, since that is what the command checks.
+    fn rerun_button(&self, id: &'static str, d: &Detail, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let cmd = self.find_cmd(|c| c.action == "rerun")?;
+        let ci_failed = self.selected_pr().is_some_and(|p| p.check_state == "FAILURE" || p.check_state == "ERROR");
+        if d.check_counts().1 == 0 || !ci_failed {
+            return None;
+        }
+        let (name, key) = (cmd.name.clone(), cmd.key.clone());
+        Some(
+            button_look(id)
+                .on_click(cx.listener(move |this, _, window, cx| this.start(cmd.clone(), window, cx)))
+                .child(icon("refresh-cw", 12., SOFT))
+                .child(name)
+                .when(!key.is_empty(), |b| b.child(kbd(key))),
+        )
     }
 
     fn handoff(&self, what: String, cx: &mut Context<Self>) -> AnyElement {
@@ -1854,12 +1948,62 @@ impl Deck {
                 )
                 .into_any_element(),
         ];
+        let first_new = d.timeline.iter().position(|e| e.has_new());
         for (i, e) in d.timeline.iter().enumerate() {
             let reply = self.thread_reply_view(&key, e, cx);
-            items.push(event_view(&key, i, e, &self.images, reply));
+            let ev = event_view(&key, i, e, &self.images, reply);
+            items.push(if first_new == Some(i) { self.jump_target(ev) } else { ev });
+        }
+        if first_new.is_some() {
+            items.insert(0, self.new_bar(d.new_count(), cx));
         }
         items.push(self.composer(d, cx));
         div().flex().flex_col().gap(px(14.)).children(items)
+    }
+
+    /// "2 new since you last looked", with a button to the first of them.
+    fn new_bar(&self, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(12.))
+            .pr(px(6.))
+            .py(px(5.))
+            .bg(rgb(BG_ACTIVE))
+            .border_1()
+            .border_color(rgb(RING_ACTIVE))
+            .text_size(px(12.5))
+            .text_color(rgb(BLUE_LIGHT))
+            .child(div().size(px(6.)).rounded(px(3.)).bg(rgb(BLUE)))
+            .child(div().flex_1().child(format!("{n} new since you last looked")))
+            .child(
+                button_look("jump-new")
+                    .h(px(26.))
+                    .on_click(cx.listener(|this, _, _, cx| this.jump_to_new(cx)))
+                    .child("Jump to first new")
+                    // A command of yours on n runs instead.
+                    .when(self.find_cmd(|c| c.key == "n").is_none(), |b| b.child(kbd("n"))),
+            )
+            .into_any_element()
+    }
+
+    /// The first new item: when a jump is asked for, it scrolls the conversation so it
+    /// sits at the top, from where it was laid out.
+    fn jump_target(&self, item: AnyElement) -> AnyElement {
+        let (jump, scroll) = (self.jump_new.clone(), self.detail_scroll.clone());
+        let at = canvas(
+            move |b, window, _| {
+                if jump.replace(false) {
+                    let (off, max) = (scroll.offset(), scroll.max_offset());
+                    let y = off.y - (b.top() - scroll.bounds().top()) + px(12.);
+                    scroll.set_offset(point(off.x, y.clamp(-max.y, px(0.))));
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        );
+        div().relative().child(item).child(at.absolute().top_0().left_0().size_full()).into_any_element()
     }
 
     fn aside(&self, d: &Detail, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1927,6 +2071,18 @@ impl Deck {
                 aside_section("Branch")
                     .child(div().font_family(mono()).text_color(rgb(BLUE_LIGHT)).truncate().child(pr.head.clone()))
                     .child(div().text_color(rgb(SOFT)).child(format!("into {}", pr.base)))
+                    .when_some(d.auto_merge.as_ref(), |s, a| {
+                        s.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_color(rgb(GREEN))
+                                .child(icon("git-merge", 12., GREEN))
+                                .child("Auto-merge on"),
+                        )
+                        .child(div().text_color(rgb(SOFT)).child(format!("GitHub will {} once checks and reviews pass · by {}", a.word(), a.by)))
+                    })
                     .when(pr.conflict(), |s| {
                         s.child(
                             div()
@@ -1975,22 +2131,52 @@ impl Deck {
                     .collect()
             }))
             .child(
-                aside_section("Checks").child(
-                    div()
-                        .id("checks-link")
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .py(px(4.))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.section = Section::Checks;
-                            cx.notify();
-                        }))
-                        .child(div().text_color(rgb(color)).child(glyph))
-                        .child(div().flex_1().text_color(rgb(TEXT)).child(summary))
-                        .child(div().text_color(rgb(DIM)).child("View")),
-                ),
+                aside_section("Checks")
+                    .child(
+                        div()
+                            .id("checks-link")
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .py(px(4.))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.section = Section::Checks;
+                                cx.notify();
+                            }))
+                            .child(div().text_color(rgb(color)).child(glyph))
+                            .child(div().flex_1().text_color(rgb(TEXT)).child(summary))
+                            .child(div().text_color(rgb(DIM)).child("View")),
+                    )
+                    // The first few failing checks; a big failing matrix would push the rest of the panel away.
+                    .children(d.checks.iter().enumerate().filter(|(_, c)| matches!(check_kind(&c.state), CheckKind::Fail)).take(5).map(|(i, c)| {
+                        let row = div()
+                            .id(("failed-check", i))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(4.))
+                            .py(px(2.))
+                            .child(div().text_color(rgb(RED)).child("✕"))
+                            .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT_SOFT)).child(c.name.clone()));
+                        opens_log(row, c, 11.)
+                    }))
+                    .when(d.check_counts().1 > 5, |s| {
+                        s.child(
+                            div()
+                                .id("more-failed")
+                                .px(px(4.))
+                                .py(px(2.))
+                                .cursor_pointer()
+                                .text_color(rgb(DIM))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.section = Section::Checks;
+                                    cx.notify();
+                                }))
+                                .child(format!("and {} more", d.check_counts().1 - 5)),
+                        )
+                    })
+                    .children(self.rerun_button("rerun-aside", d, cx).map(|b| b.h(px(28.)).justify_center())),
             )
             .child(
                 aside_section("Changes").child(
@@ -2027,7 +2213,8 @@ impl Deck {
             .commands
             .iter()
             .enumerate()
-            .filter(|(_, c)| c.bar)
+            // Reviews and Merge when ready are buttons of the review box; Review goes there.
+            .filter(|(_, c)| c.bar && !c.reviews() && c.action != "automerge")
             .map(|(i, c)| {
                 let cmd = c.clone();
                 let active = self.run.as_ref().is_some_and(|r| r.cmd.name == c.name);
@@ -2539,22 +2726,24 @@ fn aside_section(title: &str) -> Div {
         .child(caption(title.to_string()))
 }
 
-fn checks_view(d: &Detail) -> impl IntoElement {
+fn checks_view(d: &Detail, rerun: Option<Stateful<Div>>) -> impl IntoElement {
     let (pass, fail, pend) = d.check_counts();
     let (glyph, color) = if fail > 0 { ("✕", RED) } else if pend > 0 { ("●", YELLOW) } else { ("✓", GREEN) };
     card()
         .child(
             card_head()
                 .child(div().text_color(rgb(color)).child(glyph))
-                .child(div().text_color(rgb(TEXT)).child(format!("{pass} passed · {fail} failing · {pend} running"))),
+                .child(div().flex_1().text_color(rgb(TEXT)).child(format!("{pass} passed · {fail} failing · {pend} running")))
+                .children(rerun.map(|b| b.h(px(26.)).text_size(px(12.)))),
         )
-        .children(d.checks.iter().map(|c| {
+        .children(d.checks.iter().enumerate().map(|(i, c)| {
             let (g, col, status) = match check_kind(&c.state) {
                 CheckKind::Pass => ("✓", GREEN, c.state.to_lowercase()),
                 CheckKind::Fail => ("✕", RED, c.state.to_lowercase()),
                 CheckKind::Pending => ("●", YELLOW, c.state.to_lowercase()),
             };
-            div()
+            let row = div()
+                .id(("check", i))
                 .h(px(36.))
                 .px(px(12.))
                 .flex()
@@ -2565,9 +2754,22 @@ fn checks_view(d: &Detail) -> impl IntoElement {
                 .text_size(px(12.5))
                 .child(div().w(px(14.)).text_color(rgb(col)).child(g))
                 .child(div().flex_1().min_w(px(0.)).truncate().text_color(rgb(TEXT)).child(c.name.clone()))
-                .child(div().text_size(px(12.)).text_color(rgb(col)).child(status))
+                .child(div().text_size(px(12.)).text_color(rgb(col)).child(status));
+            opens_log(row, c, 12.)
         }))
         .when(d.checks.is_empty(), |c| c.child(div().p(px(12.)).text_color(rgb(DIM)).child("No checks reported.")))
+}
+
+/// Makes a check's row open its log in the browser, when it has a link.
+fn opens_log(row: Stateful<Div>, c: &Check, size: f32) -> Stateful<Div> {
+    match c.log_url().map(str::to_string) {
+        Some(url) => row
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(BG_HOVER)))
+            .on_click(move |_, _, cx| cx.open_url(&url))
+            .child(icon("external-link", size, DIM)),
+        None => row.child(div().w(px(size)).flex_none()),
+    }
 }
 
 fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<AnyElement>) -> AnyElement {
@@ -2610,6 +2812,7 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<Any
             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
             .child(verb)
             .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at))))
+            .when(e.new, |d| d.child(new_tag()))
             .into_any_element();
     }
 
@@ -2672,7 +2875,8 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<Any
                         .text_color(rgb(SOFT))
                         .child(images.face(&r.author, 18.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(r.author.clone()))
-                        .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&r.at)))),
+                        .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&r.at))))
+                        .when(r.new, |d| d.child(new_tag())),
                 )
                 .child(md_body(format!("ev-{key}-{i}-{j}"), &r.body, images)),
         );
@@ -2688,10 +2892,16 @@ fn event_view(key: &str, i: usize, e: &Event, images: &Images, reply: Option<Any
                 .child(images.face(&e.author, 20.))
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(TEXT)).child(e.author.clone()))
                 .child(div().min_w(px(0.)).truncate().text_color(rgb(verb_color)).child(verb))
-                .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at)))),
+                .child(div().text_color(rgb(DIM)).child(format!("{} ago", ago(&e.at))))
+                .when(e.new, |d| d.child(new_tag())),
         )
         .child(body)
         .into_any_element()
+}
+
+/// Marks a comment, review or reply that came after your last visit.
+fn new_tag() -> Div {
+    div().flex_none().px(px(6.)).border_1().border_color(rgb(RING_ACTIVE)).text_color(rgb(BLUE)).text_size(px(11.)).child("New")
 }
 
 impl Render for Deck {
@@ -2768,6 +2978,12 @@ impl Deck {
                     self.custom = Some(format!("repo:{repo}"));
                     self.selected = None;
                     self.load(cx);
+                }
+            }
+            s if s.starts_with("pick:") => {
+                // pick:312 selects that PR in the list, as a click does.
+                if let Some(pr) = s[5..].parse().ok().and_then(|n| pick(self, n)) {
+                    self.select(pr, cx);
                 }
             }
             s if s.starts_with("worktreedir:") => self.set_worktree_dir(s["worktreedir:".len()..].to_string(), window, cx),
@@ -2884,6 +3100,18 @@ impl Deck {
             "checks" => {
                 self.section = Section::Checks;
             }
+            "new" => self.jump_to_new(cx),
+            "rerun" => {
+                if let Some(c) = self.find_cmd(|c| c.action == "rerun") {
+                    self.start(c, window, cx);
+                }
+            }
+            "merge" => {
+                if let Some(c) = self.find_cmd(|c| c.action == "automerge") {
+                    self.start(c, window, cx);
+                }
+            }
+            "confirm" => self.confirm("", cx),
             "worktree" => {
                 if let Some(pr) = pick(self, 4821) {
                     self.select(pr, cx);

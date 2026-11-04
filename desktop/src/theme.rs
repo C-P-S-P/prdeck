@@ -32,6 +32,7 @@ pub const BLUE_LIGHT: u32 = 0x9cc4fa;
 pub const GREEN: u32 = 0x8cc47a;
 pub const RED: u32 = 0xe57b7b;
 pub const YELLOW: u32 = 0xe0c070;
+pub const PURPLE: u32 = 0xa371f7;
 pub const PRIMARY: u32 = 0x3b6fb6;
 
 static MONO: std::sync::OnceLock<SharedString> = std::sync::OnceLock::new();

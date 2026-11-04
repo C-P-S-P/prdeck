@@ -51,7 +51,7 @@ func (b *Backend) load() {
 			}),
 			flags: []string{"authored"}, commits: 6, files: 14, add: 412, del: 38, labels: []string{"feature", "registry"},
 			reviewers: [][2]string{{"mlin", "CHANGES_REQUESTED"}, {"rdavis", "COMMENTED"}, {"kopal", "PENDING"}},
-			checks:    append(pass("lint", "unit", "type-check"), [2]string{"integration-redis", "FAILURE"}),
+			checks:    append(pass("lint", "unit", "type-check"), [2]string{"integration-redis", "FAILURE"}, [2]string{"codecov/patch", "FAILURE"}),
 			body: []string{
 				"## Summary",
 				"Adds a `StreamPushSource` that accepts streaming writes and lands them in the online store without waiting for the next materialization run.",
@@ -84,10 +84,13 @@ func (b *Backend) load() {
 			},
 			timeline: []github.Event{
 				{Kind: "review", Author: "mlin", State: "CHANGES_REQUESTED", At: b.ago(2 * h), Body: "Looks close. One thing before this can land."},
-				{Kind: "thread", Author: "mlin", At: b.ago(2 * h), Path: "sdk/python/registry/push_source.py", Line: 44,
+				{Kind: "thread", Author: "mlin", At: b.ago(2 * h), Path: "sdk/python/registry/push_source.py", Line: 44, Side: "RIGHT",
 					DiffHunk: "@@ -41,6 +41,9 @@ class StreamPushSource:\n+    def push(self, name, df, *, allow_registry_cache=True):\n+        fv = self._get_feature_view(name, allow_registry_cache)\n+        self._validate(fv, df)",
 					Body:     "Should `allow_registry_cache` default to `False` here? A stale registry would silently drop new columns.",
-					Replies:  []github.Reply{{Author: "you", At: b.ago(1 * h), Body: "Good catch. Switched the default and added a test for the stale-registry case."}}},
+					Replies: []github.Reply{
+						{Author: "you", At: b.ago(1 * h), Body: "Good catch. Switched the default and added a test for the stale-registry case."},
+						{Author: "mlin", At: b.ago(40 * m), Body: "That test is what I wanted. Resolving once CI is green."},
+					}},
 				{Kind: "comment", Author: "rdavis", At: b.ago(18 * m), Body: "Heads up @you: the Flight transport work on `main` changed the same writer, so expect a conflict in `online_writer.py` when you rebase."},
 			},
 		},
@@ -193,11 +196,45 @@ func (b *Backend) load() {
 		for _, r := range s.reviewers {
 			d.Reviewers = append(d.Reviewers, github.Reviewer{Login: r[0], State: r[1]})
 		}
-		for _, c := range s.checks {
-			d.Checks = append(d.Checks, github.Check{Name: c[0], State: c[1]})
+		// The checks are jobs of one GitHub Actions run, linked to their logs. A name
+		// with a slash (codecov/patch) is a commit status from another service: it
+		// links to that service and has no run to re-run.
+		run := 11873400000 + int64(s.pr.Number)
+		for i, c := range s.checks {
+			ch := github.Check{Name: c[0], State: c[1]}
+			if strings.Contains(c[0], "/") {
+				ch.URL = "https://app.codecov.io/gh/" + s.pr.Repo + "/pull/" + strconv.Itoa(s.pr.Number)
+			} else {
+				ch.RunID = run
+				ch.URL = fmt.Sprintf("https://github.com/%s/actions/runs/%d/job/%d", s.pr.Repo, run, 33093400000+int64(s.pr.Number)*10+int64(i))
+			}
+			d.Checks = append(d.Checks, ch)
+		}
+		// northwind squashes and allows auto-merge; upstream/datakit merges and does
+		// not, so Merge when ready there says what to do instead.
+		d.MergeStatus, d.AutoMergeAllowed, d.MergeMethods = "BLOCKED", s.pr.Owner() == "northwind", []string{"SQUASH", "MERGE"}
+		if !d.AutoMergeAllowed {
+			d.MergeMethods = []string{"MERGE", "REBASE"}
+		}
+		switch {
+		case s.pr.IsDraft:
+			d.MergeStatus = "DRAFT"
+		case s.pr.Mergeable == "CONFLICTING":
+			d.MergeStatus = "DIRTY"
+		case s.pr.ReviewDecision == "APPROVED" && s.pr.CheckState == "SUCCESS":
+			d.MergeStatus = "CLEAN" // ready: Merge when ready merges it at once
 		}
 		b.details[s.pr.Number] = d
 	}
+	// The author turned on auto-merge; it waits for your review.
+	b.details[1188].AutoMerge = &github.AutoMerge{Method: "SQUASH", By: "tnguyen", At: b.ago(5 * time.Hour)}
+
+	// Every sample PR was opened as it is now, except four that changed since: rdavis
+	// commented on #4821 after your reply, #312 was approved, #1188 and #77 moved on.
+	for _, p := range b.prs {
+		b.seen[p.Number] = b.details[p.Number].Latest()
+	}
+	b.seen[4821], b.seen[312], b.seen[1188], b.seen[77] = b.ago(90*m), b.ago(4*h), b.ago(8*h), b.ago(2*day)
 }
 
 // sampleCommits makes up a commit history for a sample PR, oldest first.

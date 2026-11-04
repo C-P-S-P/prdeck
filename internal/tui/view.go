@@ -11,7 +11,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/MasterPushers/prdeck/internal/config"
+	"github.com/MasterPushers/prdeck/internal/core"
 	"github.com/MasterPushers/prdeck/internal/github"
+	"github.com/MasterPushers/prdeck/internal/mdrender"
 )
 
 func stripANSI(s string) string { return ansi.Strip(s) }
@@ -56,7 +58,9 @@ func (m *Model) syncViewport() {
 	if key != m.vpKey {
 		prev, _, _ := strings.Cut(m.vpKey, "|")
 		cur, _, _ := strings.Cut(key, "|")
-		m.vp.SetContent(m.detailContent(m.vp.Width))
+		content, newAt := m.detailContent(m.vp.Width)
+		m.vp.SetContent(content)
+		m.newAt = newAt
 		if prev != cur {
 			m.vp.GotoTop()
 		}
@@ -228,6 +232,9 @@ func (m Model) prRow(p github.PR, i, inner, numW int) string {
 	right := " " + reviewGlyph(p) + " " + ciGlyph(p.CheckState) + " " + sDim.Render(fmt.Sprintf("%3s", ago(p.UpdatedAt)))
 	num := fmt.Sprintf("%-*s", numW, "#"+strconv.Itoa(p.Number))
 	title := sText.Render(p.Title)
+	if p.Unread {
+		title = sBold.Render(p.Title)
+	}
 	if m.repoSel == "" {
 		title = sDim.Render(p.Name()+" ") + title
 	}
@@ -258,13 +265,15 @@ func (m Model) detailBox(w, h int) string {
 	return box(title, body, w, h, m.focus == paneDetail)
 }
 
-func (m Model) detailContent(w int) string {
+// detailContent is the PR view, and the line of its first new comment, review or
+// reply (-1 when nothing is new).
+func (m Model) detailContent(w int) (string, int) {
 	if m.help {
-		return m.helpContent(w)
+		return m.helpContent(w), -1
 	}
 	pr, ok := m.selected()
 	if !ok {
-		return sSoft.Render("Select a pull request.")
+		return sSoft.Render("Select a pull request."), -1
 	}
 	d := m.details[pr.Key()]
 	var b strings.Builder
@@ -296,12 +305,17 @@ func (m Model) detailContent(w int) string {
 		if fail > 0 {
 			var names []string
 			for _, c := range d.Checks {
-				switch c.State {
-				case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE":
-					names = append(names, c.Name)
+				if !c.Failed() {
+					continue
 				}
+				name := sRed.Render(c.Name)
+				if c.URL != "" {
+					// A link to the check's log, like links in PR text.
+					name = mdrender.Link(c.URL, sRed.Underline(true).Render(c.Name))
+				}
+				names = append(names, name)
 			}
-			line(wrap.Render(sRed.Render("failing: " + strings.Join(names, ", "))))
+			line(wrap.Render(sRed.Render("failing: ") + strings.Join(names, sRed.Render(", ")) + m.rerunHint(pr)))
 		}
 		if len(d.Reviewers) > 0 {
 			var rs []string
@@ -314,8 +328,18 @@ func (m Model) detailContent(w int) string {
 			}
 			line(wrap.Render(sSoft.Render("reviews  ") + strings.Join(rs, sDim.Render(" · "))))
 		}
+		if a := d.AutoMerge; a != nil {
+			line(wrap.Render(sSoft.Render("merge    ") + sGreen.Render("auto-merge on") + sSoft.Render(" · "+core.MergeWord(a.Method)+" · by "+a.By)))
+		}
 		if len(d.Labels) > 0 {
 			line(wrap.Render(sSoft.Render("labels   ") + sPurple.Render(strings.Join(d.Labels, ", "))))
+		}
+		if n := newCount(d); n > 0 {
+			hint := ""
+			if m.jumpKeyFree() {
+				hint = sDim.Render("  ·  ") + sText.Render("n") + sDim.Render(" jump to the first")
+			}
+			line(wrap.Render(sSoft.Render("new      ") + sBlue.Render(strconv.Itoa(n)+" since you last looked") + hint))
 		}
 	}
 	if pr.Mergeable == "CONFLICTING" {
@@ -329,10 +353,10 @@ func (m Model) detailContent(w int) string {
 	switch {
 	case d == nil && m.detErr[pr.Key()] != "":
 		line(sRed.Render("Could not load the conversation: " + m.detErr[pr.Key()]))
-		return b.String()
+		return b.String(), -1
 	case d == nil:
 		line(sSoft.Render("Loading conversation…"))
-		return b.String()
+		return b.String(), -1
 	}
 
 	if body := m.md.render(d.Body, w); body != "" {
@@ -341,19 +365,26 @@ func (m Model) detailContent(w int) string {
 		line(sDim.Render("  No description."))
 	}
 
+	newAt := -1
+	markNew := func(isNew bool) {
+		if isNew && newAt < 0 {
+			newAt = strings.Count(b.String(), "\n")
+		}
+	}
 	for _, ev := range d.Timeline {
 		line("")
+		markNew(ev.New)
 		when := ago(ev.At)
 		if when != "now" {
 			when += " ago"
 		}
 		switch ev.Kind {
 		case "comment":
-			line(rule(ev.Author+" commented · "+when, w, sSoft))
+			line(eventRule(ev.Author+" commented · "+when, w, sSoft, ev.New))
 			line(m.md.render(ev.Body, w))
 		case "review":
 			word, st := reviewWord(ev.State)
-			line(rule(ev.Author+" "+word+" · "+when, w, st))
+			line(eventRule(ev.Author+" "+word+" · "+when, w, st, ev.New))
 			if strings.TrimSpace(ev.Body) != "" {
 				line(m.md.render(ev.Body, w))
 			}
@@ -372,7 +403,7 @@ func (m Model) detailContent(w int) string {
 			if ev.Resolved {
 				st = sDim
 			}
-			line(rule(label, w, st))
+			line(eventRule(label, w, st, ev.New))
 			for _, h := range lastLines(ev.DiffHunk, 4) {
 				line(fit(diffLine(h), w))
 			}
@@ -382,7 +413,12 @@ func (m Model) detailContent(w int) string {
 				if rw != "now" {
 					rw += " ago"
 				}
-				line(sDim.Render("  ↳ ") + sText.Render(r.Author) + sDim.Render(" · "+rw))
+				markNew(r.New)
+				tag := ""
+				if r.New {
+					tag = " " + sNew.Render(" new ")
+				}
+				line(sDim.Render("  ↳ ") + sText.Render(r.Author) + sDim.Render(" · "+rw) + tag)
 				line(m.md.render(r.Body, w))
 			}
 		}
@@ -390,7 +426,36 @@ func (m Model) detailContent(w int) string {
 	if len(d.Timeline) == 0 {
 		line(sDim.Render("  No comments yet."))
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return strings.TrimRight(b.String(), "\n"), newAt
+}
+
+// newCount is how many comments, reviews and replies came after your last visit.
+func newCount(d *github.Detail) int {
+	n := 0
+	for _, ev := range d.Timeline {
+		if ev.New {
+			n++
+		}
+		for _, r := range ev.Replies {
+			if r.New {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// rerunHint names the key that re-runs failed checks, when it can run on pr.
+func (m Model) rerunHint(pr github.PR) string {
+	for _, c := range m.cfg.Commands {
+		if c.Action != "rerun" || c.Key == "" {
+			continue
+		}
+		if ok, _ := core.Allowed(c, pr, m.be.Viewer()); ok {
+			return sDim.Render("  ·  ") + sText.Render(c.Key) + sDim.Render(" "+strings.ToLower(c.Name))
+		}
+	}
+	return ""
 }
 
 func plural(n int, word string) string {
@@ -429,12 +494,15 @@ func (m Model) helpContent(w int) string {
 	line := func(s string) { b.WriteString(s + "\n") }
 	key := func(k, what string) string { return sKey.Render(k) + " " + sSoft.Render(what) }
 	line(sBold.Render("Keys"))
-	for _, l := range wrapItems([]string{
+	keys := []string{
 		key("j/k", "move"), key("h/l", "switch pane"), key("tab", "next pane"), key("enter", "open"),
 		key("esc", "back / dismiss"), key("g/G", "top / bottom"), key("ctrl+d/u", "page"),
 		key("1-"+strconv.Itoa(max(1, len(m.filters))), "filters"), key("/", "filter palette"),
-		key("R", "refresh"), key("?", "help"), key("q", "quit"),
-	}, w) {
+	}
+	if m.jumpKeyFree() {
+		keys = append(keys, key("n", "first new comment"))
+	}
+	for _, l := range wrapItems(append(keys, key("R", "refresh"), key("?", "help"), key("q", "quit")), w) {
 		line(l)
 	}
 	if m.cfg.UI.MouseOn() {
@@ -442,7 +510,7 @@ func (m Model) helpContent(w int) string {
 		line(sSoft.Render("the wheel scrolls the pane under it. Hold Option (or Shift) to select text."))
 	}
 	line("")
-	line(sBold.Render("Commands") + sDim.Render("  (run in the PR's folder)"))
+	line(sBold.Render("Commands") + sDim.Render("  (run in the PR's folder, or on GitHub)"))
 	for _, c := range m.cfg.Commands {
 		k := c.Key
 		if k == "" {
@@ -456,6 +524,16 @@ func (m Model) helpContent(w int) string {
 			what = "opens your clone in " + m.cfg.Editor.Default
 		case c.Action == "browse":
 			what = "opens the PR in your browser"
+		case c.Action == "approve":
+			what = "approves the PR on GitHub"
+		case c.Action == "request_changes":
+			what = "asks what should change, then requests changes"
+		case c.Action == "comment":
+			what = "asks for a comment, then posts it on the PR"
+		case c.Action == "automerge":
+			what = "turns on auto-merge (merges now if it is ready)"
+		case c.Action == "rerun":
+			what = "re-runs failed GitHub Actions jobs"
 		case c.Action == "setpath":
 			what = "points this repo at a clone on disk (saved to config)"
 		case c.Run == "" && c.Branch:
@@ -575,6 +653,10 @@ func (m Model) bottomLines() []string {
 			ol = ol[len(ol)-maxOut:]
 		}
 		for _, l := range ol {
+			if m.out.wrap {
+				lines = append(lines, strings.Split(lipgloss.NewStyle().Width(w).PaddingLeft(2).Render(sSoft.Render(cleanOutput(l))), "\n")...)
+				continue
+			}
 			lines = append(lines, fit(sSoft.Render("  "+cleanOutput(l)), w))
 		}
 	}
@@ -707,15 +789,19 @@ type barItem struct {
 
 func (m Model) barItems() []barItem {
 	var items []barItem
+	pr, sel := m.selected()
 	for _, c := range m.cfg.Commands {
 		if !c.OnBar() || c.Key == "" || navKeys[c.Key] {
 			continue
 		}
-		st := sKey
+		st, name := sKey, sSoft
 		if m.plan != nil && m.plan.Title == c.Name {
 			st = sKeyHot
+		} else if ok, _ := core.Allowed(c, pr, m.be.Viewer()); sel && !ok {
+			// Dimmed, not hidden, so the bar keeps its shape: Approve on your own PR.
+			st, name = sKey.Foreground(cDim), sDim
 		}
-		items = append(items, barItem{st.Render(c.Key) + " " + sSoft.Render(strings.ToLower(c.Name)), c.Key})
+		items = append(items, barItem{st.Render(c.Key) + " " + name.Render(strings.ToLower(c.Name)), c.Key})
 	}
 	for _, it := range [][2]string{{"/", "filter"}, {"tab", "pane"}, {"?", "help"}, {"q", "quit"}} {
 		items = append(items, barItem{sKey.Render(it[0]) + " " + sSoft.Render(it[1]), it[0]})

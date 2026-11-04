@@ -52,6 +52,13 @@ pub struct Cmd {
     pub worktree: bool,
 }
 
+impl Cmd {
+    /// Approve, Request changes and Comment: on the desktop the review box does these.
+    pub fn reviews(&self) -> bool {
+        matches!(self.action.as_str(), "approve" | "request_changes" | "comment")
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Pr {
@@ -82,6 +89,8 @@ pub struct Pr {
     pub comments: u64,
     #[serde(rename = "checkState")]
     pub check_state: String,
+    /// Updated since you last opened it.
+    pub unread: bool,
 }
 
 impl Pr {
@@ -120,6 +129,30 @@ pub struct Detail {
     pub commit_list: Vec<Commit>,
     #[serde(deserialize_with = "null_vec")]
     pub files: Vec<ChangedFile>,
+    /// Set while auto-merge is on: GitHub merges the PR once checks and reviews pass.
+    pub auto_merge: Option<AutoMerge>,
+    /// When you opened the PR before this; what came after is marked `new`.
+    pub last_seen: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AutoMerge {
+    /// MERGE, SQUASH or REBASE.
+    pub method: String,
+    pub by: String,
+    pub at: String,
+}
+
+impl AutoMerge {
+    /// The method the way GitHub's merge button names it.
+    pub fn word(&self) -> &'static str {
+        match self.method.as_str() {
+            "SQUASH" => "squash and merge",
+            "REBASE" => "rebase and merge",
+            _ => "merge",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -166,6 +199,26 @@ impl Detail {
         }
         (pass, fail, pend)
     }
+
+    /// Comments, reviews and replies that came after your last visit.
+    pub fn new_count(&self) -> usize {
+        self.timeline.iter().map(|e| e.new as usize + e.replies.iter().filter(|r| r.new).count()).sum()
+    }
+
+    /// Takes the New tags of `shown`, the copy on screen before this one was loaded:
+    /// the core counts each load as a visit, but what was new when you opened the PR
+    /// stays new until you leave it.
+    pub fn keep_new(&mut self, shown: &Detail) {
+        for e in self.timeline.iter_mut() {
+            let Some(o) = shown.timeline.iter().find(|o| o.kind == e.kind && o.author == e.author && o.at == e.at) else {
+                continue;
+            };
+            e.new |= o.new;
+            for r in e.replies.iter_mut() {
+                r.new |= o.replies.iter().any(|x| x.new && x.author == r.author && x.at == r.at);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -180,6 +233,18 @@ pub struct Reviewer {
 pub struct Check {
     pub name: String,
     pub state: String,
+    /// Its log or details page; empty when the CI service gave none.
+    pub url: String,
+    /// Its GitHub Actions run; 0 for other CI services and commit statuses.
+    #[serde(rename = "runId")]
+    pub run_id: i64,
+}
+
+impl Check {
+    /// Its log link, when it is one to open in the browser (http or https only).
+    pub fn log_url(&self) -> Option<&str> {
+        (self.url.starts_with("https://") || self.url.starts_with("http://")).then_some(self.url.as_str())
+    }
 }
 
 pub enum CheckKind {
@@ -219,6 +284,15 @@ pub struct Event {
     pub outdated: bool,
     #[serde(deserialize_with = "null_vec")]
     pub replies: Vec<Reply>,
+    /// After your last visit, and not yours.
+    pub new: bool,
+}
+
+impl Event {
+    /// It, or a reply to it, came after your last visit.
+    pub fn has_new(&self) -> bool {
+        self.new || self.replies.iter().any(|r| r.new)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -227,6 +301,7 @@ pub struct Reply {
     pub author: String,
     pub body: String,
     pub at: String,
+    pub new: bool,
 }
 
 /// Where a PR's commands run, and what state that checkout is in.
@@ -242,6 +317,9 @@ pub struct Folder {
     #[serde(deserialize_with = "null_vec")]
     pub changes: Vec<String>,
     pub rebasing: bool,
+    // Kept for the trip back: the core names a fork PR's branch by it when it runs.
+    #[serde(rename = "ownBranch")]
+    pub own_branch: bool,
 }
 
 /// A command ready to show and run. It goes back to the server unchanged to run.
@@ -252,6 +330,8 @@ pub struct Plan {
     pub pre: String,
     pub script: String,
     pub action: String,
+    /// The text a GitHub write sends (a comment, what should change).
+    pub input: String,
     pub folder: Folder,
     pub confirm: bool,
     pub terminal: bool,
@@ -435,4 +515,78 @@ pub struct DraftThread {
     #[serde(rename = "startSide", skip_serializing_if = "Option::is_none")]
     pub start_side: Option<&'static str>,
     pub body: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Check, Cmd, Detail, Pr};
+
+    #[test]
+    fn checks_read_links_and_runs() {
+        let d: Detail = serde_json::from_str(
+            r#"{"checks": [
+                {"name": "unit", "state": "FAILURE", "url": "https://github.com/a/b/actions/runs/5/job/9", "runId": 5},
+                {"name": "codecov/patch", "state": "FAILURE", "url": "javascript:alert(1)"},
+                {"name": "lint", "state": "SUCCESS"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.checks[0].run_id, 5);
+        assert_eq!(d.checks[0].log_url(), Some("https://github.com/a/b/actions/runs/5/job/9"));
+        assert_eq!(d.checks[1].log_url(), None);
+        // Saved before checks had links: still reads, nothing to open.
+        assert_eq!(d.checks[2].log_url(), None);
+        assert_eq!(Check::default().run_id, 0);
+    }
+
+    #[test]
+    fn auto_merge_and_review_commands() {
+        let d: Detail = serde_json::from_str(r#"{"autoMerge": {"method": "SQUASH", "by": "tnguyen", "at": "2026-11-04T10:00:00Z"}}"#).unwrap();
+        assert_eq!(d.auto_merge.as_ref().map(|a| (a.word(), a.by.as_str())), Some(("squash and merge", "tnguyen")));
+        // Off, or saved before PR Deck knew about auto-merge.
+        assert!(serde_json::from_str::<Detail>("{}").unwrap().auto_merge.is_none());
+
+        let cmds: Vec<Cmd> = serde_json::from_str(r#"[{"name": "Approve", "action": "approve"}, {"name": "Merge when ready", "action": "automerge"}, {"name": "Push", "run": "git push"}]"#).unwrap();
+        let reviews: Vec<&str> = cmds.iter().filter(|c| c.reviews()).map(|c| c.name.as_str()).collect();
+        assert_eq!(reviews, ["Approve"]);
+    }
+
+    #[test]
+    fn unread_and_new() {
+        let p: Pr = serde_json::from_str(r#"{"number": 312, "unread": true}"#).unwrap();
+        assert!(p.unread);
+        let d: Detail = serde_json::from_str(
+            r#"{"lastSeen": "2026-11-04T09:00:00Z", "timeline": [
+                {"kind": "thread", "replies": [{"author": "you"}, {"author": "mlin", "new": true}]},
+                {"kind": "comment", "new": true},
+                {"kind": "review"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.new_count(), 2);
+        assert_eq!(d.timeline.iter().position(|e| e.has_new()), Some(0));
+        // Saved, or sent by an older core, before PR Deck kept track: nothing is new.
+        let old: Detail = serde_json::from_str(r#"{"timeline": [{"kind": "comment"}]}"#).unwrap();
+        assert_eq!((old.new_count(), old.last_seen.as_str()), (0, ""));
+        assert!(!serde_json::from_str::<Pr>("{}").unwrap().unread);
+
+        // Loaded again while on screen: the core has marked it seen, the tags stay,
+        // and what came in since is tagged too.
+        let mut again: Detail = serde_json::from_str(
+            r#"{"timeline": [
+                {"kind": "thread", "at": "1", "replies": [{"author": "you"}, {"author": "mlin", "at": "2"}]},
+                {"kind": "comment", "at": "3"},
+                {"kind": "review"},
+                {"kind": "comment", "author": "rdavis", "at": "4", "new": true}
+            ]}"#,
+        )
+        .unwrap();
+        let mut shown = d.clone();
+        shown.timeline[0].at = "1".into();
+        shown.timeline[0].replies[1].at = "2".into();
+        shown.timeline[1].at = "3".into();
+        again.keep_new(&shown);
+        assert_eq!(again.new_count(), 3);
+        assert!(!again.timeline[0].replies[0].new && !again.timeline[2].new);
+    }
 }

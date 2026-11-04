@@ -7,6 +7,8 @@
 // program, so `cargo test --release` prints their results.
 #![cfg_attr(all(windows, not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
+#[cfg(test)]
+mod contract_tests;
 mod deck;
 mod diff;
 mod layout;
@@ -36,6 +38,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/git-commit-horizontal.svg", include_bytes!("../assets/icons/git-commit-horizontal.svg")),
     ("icons/file-diff.svg", include_bytes!("../assets/icons/file-diff.svg")),
     ("icons/folder-git-2.svg", include_bytes!("../assets/icons/folder-git-2.svg")),
+    ("icons/git-merge.svg", include_bytes!("../assets/icons/git-merge.svg")),
 ];
 
 impl AssetSource for AppAssets {

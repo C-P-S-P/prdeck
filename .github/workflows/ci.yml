@@ -1,0 +1,53 @@
+# Checks every push to main and every pull request: the Go core and terminal app on
+# Linux, the desktop app on a Mac (it only builds there).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to the same branch or PR cancels the run still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "Not formatted (run gofmt -w on them):"
+            echo "$files"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  desktop:
+    runs-on: macos-26 # Apple silicon
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      # build.rs builds the Go core next to the app.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - run: cargo build --locked
+      - run: cargo test --locked

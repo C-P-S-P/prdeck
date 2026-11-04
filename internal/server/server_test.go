@@ -26,6 +26,11 @@ type client struct {
 }
 
 func start(t *testing.T) *client {
+	return startWith(t, func(b *demo.Backend) Backend { return b })
+}
+
+// startWith serves the demo backend as wrap changes it.
+func startWith(t *testing.T, wrap func(*demo.Backend) Backend) *client {
 	t.Helper()
 	cfg, err := config.Load(t.TempDir() + "/none.yaml")
 	if err != nil {
@@ -33,7 +38,7 @@ func start(t *testing.T) *client {
 	}
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	go func() { _ = Serve(demo.New(cfg), Info{Version: "test", Demo: true}, inR, outW); outW.Close() }()
+	go func() { _ = Serve(wrap(demo.New(cfg)), Info{Version: "test", Demo: true}, inR, outW); outW.Close() }()
 	t.Cleanup(func() { inW.Close() })
 	sc := bufio.NewScanner(outR)
 	sc.Buffer(make([]byte, 1<<20), 32<<20)
@@ -305,6 +310,132 @@ func TestReviewWithLineComments(t *testing.T) {
 	}
 }
 
+func TestChecksAndRerun(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	var failed, green github.PR
+	for _, p := range res.PRs {
+		switch {
+		case p.CIFailed() && failed.Number == 0:
+			failed = p
+		case p.CheckState == "SUCCESS" && green.Number == 0:
+			green = p
+		}
+	}
+	if failed.Number == 0 || green.Number == 0 {
+		t.Fatal("demo data changed: need a PR whose CI failed and one whose CI passed")
+	}
+
+	// Each check carries its log link; Actions jobs also carry their run.
+	var d struct {
+		Checks []struct {
+			Name, State, URL string
+			RunID            int64
+		}
+	}
+	_ = json.Unmarshal(c.call("detail", map[string]any{"pr": failed}).Result, &d)
+	var runs, links int
+	for _, ch := range d.Checks {
+		if ch.RunID > 0 {
+			runs++
+		}
+		if strings.HasPrefix(ch.URL, "https://") {
+			links++
+		}
+	}
+	if links != len(d.Checks) || runs == 0 || runs == len(d.Checks) {
+		t.Errorf("checks should link to their logs, some with a run and some without: %+v", d.Checks)
+	}
+
+	if r := c.call("prepare", map[string]any{"command": "Re-run failed", "pr": green}); r.Error == nil {
+		t.Error("re-running a PR whose CI passed should be refused")
+	}
+	r := c.call("prepare", map[string]any{"command": "Re-run failed", "pr": failed})
+	if r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	var plan map[string]any
+	_ = json.Unmarshal(r.Result, &plan)
+	if plan["action"] != "rerun" || !strings.HasPrefix(plan["script"].(string), "gh run rerun ") {
+		t.Fatalf("plan: %v", plan)
+	}
+	r = c.call("execute", map[string]any{"plan": plan})
+	if r.Error != nil {
+		t.Fatal(r.Error.Message)
+	}
+	var out struct {
+		OK     bool
+		Output string
+	}
+	_ = json.Unmarshal(r.Result, &out)
+	if !out.OK || !strings.Contains(out.Output, "Re-running the failed jobs of run ") || !strings.Contains(out.Output, "Skipped codecov/patch") {
+		t.Errorf("re-run: %+v", out)
+	}
+}
+
+func TestReviewCommandsAndMergeWhenReady(t *testing.T) {
+	c := start(t)
+	var res struct{ PRs []github.PR }
+	_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+	prs := map[int]github.PR{}
+	for _, p := range res.PRs {
+		prs[p.Number] = p
+	}
+	run := func(command string, pr github.PR, input string) (out string, err string) {
+		t.Helper()
+		r := c.call("prepare", map[string]any{"command": command, "pr": pr, "input": input})
+		if r.Error != nil {
+			return "", r.Error.Message
+		}
+		var plan map[string]any
+		_ = json.Unmarshal(r.Result, &plan)
+		r = c.call("execute", map[string]any{"plan": plan})
+		var done struct {
+			OK            bool
+			Output, Error string
+		}
+		_ = json.Unmarshal(r.Result, &done)
+		return done.Output, done.Error
+	}
+	detail := func(pr github.PR) github.Detail {
+		var d github.Detail
+		_ = json.Unmarshal(c.call("detail", map[string]any{"pr": pr}).Result, &d)
+		return d
+	}
+	deprecate, reviewMe, ready, flight := prs[2398], prs[4807], prs[312], prs[2410]
+	if deprecate.Author == "you" || reviewMe.Author == "you" || flight.Repo != "upstream/datakit" {
+		t.Fatal("demo data changed: need #2398 and #4807 by others, #312 ready, #2410 in upstream/datakit")
+	}
+
+	// upstream/datakit has no clone: GitHub writes need none.
+	if out, err := run("Approve", deprecate, ""); err != "" || !strings.Contains(out, "Approved upstream/datakit#2398") {
+		t.Fatalf("approve: %q %q", out, err)
+	}
+	if d := detail(deprecate); d.Timeline[len(d.Timeline)-1].State != "APPROVED" {
+		t.Errorf("approval not in the conversation: %+v", d.Timeline)
+	}
+	if _, err := run("Request changes", flight, "x"); !strings.Contains(err, "other people's PRs") {
+		t.Errorf("request changes on your own PR: %q", err)
+	}
+	if out, err := run("Comment", flight, "Rebased; ptal"); err != "" || !strings.Contains(out, "Commented on upstream/datakit#2410") {
+		t.Errorf("comment: %q %q", out, err)
+	}
+
+	if out, err := run("Merge when ready", reviewMe, ""); err != "" || !strings.Contains(out, "Auto-merge is on: GitHub will squash and merge") {
+		t.Fatalf("merge when ready: %q %q", out, err)
+	}
+	if a := detail(reviewMe).AutoMerge; a == nil || a.Method != "SQUASH" || a.By != "you" {
+		t.Errorf("auto-merge not on: %+v", a)
+	}
+	if out, _ := run("Merge when ready", ready, ""); !strings.Contains(out, "Merged northwind/operator#312") {
+		t.Errorf("a ready PR should merge at once: %q", out)
+	}
+	if _, err := run("Merge when ready", flight, ""); !strings.Contains(err, "does not allow auto-merge") {
+		t.Errorf("repo without auto-merge: %q", err)
+	}
+}
+
 // panicky is the demo backend with a search that panics.
 type panicky struct{ *demo.Backend }
 
@@ -401,5 +532,63 @@ func TestReviewOnSeveralLines(t *testing.T) {
 	last := d.Timeline[len(d.Timeline)-1]
 	if last.Kind != "thread" || last.StartLine != 13 || last.StartSide != "LEFT" || last.Line != 15 {
 		t.Errorf("ranged thread: %+v", last)
+	}
+}
+
+func TestUnreadAndNew(t *testing.T) {
+	c := start(t)
+	list := func() map[int]github.PR {
+		var res struct{ PRs []github.PR }
+		_ = json.Unmarshal(c.call("search", map[string]string{"query": "involves:@me"}).Result, &res)
+		by := map[int]github.PR{}
+		for _, p := range res.PRs {
+			by[p.Number] = p
+		}
+		return by
+	}
+	prs := list()
+	if !prs[4821].Unread || prs[4807].Unread {
+		t.Fatalf("demo data changed: #4821 should be unread and #4807 not")
+	}
+
+	// The field names the desktop reads.
+	var raw struct {
+		Detail struct {
+			LastSeen string `json:"lastSeen"`
+			Timeline []struct {
+				Author  string `json:"author"`
+				New     bool   `json:"new"`
+				Replies []struct {
+					Author string `json:"author"`
+					New    bool   `json:"new"`
+				} `json:"replies"`
+			} `json:"timeline"`
+		} `json:"detail"`
+	}
+	_ = json.Unmarshal(c.call("cachedDetail", map[string]any{"pr": prs[4821]}).Result, &raw)
+	var marked []string
+	for _, e := range raw.Detail.Timeline {
+		if e.New {
+			marked = append(marked, e.Author)
+		}
+		for _, r := range e.Replies {
+			if r.New {
+				marked = append(marked, "↳"+r.Author)
+			}
+		}
+	}
+	if raw.Detail.LastSeen == "" || strings.Join(marked, " ") != "↳mlin rdavis" {
+		t.Errorf("new since %q: %v; want mlin's reply and rdavis's comment, not your reply", raw.Detail.LastSeen, marked)
+	}
+
+	if list()[4821].Unread {
+		t.Error("opened: #4821 should be read on the next search")
+	}
+	var again struct{ Detail github.Detail }
+	_ = json.Unmarshal(c.call("cachedDetail", map[string]any{"pr": prs[4821]}).Result, &again)
+	for _, e := range again.Detail.Timeline {
+		if e.New {
+			t.Errorf("opened again: nothing should be new: %+v", e)
+		}
 	}
 }

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 	ghconfig "github.com/cli/go-gh/v2/pkg/config"
@@ -16,7 +18,7 @@ import (
 // Client runs PR Deck's GraphQL queries. Auth comes from gh (`gh auth login`) or GH_TOKEN.
 type Client struct {
 	gql  *api.GraphQLClient
-	rest *api.RESTClient // diffs: GraphQL has no patches
+	rest *api.RESTClient // diffs and re-runs: GraphQL has neither
 
 	imgMu sync.Mutex
 	img   *http.Client // images on GitHub's hosts, with the login; made on first use
@@ -134,6 +136,33 @@ func (n prNode) toPR() PR {
 	return p
 }
 
+// webURL keeps a check's link only when it is a plain http(s) URL. Check links come
+// from CI services, not GitHub, and are printed as terminal hyperlinks and opened in
+// the browser, so anything else (other schemes, control characters) is dropped.
+func webURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || strings.ContainsFunc(s, unicode.IsControl) {
+		return ""
+	}
+	return s
+}
+
+// onlyRunErrors reports GraphQL errors that are all about checks' Actions runs. A
+// token that may not read Actions (a fine-grained GH_TOKEN without that permission)
+// gets those back with the rest of the PR intact; those checks just have no run.
+func onlyRunErrors(err error) bool {
+	var ge *api.GraphQLError
+	if !errors.As(err, &ge) || len(ge.Errors) == 0 {
+		return false
+	}
+	for _, e := range ge.Errors {
+		if len(e.Path) == 0 || e.Path[len(e.Path)-1] != "workflowRun" {
+			return false
+		}
+	}
+	return true
+}
+
 func loginOf(l *login) string {
 	if l == nil || l.Login == "" {
 		return "ghost"
@@ -177,15 +206,17 @@ const detailQuery = `query PRDeckDetail($owner: String!, $name: String!, $number
     pullRequest(number: $number) {
       id number title url body isDraft state updatedAt createdAt
       headRefName baseRefName isCrossRepository headRepositoryOwner { login } mergeable reviewDecision
-      additions deletions changedFiles
+      additions deletions changedFiles mergeStateStatus
+      autoMergeRequest { mergeMethod enabledAt enabledBy { login } }
+      baseRepository { autoMergeAllowed viewerDefaultMergeMethod mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed }
       author { login }
       repository { nameWithOwner }
       comments(last: 50) { totalCount nodes { author { login } body createdAt } }
       commitCount: commits { totalCount }
       commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 60) { nodes {
         __typename
-        ... on CheckRun { name status conclusion }
-        ... on StatusContext { context state }
+        ... on CheckRun { name status conclusion detailsUrl checkSuite { workflowRun { databaseId } } }
+        ... on StatusContext { context state targetUrl }
       } } } } } }
       commitList: commits(last: 100) { nodes { commit {
         oid abbreviatedOid messageHeadline messageBody committedDate additions deletions
@@ -212,7 +243,20 @@ type detailNode struct {
 	Additions    int    `json:"additions"`
 	Deletions    int    `json:"deletions"`
 	ChangedFiles int    `json:"changedFiles"`
-	Comments     struct {
+	MergeState   string `json:"mergeStateStatus"`
+	AutoMerge    *struct {
+		MergeMethod string    `json:"mergeMethod"`
+		EnabledAt   time.Time `json:"enabledAt"`
+		EnabledBy   *login    `json:"enabledBy"`
+	} `json:"autoMergeRequest"`
+	BaseRepository struct {
+		AutoMergeAllowed   bool   `json:"autoMergeAllowed"`
+		DefaultMethod      string `json:"viewerDefaultMergeMethod"`
+		MergeCommitAllowed bool   `json:"mergeCommitAllowed"`
+		SquashMergeAllowed bool   `json:"squashMergeAllowed"`
+		RebaseMergeAllowed bool   `json:"rebaseMergeAllowed"`
+	} `json:"baseRepository"`
+	Comments struct {
 		TotalCount int `json:"totalCount"`
 		Nodes      []struct {
 			Author    *login    `json:"author"`
@@ -234,8 +278,15 @@ type detailNode struct {
 							Name       string `json:"name"`
 							Status     string `json:"status"`
 							Conclusion string `json:"conclusion"`
-							Context    string `json:"context"`
-							State      string `json:"state"`
+							DetailsURL string `json:"detailsUrl"`
+							CheckSuite *struct {
+								WorkflowRun *struct {
+									DatabaseID int64 `json:"databaseId"`
+								} `json:"workflowRun"`
+							} `json:"checkSuite"`
+							Context   string `json:"context"`
+							State     string `json:"state"`
+							TargetURL string `json:"targetUrl"`
 						} `json:"nodes"`
 					} `json:"contexts"`
 				} `json:"statusCheckRollup"`
@@ -328,7 +379,7 @@ func (c *Client) Detail(ctx context.Context, repo string, number int) (*Detail, 
 		} `json:"repository"`
 	}
 	vars := map[string]any{"owner": owner, "name": name, "number": number}
-	if err := c.gql.DoWithContext(ctx, detailQuery, vars, &resp); err != nil {
+	if err := c.gql.DoWithContext(ctx, detailQuery, vars, &resp); err != nil && !onlyRunErrors(err) {
 		return nil, err
 	}
 	n := resp.Repository.PullRequest
@@ -344,6 +395,12 @@ func (n *detailNode) toDetail() *Detail {
 	d.Comments = n.Comments.TotalCount
 	d.Body, d.Additions, d.Deletions, d.ChangedFiles = n.Body, n.Additions, n.Deletions, n.ChangedFiles
 	d.Commits = n.CommitCount.TotalCount
+	r := n.BaseRepository
+	d.MergeStatus, d.AutoMergeAllowed = n.MergeState, r.AutoMergeAllowed
+	d.MergeMethods = MergeMethods(r.DefaultMethod, r.MergeCommitAllowed, r.SquashMergeAllowed, r.RebaseMergeAllowed)
+	if a := n.AutoMerge; a != nil {
+		d.AutoMerge = &AutoMerge{Method: a.MergeMethod, By: loginOf(a.EnabledBy), At: a.EnabledAt}
+	}
 	for _, l := range n.Labels.Nodes {
 		d.Labels = append(d.Labels, l.Name)
 	}
@@ -374,9 +431,13 @@ func (n *detailNode) toDetail() *Detail {
 					if st == "" {
 						st = "PENDING"
 					}
-					d.Checks = append(d.Checks, Check{Name: c.Name, State: st})
+					ch := Check{Name: c.Name, State: st, URL: webURL(c.DetailsURL)}
+					if c.CheckSuite != nil && c.CheckSuite.WorkflowRun != nil {
+						ch.RunID = c.CheckSuite.WorkflowRun.DatabaseID
+					}
+					d.Checks = append(d.Checks, ch)
 				} else {
-					d.Checks = append(d.Checks, Check{Name: c.Context, State: c.State})
+					d.Checks = append(d.Checks, Check{Name: c.Context, State: c.State, URL: webURL(c.TargetURL)})
 				}
 			}
 		}

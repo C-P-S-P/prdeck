@@ -85,7 +85,13 @@ func paint(text string, s style, links bool) string {
 		out = sgr + text + "\x1b[0m"
 	}
 	if links && s.link != "" {
-		out = "\x1b]8;;" + s.link + "\x1b\\" + out + "\x1b]8;;\x1b\\"
+		out = Link(s.link, out)
 	}
 	return out
+}
+
+// Link makes text (which may be styled) a terminal hyperlink to url (OSC 8).
+// Terminals without hyperlinks show the text alone.
+func Link(url, text string) string {
+	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
 }

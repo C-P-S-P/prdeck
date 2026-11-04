@@ -26,6 +26,8 @@ type PR struct {
 	Repo           string    `json:"repo"` // owner/name
 	Comments       int       `json:"comments"`
 	CheckState     string    `json:"checkState"` // SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, ""
+	// Unread: updated since you last opened it in PR Deck. The core sets it, not GitHub.
+	Unread bool `json:"unread"`
 }
 
 // Key identifies a PR across repos.
@@ -52,6 +54,42 @@ type Detail struct {
 	Timeline     []Event    `json:"timeline"`
 	CommitList   []Commit   `json:"commitList"` // oldest first, up to the last 100
 	Files        []File     `json:"files"`      // up to the first 100
+
+	// Merging: GitHub's merge state (CLEAN, BLOCKED, BEHIND, UNSTABLE, DIRTY,
+	// HAS_HOOKS, DRAFT, UNKNOWN), auto-merge when it is on, and how the repo merges.
+	MergeStatus      string     `json:"mergeStatus,omitempty"`
+	AutoMerge        *AutoMerge `json:"autoMerge,omitempty"`
+	AutoMergeAllowed bool       `json:"autoMergeAllowed,omitempty"`
+	MergeMethods     []string   `json:"mergeMethods,omitempty"` // allowed ones (MERGE, SQUASH, REBASE), the viewer's default first
+
+	// LastSeen is when you opened the PR before this; what came after it is marked New.
+	LastSeen time.Time `json:"lastSeen,omitzero"`
+}
+
+// AutoMerge is turned on for a PR: GitHub merges it once checks and reviews pass.
+type AutoMerge struct {
+	Method string    `json:"method"` // MERGE, SQUASH or REBASE
+	By     string    `json:"by"`
+	At     time.Time `json:"at"`
+}
+
+// MergeMethods lists the methods a repo allows, the default one first: the viewer's
+// last used method, which GitHub's merge button also starts with.
+func MergeMethods(def string, merge, squash, rebase bool) []string {
+	var out []string
+	for _, m := range []struct {
+		name string
+		ok   bool
+	}{{"MERGE", merge}, {"SQUASH", squash}, {"REBASE", rebase}} {
+		switch {
+		case !m.ok:
+		case m.name == def:
+			out = append([]string{m.name}, out...)
+		default:
+			out = append(out, m.name)
+		}
+	}
+	return out
 }
 
 // Commit is one commit on the PR branch.
@@ -82,7 +120,24 @@ type Reviewer struct {
 
 type Check struct {
 	Name  string `json:"name"`
-	State string `json:"state"` // SUCCESS, FAILURE, PENDING, NEUTRAL, SKIPPED, CANCELLED…
+	State string `json:"state"`           // SUCCESS, FAILURE, PENDING, NEUTRAL, SKIPPED, CANCELLED…
+	URL   string `json:"url,omitempty"`   // its log or details page (http or https only)
+	RunID int64  `json:"runId,omitempty"` // its GitHub Actions run; 0 for other CI and commit statuses
+}
+
+// Failed reports a check that failed, errored, timed out or was cancelled.
+func (c Check) Failed() bool {
+	switch c.State {
+	case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+		return true
+	}
+	return false
+}
+
+// FailedRun is a GitHub Actions run with failed jobs, and the checks that failed in it.
+type FailedRun struct {
+	ID     int64
+	Checks []string
 }
 
 // Event is one entry in the conversation: a comment, a review, or a code thread.
@@ -103,27 +158,90 @@ type Event struct {
 	Resolved  bool    `json:"resolved"`
 	Outdated  bool    `json:"outdated"`
 	Replies   []Reply `json:"replies"`
+	New       bool    `json:"new"` // after your last visit, and not yours
 }
 
 type Reply struct {
 	Author string    `json:"author"`
 	Body   string    `json:"body"`
 	At     time.Time `json:"at"`
+	New    bool      `json:"new"`
+}
+
+// SinceSeen is d as viewer sees it, who last opened the PR at seen: comments, reviews
+// and replies from others after that are marked New. It copies what it marks, so a
+// saved detail never changes.
+func (d *Detail) SinceSeen(seen time.Time, viewer string) *Detail {
+	isNew := func(at time.Time, author string) bool {
+		return !seen.IsZero() && at.After(seen) && !strings.EqualFold(author, viewer)
+	}
+	c := *d
+	c.LastSeen = seen
+	c.Timeline = make([]Event, len(d.Timeline))
+	for i, e := range d.Timeline {
+		e.New = isNew(e.At, e.Author)
+		e.Replies = append([]Reply(nil), e.Replies...)
+		for j, r := range e.Replies {
+			e.Replies[j].New = isNew(r.At, r.Author)
+		}
+		c.Timeline[i] = e
+	}
+	return &c
+}
+
+// Latest is the newest thing d shows: its update time, or a comment, review or reply
+// dated after it. Marking the PR seen as of Latest means nothing on screen stays new.
+func (d *Detail) Latest() time.Time {
+	t := d.UpdatedAt
+	for _, e := range d.Timeline {
+		if e.At.After(t) {
+			t = e.At
+		}
+		for _, r := range e.Replies {
+			if r.At.After(t) {
+				t = r.At
+			}
+		}
+	}
+	return t
 }
 
 // CheckCounts returns passed, failed and pending check counts.
 func (d *Detail) CheckCounts() (pass, fail, pend int) {
 	for _, c := range d.Checks {
-		switch c.State {
-		case "SUCCESS", "NEUTRAL", "SKIPPED":
+		switch {
+		case c.State == "SUCCESS" || c.State == "NEUTRAL" || c.State == "SKIPPED":
 			pass++
-		case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+		case c.Failed():
 			fail++
 		default:
 			pend++
 		}
 	}
 	return
+}
+
+// FailedRuns groups the failed checks by GitHub Actions run, in the order they are
+// listed. Failed checks that are not Actions jobs (other CI services, commit
+// statuses) come back in other: they can only be re-run from their own page.
+func (d *Detail) FailedRuns() (runs []FailedRun, other []string) {
+	at := map[int64]int{}
+	for _, c := range d.Checks {
+		switch {
+		case !c.Failed():
+		case c.RunID == 0:
+			other = append(other, c.Name)
+		default:
+			i, ok := at[c.RunID]
+			if !ok {
+				i = len(runs)
+				at[c.RunID] = i
+				runs = append(runs, FailedRun{ID: c.RunID})
+			}
+			runs[i].Checks = append(runs[i].Checks, c.Name)
+		}
+	}
+	return runs, other
 }
 
 func sortEvents(ev []Event) {
