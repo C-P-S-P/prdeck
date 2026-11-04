@@ -3,8 +3,9 @@
 //!
 //! Run with sample data: `cargo run -- --demo`
 
-// No console window behind the release app on Windows.
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// No console window behind the release app on Windows. The tests stay a console
+// program, so `cargo test --release` prints their results.
+#![cfg_attr(all(windows, not(debug_assertions), not(test)), windows_subsystem = "windows")]
 
 mod deck;
 mod diff;
